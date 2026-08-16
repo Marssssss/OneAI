@@ -1,0 +1,124 @@
+/* OneAI design tokens — the `--oneai-*` CSS variable layer.
+ *
+ * Structured after dsh's `design-platform.css` (a complete token palette with
+ * light/dark redefinition on a body attribute) but with OneAI's own brand
+ * color and naming. Components MUST style only through these tokens — never
+ * hardcode colors — so theme switching is a single attribute flip.
+ */
+
+:root {
+  /* Brand + semantics (light). */
+  --oneai-brand-500: #4f46e5; /* indigo */
+  --oneai-brand-400: #6366f1;
+  --oneai-brand-600: #4338ca;
+
+  --oneai-bg: #ffffff;
+  --oneai-bg-subtle: #f7f7f8;
+  --oneai-bg-elevated: #ffffff;
+  --oneai-bg-overlay: rgba(0, 0, 0, 0.45);
+
+  --oneai-border: #e5e5e7;
+  --oneai-border-strong: #d1d1d6;
+
+  --oneai-text: #1c1c1e;
+  --oneai-text-secondary: #6b6b70;
+  --oneai-text-tertiary: #9a9aa1;
+
+  --oneai-accent: var(--oneai-brand-500);
+  --oneai-accent-fg: #ffffff;
+
+  --oneai-amber: #b45309;
+  --oneai-amber-bg: #fef3c7;
+  --oneai-green: #15803d;
+  --oneai-green-bg: #dcfce7;
+  --oneai-red: #b91c1c;
+  --oneai-red-bg: #fee2e2;
+
+  /* Geometry. */
+  --oneai-radius-sm: 6px;
+  --oneai-radius: 10px;
+  --oneai-radius-lg: 14px;
+  --oneai-gap: 8px;
+  --oneai-gap-lg: 16px;
+
+  --oneai-sidebar-min: 240px;
+  --oneai-sidebar-max: 420px;
+  --oneai-sidebar-collapsed: 56px;
+  --oneai-details-min: 300px;
+  --oneai-details-max: 520px;
+  --oneai-center-min: 640px;
+
+  --oneai-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC',
+    sans-serif;
+  /* Code font deliberately drops the bare `monospace` tail so Windows CJK
+   * doesn't fall back to SimSun (mirrors dsh's choice). */
+  --oneai-font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas,
+    'Courier New', monospace;
+
+  --oneai-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --oneai-dur-fast: 0.1s;
+  --oneai-dur: 0.2s;
+  --oneai-dur-slow: 0.3s;
+}
+
+body[data-oneai-theme='dark'] {
+  --oneai-brand-500: #818cf8;
+  --oneai-brand-400: #a5b4fc;
+  --oneai-brand-600: #6366f1;
+
+  --oneai-bg: #1a1a1c;
+  --oneai-bg-subtle: #212123;
+  --oneai-bg-elevated: #2a2a2e;
+  --oneai-bg-overlay: rgba(0, 0, 0, 0.6);
+
+  --oneai-border: #343438;
+  --oneai-border-strong: #44444a;
+
+  --oneai-text: #e8e8ea;
+  --oneai-text-secondary: #a0a0a6;
+  --oneai-text-tertiary: #6b6b70;
+
+  --oneai-amber: #fbbf24;
+  --oneai-amber-bg: #422006;
+  --oneai-green: #4ade80;
+  --oneai-green-bg: #052e16;
+  --oneai-red: #f87171;
+  --oneai-red-bg: #450a0a;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--oneai-bg);
+  color: var(--oneai-text);
+  font-family: var(--oneai-font-family);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Scrollbar — hide by default, linger on hover (mirrors dsh sidebar). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 6px;
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+*:hover > ::-webkit-scrollbar-thumb,
+:hover::-webkit-scrollbar-thumb {
+  background: var(--oneai-border-strong);
+}

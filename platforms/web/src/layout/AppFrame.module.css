@@ -1,0 +1,53 @@
+.frame {
+  display: grid;
+  /* One row pinned to the viewport — minmax(0, 1fr) lets the row shrink
+   * below its content so a tall chat scrolls INSIDE the conversation area
+   * instead of growing the grid row and pushing the composer off-screen. */
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  width: 100%;
+  background: var(--oneai-bg);
+  overflow: hidden;
+}
+
+.sidebar {
+  height: 100%;
+  background: var(--oneai-bg-subtle);
+  border-right: 1px solid var(--oneai-border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sidebar.collapsed {
+  /* rail width handled by the grid column; just restyle the content */
+}
+
+.gutter {
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+.gutter:hover {
+  background: var(--oneai-border);
+}
+
+.center {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--oneai-bg);
+}
+
+.details {
+  height: 100%;
+  background: var(--oneai-bg-subtle);
+  border-left: 1px solid var(--oneai-border);
+  overflow: hidden;
+  min-width: 0;
+}

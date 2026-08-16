@@ -1,0 +1,92 @@
+/* Global markdown styles for the `.oneai-md` wrapper rendered by
+ * conversation/Markdown.tsx. Token-driven so it tracks light/dark. */
+
+.oneai-md {
+  font-size: 14px;
+  line-height: 1.6;
+}
+.oneai-md > *:first-child {
+  margin-top: 0;
+}
+.oneai-md > *:last-child {
+  margin-bottom: 0;
+}
+.oneai-md p {
+  margin: 0.5em 0;
+}
+.oneai-md h1,
+.oneai-md h2,
+.oneai-md h3,
+.oneai-md h4 {
+  margin: 1em 0 0.4em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.oneai-md h1 {
+  font-size: 1.5em;
+}
+.oneai-md h2 {
+  font-size: 1.3em;
+}
+.oneai-md h3 {
+  font-size: 1.15em;
+}
+.oneai-md ul,
+.oneai-md ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.oneai-md li {
+  margin: 0.2em 0;
+}
+.oneai-md a {
+  color: var(--oneai-brand-500);
+  text-decoration: none;
+}
+.oneai-md a:hover {
+  text-decoration: underline;
+}
+.oneai-md code {
+  font-family: var(--oneai-font-mono);
+  font-size: 0.9em;
+  background: var(--oneai-bg-subtle);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+.oneai-md pre {
+  margin: 0.6em 0;
+  padding: 12px 14px;
+  background: #0d1117;
+  border-radius: var(--oneai-radius-sm);
+  overflow-x: auto;
+  border: 1px solid var(--oneai-border);
+}
+.oneai-md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.oneai-md blockquote {
+  margin: 0.6em 0;
+  padding-left: 1em;
+  border-left: 3px solid var(--oneai-border-strong);
+  color: var(--oneai-text-secondary);
+}
+.oneai-md table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  display: block;
+  overflow-x: auto;
+}
+.oneai-md th,
+.oneai-md td {
+  border: 1px solid var(--oneai-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.oneai-md hr {
+  border: none;
+  border-top: 1px solid var(--oneai-border);
+  margin: 1em 0;
+}

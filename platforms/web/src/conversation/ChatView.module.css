@@ -1,0 +1,130 @@
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--oneai-gap-lg);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap-lg);
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  width: 100%;
+}
+
+.bubble {
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--oneai-radius);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.userBubble {
+  margin-left: auto;
+  max-width: 80%;
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  border-bottom-right-radius: 4px;
+}
+
+.assistantBubble {
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  border-bottom-left-radius: 4px;
+  width: 100%;
+}
+
+.placeholder {
+  color: var(--oneai-text-tertiary);
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1.1em;
+  margin-left: 2px;
+  background: var(--oneai-text-secondary);
+  vertical-align: text-bottom;
+  animation: oneai-blink 1s steps(2, start) infinite;
+}
+@keyframes oneai-blink {
+  to {
+    opacity: 0;
+  }
+}
+
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius);
+  border-bottom-left-radius: 4px;
+}
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--oneai-text-tertiary);
+  animation: oneai-typing 1.4s infinite ease-in-out;
+}
+.typing span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.typing span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes oneai-typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.thinking {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--oneai-bg-subtle);
+  border-left: 3px solid var(--oneai-text-tertiary);
+  border-radius: var(--oneai-radius-sm);
+  color: var(--oneai-text-secondary);
+  font-size: 13px;
+}
+.thinkingLabel {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+  margin-bottom: 4px;
+}
+.thinkingText {
+  white-space: pre-wrap;
+  font-family: var(--oneai-font-mono);
+}
+
+.errorBubble {
+  max-width: 100%;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--oneai-radius);
+  background: var(--oneai-red-bg);
+  color: var(--oneai-red);
+  border: 1px solid var(--oneai-red);
+}

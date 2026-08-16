@@ -1,0 +1,103 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  padding: var(--oneai-gap) var(--oneai-gap-lg);
+  flex-shrink: 0;
+}
+
+.logo {
+  font-size: 16px;
+  color: var(--oneai-brand-500);
+}
+
+.newBtn {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  border-radius: var(--oneai-radius-sm);
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    border-color var(--oneai-dur) var(--oneai-ease);
+}
+.newBtn:hover {
+  background: var(--oneai-bg-subtle);
+  border-color: var(--oneai-brand-500);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 var(--oneai-gap) var(--oneai-gap);
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap);
+}
+
+.sectionLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--oneai-text-tertiary);
+  padding: 0 6px;
+  margin-top: var(--oneai-gap);
+}
+.sectionLabel:first-child {
+  margin-top: 0;
+}
+
+.scenarioPlaceholder {
+  height: 64px;
+  border: 1px dashed var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--oneai-text-tertiary);
+  font-size: 12px;
+}
+.comingSoon {
+  font-family: var(--oneai-font-mono);
+  letter-spacing: 0.1em;
+}
+
+.footer {
+  display: flex;
+  gap: var(--oneai-gap);
+  padding: var(--oneai-gap) var(--oneai-gap-lg);
+  border-top: 1px solid var(--oneai-border);
+  flex-shrink: 0;
+}
+
+.footBtn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--oneai-border);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text-secondary);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease);
+}
+.footBtn:hover {
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text);
+}

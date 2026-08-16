@@ -1,0 +1,54 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-secondary);
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  text-align: left;
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease);
+}
+.item:hover {
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}
+.active {
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  font-weight: 500;
+}
+
+.title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  flex-shrink: 0;
+}
+
+.empty {
+  padding: var(--oneai-gap-lg);
+  color: var(--oneai-text-tertiary);
+  font-size: 13px;
+  text-align: center;
+}
