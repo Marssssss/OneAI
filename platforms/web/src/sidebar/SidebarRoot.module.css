@@ -7,19 +7,40 @@
 
 .header {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--oneai-gap);
-  padding: var(--oneai-gap) var(--oneai-gap-lg);
+  padding: var(--oneai-gap-lg) var(--oneai-gap-lg) var(--oneai-gap);
   flex-shrink: 0;
 }
 
-.logo {
-  font-size: 17px;
-  color: var(--oneai-brand-500);
+/* Brand lockup: graphic mark + alpha wordmark, side by side, above the
+ * New-session button. Scaled by height so the square pic and the wide alpha
+ * keep their native aspect ratio at a shared cap height. */
+.brandMark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.brandPic {
+  height: 34px;
+  width: auto;
+  border-radius: 8px;
+  user-select: none;
+  pointer-events: none;
+}
+
+.brandAlpha {
+  height: 22px;
+  width: auto;
+  user-select: none;
+  pointer-events: none;
 }
 
 .newBtn {
-  flex: 1;
+  width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--oneai-border-strong);
   background: var(--oneai-bg-elevated);

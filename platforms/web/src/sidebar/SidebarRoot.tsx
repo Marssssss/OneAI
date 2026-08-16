@@ -54,10 +54,33 @@ export function SidebarRoot({
   onOpenSettings,
 }: SidebarRootProps): ReactNode {
   const { t, locale } = useLocale()
+  // Brand mark is a single B/W transparent PNG (the light-mode asset). Dark
+  // mode reuses the same image with `filter: invert(1)` — since the mark is
+  // pure black/white, inversion flips it cleanly and transparent areas stay
+  // transparent. This avoids the separate dark-mode assets, which render
+  // incorrectly.
+  const brandPicSrc = '/brand/ic_pic_white.png'
+  const brandAlphaSrc = '/brand/ic_alpha_white.png'
+  const brandFilter = theme === 'dark' ? 'invert(1)' : 'none'
   return (
     <div className={styles.root}>
       <div className={styles.header}>
-        <span className={styles.logo}>◆</span>
+        <div className={styles.brandMark}>
+          <img
+            className={styles.brandPic}
+            src={brandPicSrc}
+            alt="OneAI"
+            draggable={false}
+            style={{ filter: brandFilter }}
+          />
+          <img
+            className={styles.brandAlpha}
+            src={brandAlphaSrc}
+            alt="OneAI"
+            draggable={false}
+            style={{ filter: brandFilter }}
+          />
+        </div>
         <button className={styles.newBtn} onClick={onNewSession}>
           {t('sidebar.new')}
         </button>

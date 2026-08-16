@@ -90,6 +90,28 @@ export function ConversationRoot({
         ? ''
         : (sessionTitle ?? '')
 
+  // Shared Composer element — rendered inline inside the welcome group on the
+  // empty state (so the input sits directly under the brand + slogan, not
+  // pinned to the viewport bottom) and in the usual bottom slot otherwise.
+  // Only one branch mounts at a time, so reusing the element is safe.
+  const composerEl = (
+    <Composer
+      placeholder={t('composer.placeholder')}
+      sendLabel={t('composer.send')}
+      stopLabel={t('composer.stop')}
+      turnActive={snapshot.turnActive}
+      paradigm={snapshot.paradigm}
+      mode={mode}
+      metrics={snapshot.metrics}
+      settingsStore={settingsStore}
+      attachmentsEnabled={snapshot.currentScenario === null}
+      onSend={onSend}
+      onStop={onStop}
+      onCycleMode={onCycleMode}
+      onSlash={onSlash}
+    />
+  )
+
   return (
     <div className={styles.root}>
       <header className={styles.header}>
@@ -112,8 +134,17 @@ export function ConversationRoot({
         )}
         {empty ? (
           <div className={styles.empty}>
-            <div className={styles.emptyTitle}>{t('chat.empty.title')}</div>
-            <div className={styles.emptySubtitle}>{t('chat.empty.subtitle')}</div>
+            <div className={styles.emptyBrand}>
+              <img
+                className={styles.emptyBrandPic}
+                src="/brand/ic_pic_white.png"
+                alt="OneAI"
+                draggable={false}
+                style={{ filter: theme === 'dark' ? 'invert(1)' : 'none' }}
+              />
+              <div className={styles.emptySlogan}>{t('chat.empty.slogan')}</div>
+            </div>
+            <div className={styles.emptyComposer}>{composerEl}</div>
             {heroChips.length > 0 && (
               <div className={styles.heroChips}>
                 {heroChips.map((e) => (
@@ -158,23 +189,7 @@ export function ConversationRoot({
 
       <GoalBar working={snapshot.working} />
 
-      <div className={styles.composer}>
-        <Composer
-          placeholder={t('composer.placeholder')}
-          sendLabel={t('composer.send')}
-          stopLabel={t('composer.stop')}
-          turnActive={snapshot.turnActive}
-          paradigm={snapshot.paradigm}
-          mode={mode}
-          metrics={snapshot.metrics}
-          settingsStore={settingsStore}
-          attachmentsEnabled={snapshot.currentScenario === null}
-          onSend={onSend}
-          onStop={onStop}
-          onCycleMode={onCycleMode}
-          onSlash={onSlash}
-        />
-      </div>
+      {!empty && <div className={styles.composer}>{composerEl}</div>}
     </div>
   )
 }

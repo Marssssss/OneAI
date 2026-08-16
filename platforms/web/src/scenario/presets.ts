@@ -19,7 +19,7 @@ const ZH_PRESETS: BusScenario[] = [
   {
     id: 'preset-interview',
     name: '面试演练',
-    icon: '◆',
+    icon: '🎙️',
     members: [
       {
         id: 'interviewer',
@@ -70,7 +70,7 @@ const ZH_PRESETS: BusScenario[] = [
   {
     id: 'preset-language-partner',
     name: '语言伙伴',
-    icon: '◯',
+    icon: '💬',
     members: [
       {
         id: 'partner',
@@ -219,7 +219,7 @@ const EN_PRESETS: BusScenario[] = [
   {
     id: 'preset-interview',
     name: 'Interview Practice',
-    icon: '◆',
+    icon: '🎙️',
     members: [
       {
         id: 'interviewer',
@@ -271,7 +271,7 @@ const EN_PRESETS: BusScenario[] = [
   {
     id: 'preset-language-partner',
     name: 'Language Partner',
-    icon: '◯',
+    icon: '💬',
     members: [
       {
         id: 'partner',

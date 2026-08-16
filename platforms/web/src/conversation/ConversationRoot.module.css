@@ -85,16 +85,42 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--oneai-gap);
+  gap: var(--oneai-gap-lg);
+  /* Bias the centered welcome group slightly above the viewport's vertical
+   * midline so the brand mark reads as the anchor and the composer settles
+   * below it, rather than dead-center (which feels low). */
+  padding-bottom: 10vh;
   color: var(--oneai-text-secondary);
 }
-.emptyTitle {
-  font-size: 19px;
+
+/* Welcome brand group: graphic mark + slogan. The pic carries the brand,
+ * the slogan is set in a light display weight — kept tight so the whole
+ * welcome reads as one compact anchor above the composer. */
+.emptyBrand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.emptyBrandPic {
+  height: 84px;
+  width: auto;
+  border-radius: 18px;
+  user-select: none;
+  pointer-events: none;
+}
+.emptySlogan {
+  font-size: 20px;
   font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--oneai-text);
 }
-.emptySubtitle {
-  font-size: 15px;
+
+/* Welcome composer — same control as the bottom slot, but width-constrained
+ * and centered so it reads as part of the brand group, not edge-to-edge. */
+.emptyComposer {
+  width: 100%;
+  max-width: 640px;
 }
 
 .heroChips {
