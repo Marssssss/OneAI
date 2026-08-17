@@ -222,13 +222,47 @@
 .feedbackRow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-top: 4px;
   padding: 0 4px;
-  opacity: 0.6;
 }
-.feedbackRow:hover {
+
+/* 👍/👎 stay a secondary, hover-revealed affordance (the row's dim→bright
+ * fade lives here, not on the row, so the CopyButton sibling can stay always
+ * visible). */
+.feedbackGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.6;
+  transition: opacity 0.12s;
+}
+.feedbackRow:hover .feedbackGroup {
   opacity: 1;
+}
+
+/* CopyButton — 常驻 (persistent): always full opacity, icon-only, no fill —
+ * a borderless, backgroundless icon button (mirrors the 👍/👎 affordance
+ * shape) that stays visible regardless of the row's hover state. */
+.copyBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  cursor: pointer;
+}
+.copyBtn:hover {
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text-primary);
+}
+.copyBtn:active {
+  transform: translateY(1px);
 }
 
 .feedbackBtn {

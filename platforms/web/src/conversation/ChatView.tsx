@@ -290,6 +290,17 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
     node.turnId !== null &&
     node.turnId.length > 0
   const currentKind = node.feedback?.kind
+  // Copy is a client-side utility with no turn-id dependency, so it surfaces on
+  // every model answer — the live turn's final text (`isTurnFinal`) AND every
+  // reloaded/historical assistant message (`turnId === null`, where each stored
+  // assistant block is itself a discrete turn's terminal answer). It is gated to
+  // `state === 'done'` so the affordance appears only once the answer settles,
+  // not mid-stream. Intermediate live step outputs (non-final, turnId !== null)
+  // are excluded.
+  const showCopy =
+    !empty &&
+    node.state === 'done' &&
+    (isTurnFinal || node.turnId === null || node.turnId.length === 0)
   return (
     <div className={styles.row}>
       {showSpeaker && <SpeakerHeader meta={speaker} />}
@@ -304,36 +315,148 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
       {node.deliverables !== undefined && node.deliverables.length > 0 && (
         <DeliverableStrip artifacts={node.deliverables} onOpenImage={onOpenImage} />
       )}
-      {feedbackDone && (
+      {(feedbackDone || showCopy) && (
         <div className={styles.feedbackRow}>
-          <button
-            className={`${styles.feedbackBtn} ${
-              currentKind === 'up' ? styles.feedbackOn : ''
-            } ${node.feedbackPending ? styles.feedbackPending : ''}`}
-            onClick={() => onSubmitFeedback(node.id, 'up')}
-            aria-label="thumbs up"
-            disabled={node.feedbackPending === true}
-          >
-            👍
-          </button>
-          <button
-            className={`${styles.feedbackBtn} ${
-              currentKind === 'down' ? styles.feedbackOn : ''
-            } ${node.feedbackPending ? styles.feedbackPending : ''}`}
-            onClick={() => onSubmitFeedback(node.id, 'down')}
-            aria-label="thumbs down"
-            disabled={node.feedbackPending === true}
-          >
-            👎
-          </button>
-          {node.feedback?.text !== undefined && (
-            <span className={styles.feedbackNote}>{node.feedback.text}</span>
+          {showCopy && (
+            <CopyButton
+              text={node.text}
+              copyLabel={t('chat.copy')}
+              copiedLabel={t('chat.copied')}
+            />
+          )}
+          {feedbackDone && (
+            <div className={styles.feedbackGroup}>
+              <button
+                className={`${styles.feedbackBtn} ${
+                  currentKind === 'up' ? styles.feedbackOn : ''
+                } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+                onClick={() => onSubmitFeedback(node.id, 'up')}
+                aria-label="thumbs up"
+                disabled={node.feedbackPending === true}
+              >
+                👍
+              </button>
+              <button
+                className={`${styles.feedbackBtn} ${
+                  currentKind === 'down' ? styles.feedbackOn : ''
+                } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+                onClick={() => onSubmitFeedback(node.id, 'down')}
+                aria-label="thumbs down"
+                disabled={node.feedbackPending === true}
+              >
+                👎
+              </button>
+              {node.feedback?.text !== undefined && (
+                <span className={styles.feedbackNote}>{node.feedback.text}</span>
+              )}
+            </div>
           )}
         </div>
       )}
     </div>
   )
 })
+
+// CopyButton — a persistent copy affordance for a model answer's text. Lives
+// on the actions row at full opacity (does NOT fade with the 👍/👎 group) so the
+// user always sees it. `copied` is a local 1.5s flash state scoped to this
+// memoized component — toggling it re-renders only this button, not the seat.
+// Uses the async Clipboard API with a hidden-textarea `execCommand` fallback for
+// non-secure contexts / older browsers.
+const CopyButton = memo(function CopyButton({
+  text,
+  copyLabel,
+  copiedLabel,
+}: {
+  text: string
+  copyLabel: string
+  copiedLabel: string
+}): ReactNode {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+    },
+    [],
+  )
+
+  const onClick = useCallback(async () => {
+    try {
+      if (navigator.clipboard?.writeText !== undefined) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        fallbackCopy(text)
+      }
+    } catch {
+      fallbackCopy(text)
+    }
+    setCopied(true)
+    if (timer.current !== null) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setCopied(false), 1500)
+  }, [text])
+
+  return (
+    <button
+      type="button"
+      className={styles.copyBtn}
+      onClick={onClick}
+      aria-label={copied ? copiedLabel : copyLabel}
+      title={copied ? copiedLabel : copyLabel}
+    >
+      {copied ? (
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden focusable="false">
+          <path
+            d="M3.5 8.5 L6.5 11.5 L12.5 4.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden focusable="false">
+          <rect
+            x="5"
+            y="1.5"
+            width="7"
+            height="3"
+            rx="1"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+          <path
+            d="M4 4.5 H12 V14.5 H4 Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </button>
+  )
+})
+
+/** Hidden-textarea copy fallback for environments without the async Clipboard API
+ * (non-HTTPS pages, sandboxed iframes without `allow-scripts`). Best-effort. */
+function fallbackCopy(text: string): void {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    /* noop — clipboard unavailable */
+  }
+  document.body.removeChild(ta)
+}
 
 function SpeakerHeader({
   meta,
