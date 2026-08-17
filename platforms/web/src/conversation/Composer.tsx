@@ -14,7 +14,7 @@
 //  - Slash commands: typing `/` surfaces a candidate popup; Enter on a known
 //    `/command` dispatches it instead of sending a message.
 
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useLayoutEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BusParadigmKind, ContentBlock } from '../rpc/types'
 import type { SessionMetrics } from '../store/projection'
@@ -163,6 +163,26 @@ export function Composer({
   const [images, setImages] = useState<StagedImage[]>([])
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const taRef = useRef<HTMLTextAreaElement>(null)
+
+  /** Auto-grow the textarea with its content, capping at MAX_ROWS visible lines
+   *  (then it scrolls internally). Re-runs on every text/attachment mutation
+   *  and on mount. Reads computed line-height + vertical padding from the
+   *  live element so it stays correct if the theme/font-size changes — no
+   *  hardcoded px. */
+  const MAX_ROWS = 5
+  useLayoutEffect(() => {
+    const ta = taRef.current
+    if (ta === null) return
+    ta.style.height = 'auto'
+    const cs = getComputedStyle(ta)
+    const lineH = parseFloat(cs.lineHeight) || ta.clientHeight || 22.5
+    const pad =
+      (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+    const maxH = lineH * MAX_ROWS + pad
+    const next = Math.min(ta.scrollHeight, maxH)
+    ta.style.height = `${next}px`
+  }, [text, images])
 
   const commands = useMemo(
     () => [
@@ -333,6 +353,7 @@ export function Composer({
           </div>
         )}
         <textarea
+          ref={taRef}
           className={styles.input}
           placeholder={placeholder}
           value={text}

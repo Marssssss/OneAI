@@ -217,6 +217,13 @@ export default function App(): React.ReactNode {
   const handlePickSession = (id: string) => {
     projection.exitScenario()
     setDrawerOpen(false)
+    // Sync the workspace chip to the loaded session's bound working dir
+    // (persisted in conversation.metadata["workspace"]) — otherwise the chip
+    // keeps showing the previously-picked workspace and reads as stale. Absent
+    // ⇒ no-workspace (the app-global cwd). This also makes a subsequent "new
+    // chat" inherit the now-active workspace, matching deepseek-harness parity.
+    const picked = sessions.find((s) => s.id === id) ?? null
+    workspaceStore.setCurrent(picked?.workspace ?? null)
     void projection.loadSession(id)
   }
   const handleRenameSession = (id: string, currentTitle: string) => {
