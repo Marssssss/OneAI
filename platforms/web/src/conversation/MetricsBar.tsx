@@ -22,9 +22,10 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
   const firstTokenS = metrics.firstTokenMs !== null ? metrics.firstTokenMs / 1000 : null
   const seconds = metrics.totalDurationMs / 1000
   const tokPerS = seconds > 0 ? metrics.totalCompletion / seconds : null
-  const cacheDenom =
-    metrics.totalPrompt + metrics.totalCacheRead + metrics.totalCacheCreation
-  const cacheHit = cacheDenom > 0 ? (metrics.totalCacheRead / cacheDenom) * 100 : null
+  // Cache hit is the LATEST inference step's rate (projection computes it from
+  // the most recent token_usage record), not a session cumulative — token
+  // counts below stay cumulative (total spend).
+  const cacheHit = metrics.cacheHitPct
 
   return (
     <div className={styles.strip} title={undefined}>

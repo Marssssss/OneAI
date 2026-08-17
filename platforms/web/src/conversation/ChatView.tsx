@@ -479,9 +479,12 @@ function SpeakerHeader({
 }
 
 // ThinkingBlock — deepseek-harness style: a single-line, collapsed-by-default
-// reasoning affordance. While streaming, the one line follows the live text
-// (auto-scrolled to the tail so the latest reasoning shows). Once the fragment
-// is done, the line shows the first sentence; clicking expands the full text.
+// reasoning affordance. The collapsed line shows the first sentence (head,
+// ellipsized) both while streaming and once done — the engine's thinking
+// payload is itself a long/abbreviated blob, so following the live tail by
+// horizontally scrolling the line leftward left nothing readable (the visible
+// window sat on a sliver of the tail). The `💭 thinking…` label + chevron
+// still signal streaming; expanding shows the full text.
 const ThinkingBlock = memo(function ThinkingBlock({
   node,
   label,
@@ -490,19 +493,8 @@ const ThinkingBlock = memo(function ThinkingBlock({
   label: string
 }): ReactNode {
   const [expanded, setExpanded] = useState(false)
-  const lineRef = useRef<HTMLDivElement>(null)
   const streaming = node.state === 'streaming'
-  const collapsedLine = streaming ? node.text : firstSentence(node.text)
-
-  // While streaming & collapsed, keep the single line pinned to the tail so
-  // the latest reasoning is visible (mirrors dsh's scrolling one-line display).
-  useEffect(() => {
-    if (expanded || !streaming) return
-    const el = lineRef.current
-    if (el !== null) {
-      el.scrollLeft = el.scrollWidth
-    }
-  }, [node.text, expanded, streaming])
+  const collapsedLine = firstSentence(node.text)
 
   return (
     <div className={`${styles.thinking} ${expanded ? styles.thinkingOpen : ''}`}>
@@ -515,7 +507,7 @@ const ThinkingBlock = memo(function ThinkingBlock({
           {streaming ? '💭 ' + label + '…' : '💭 ' + label}
         </span>
         {!expanded && (
-          <span className={styles.thinkingLine} ref={lineRef}>
+          <span className={styles.thinkingLine}>
             {collapsedLine.length > 0 ? collapsedLine : ''}
           </span>
         )}

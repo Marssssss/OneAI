@@ -140,9 +140,12 @@ export interface ProjectionSnapshot {
   metrics: SessionMetrics
 }
 
-/** Session-wide aggregate metrics, derived from per-turn timing + per-turn
- *  usage maps. All fields default to 0 so a fresh session renders an empty
- *  (hidden) strip rather than NaN. */
+/** Session-wide aggregate metrics, derived from per-turn timing + the latest
+ *  per-turn usage map. Token counts (prompt/completion) are CUMULATIVE across
+ *  the session (total spend); cache hit % is the LATEST inference step's rate,
+ *  not a session average — cache behavior is per-step (cold first call, warm
+ *  thereafter), so a cumulative average dilutes the signal. All fields default
+ *  to 0/null so a fresh session renders an empty (hidden) strip rather than NaN. */
 export interface SessionMetrics {
   /** Number of turns seen this session. */
   turns: number
@@ -155,10 +158,12 @@ export interface SessionMetrics {
   totalCompletion: number
   /** Sum of prompt tokens across turns (input total). */
   totalPrompt: number
-  /** Sum of cache-read tokens across turns. */
-  totalCacheRead: number
-  /** Sum of cache-creation tokens across turns. */
-  totalCacheCreation: number
+  /** Cache hit % of the most recent inference step (the latest token_usage
+   *  record) — `cache_read / prompt_tokens`. `prompt_tokens` is the total
+   *  input footprint (already includes the cache subsets, per the provider
+   *  layer's normalization), so the denominator is `prompt_tokens` alone.
+   *  null until the first usage record arrives. */
+  cacheHitPct: number | null
   /** Sum of completed-turn wall durations (ms). */
   totalDurationMs: number
 }
@@ -190,6 +195,10 @@ interface WorkingState {
   /** Latest per-turn usage record (TokenUsage carries no turn_id, so we
    *  attribute it to the active currentTurnId on arrival). */
   turnUsage: Map<string, BusUsageRecord>
+  /** The most recently received usage record overall — drives the
+   *  latest-step cache-hit % metric (a rate, not a cumulative sum). Updated on
+   *  every token_usage event; cleared on session reset. */
+  latestUsage: BusUsageRecord | null
   /** Auto-accept mode: silently Proceed on incoming ToolApproval requests
    *  (mirrors the TUI's InteractionMode::AutoAccept) instead of queueing them
    *  for the approval bar. Other variants (plan/network/elicitation) still
@@ -203,8 +212,7 @@ const EMPTY_METRICS: SessionMetrics = {
   firstTokenMs: null,
   totalCompletion: 0,
   totalPrompt: 0,
-  totalCacheRead: 0,
-  totalCacheCreation: 0,
+  cacheHitPct: null,
   totalDurationMs: 0,
 }
 
@@ -261,6 +269,7 @@ export class ProjectionStore {
     turnIterations: new Map(),
     firstTokenPerf: new Map(),
     turnUsage: new Map(),
+    latestUsage: null,
     autoApprove: false,
   }
   private snapshot: ProjectionSnapshot = EMPTY
@@ -340,15 +349,14 @@ export class ProjectionStore {
     for (const l of this.listeners) l()
   }
 
-  /** Fold per-turn timing + usage maps into the session metrics aggregate. */
+  /** Fold per-turn timing + usage maps into the session metrics aggregate.
+   *  Token totals are cumulative; cache hit % is the latest step's rate. */
   private computeMetrics(
     turnTimings: { turnId: string; startedAt: number | null; endedAt: number | null; iterations: number }[],
   ): SessionMetrics {
     let steps = 0
     let totalCompletion = 0
     let totalPrompt = 0
-    let totalCacheRead = 0
-    let totalCacheCreation = 0
     let totalDurationMs = 0
     const latencies: number[] = []
     for (const t of turnTimings) {
@@ -357,8 +365,6 @@ export class ProjectionStore {
       if (u !== undefined) {
         totalPrompt += u.prompt_tokens
         totalCompletion += u.completion_tokens
-        totalCacheRead += u.cache_read_tokens
-        totalCacheCreation += u.cache_creation_tokens
       }
       if (t.startedAt !== null && t.endedAt !== null) {
         totalDurationMs += t.endedAt - t.startedAt
@@ -370,14 +376,25 @@ export class ProjectionStore {
     }
     const firstTokenMs =
       latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null
+    // Cache hit % from the LATEST inference step (most recent usage record),
+    // not the session cumulative — a cold-first/warm-later average hides
+    // whether caching is currently working. The provider layer normalizes
+    // `prompt_tokens` to the TOTAL input footprint (already includes the cache
+    // read + creation subsets — see `anthropic_usage`), so the denominator is
+    // `prompt_tokens` alone; adding cache_read/cache_creation on top would
+    // double-count them. Matches the engine's `cache_read / prompt_tokens`.
+    let cacheHitPct: number | null = null
+    const latest = this.state.latestUsage
+    if (latest !== null && latest.prompt_tokens > 0) {
+      cacheHitPct = (latest.cache_read_tokens / latest.prompt_tokens) * 100
+    }
     return {
       turns: turnTimings.length,
       steps,
       firstTokenMs,
       totalCompletion,
       totalPrompt,
-      totalCacheRead,
-      totalCacheCreation,
+      cacheHitPct,
       totalDurationMs,
     }
   }
@@ -498,6 +515,7 @@ export class ProjectionStore {
     this.state.turnIterations.clear()
     this.state.firstTokenPerf.clear()
     this.state.turnUsage.clear()
+    this.state.latestUsage = null
   }
 
   /** Flush now (bypass the coalescer) — for non-hot mutations. */
@@ -1045,6 +1063,9 @@ export class ProjectionStore {
         if (this.state.currentTurnId !== null) {
           this.state.turnUsage.set(this.state.currentTurnId, y.usage)
         }
+        // Track the most recent usage record overall — the cache-hit % metric
+        // reads the latest inference step's rate, not a cumulative average.
+        this.state.latestUsage = y.usage
         const total = y.usage.prompt_tokens + y.usage.completion_tokens
         this.pushTrajectory(null, 'token_usage', `usage: ${total} tokens`, {
           detail: y.usage,

@@ -136,8 +136,10 @@
   color: var(--oneai-text-tertiary);
 }
 
-/* The single-line collapsed view: one row, ellipsized, auto-scrolled to the
- * tail while streaming. `nowrap` keeps it one line; the toggle expands. */
+/* The single-line collapsed view: one row, head-ellipsized (shows the first
+ * sentence + …). No horizontal scroll — the thinking payload is itself a long
+ * abbreviated blob, so scrolling it to the tail left nothing readable. The
+ * toggle expands to show the full text. */
 .thinkingLine {
   flex: 1;
   min-width: 0;
