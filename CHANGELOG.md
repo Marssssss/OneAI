@@ -10,6 +10,15 @@ Tracking `docs/gap-analysis-2026-07.md` + `docs/evolution-plan-2026-07.md`. The
 `1.0.0` / `1.1.0` tags were premature (never published on crates.io, no
 external users) and are **retracted** — versioning restarted at `0.1.0`.
 
+- **npm `oneai-cli@0.2.1`** (launcher-only hotfix, version decoupled from the
+  `0.2.0` engine binary): the postinstall binary download now honors
+  `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (zero-dep CONNECT tunnel — no new
+  dependency), prints download progress, times out on 45s of socket
+  inactivity, and retries once before soft-falling back to `oneai` on PATH;
+  fixed the doubled `oneai-oneai-<target>` staged filename to `oneai-<target>`.
+  The launcher fetches the existing `v0.2.0` binary release (engine binary
+  unchanged). Fixes `npx oneai-cli web` hanging on slow/proxied networks.
+
 ## [0.2.0] — 2026-08-17
 
 First release to ship the **WebUI** (`oneai web` / `npx oneai-cli web`) — one

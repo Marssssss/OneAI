@@ -22,7 +22,7 @@ const a = (function () {
   else if (p === "linux" && arch === "arm64") name = "oneai-aarch64-unknown-linux-gnu";
   else if (isWin && arch === "x64") name = "oneai-x86_64-pc-windows-msvc";
   else return null;
-  return { file: "oneai-" + name + ext, isWin: isWin };
+  return { file: name + ext, isWin: isWin };
 })();
 
 // 1. The binary install.js downloaded into this package's bin/.
