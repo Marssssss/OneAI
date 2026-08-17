@@ -168,24 +168,30 @@
 }
 
 .footBtn {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--oneai-border);
   background: var(--oneai-bg-elevated);
   color: var(--oneai-text-secondary);
-  border-radius: var(--oneai-radius-sm);
+  border-radius: 50%;
   cursor: pointer;
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   transition: background var(--oneai-dur) var(--oneai-ease),
     color var(--oneai-dur) var(--oneai-ease),
-    border-color var(--oneai-dur) var(--oneai-ease);
+    border-color var(--oneai-dur) var(--oneai-ease),
+    transform var(--oneai-dur-fast) var(--oneai-ease);
 }
 .footBtn:hover {
   background: var(--oneai-bg-subtle);
-  border-color: var(--oneai-border-strong);
-  color: var(--oneai-text);
+  border-color: var(--oneai-brand-500);
+  color: var(--oneai-brand-500);
+  transform: translateY(-1px);
+}
+.footBtn:active {
+  transform: translateY(0);
 }

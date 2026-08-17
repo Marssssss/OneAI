@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import { Modal } from './Modal'
+import modalStyles from './Modal.module.css'
 import styles from './SessionRenameModal.module.css'
 
 interface SessionRenameModalProps {
@@ -33,10 +34,10 @@ export function SessionRenameModal({
       width={420}
       footer={
         <>
-          <button className={styles.secondary} onClick={onClose}>
+          <button className={`${modalStyles.btn} ${modalStyles.btnSecondary}`} onClick={onClose}>
             {t('scenario.cancel')}
           </button>
-          <button className={styles.primary} onClick={() => onSubmit(value)}>
+          <button className={`${modalStyles.btn} ${modalStyles.btnPrimary}`} onClick={() => onSubmit(value)}>
             {t('scenario.save')}
           </button>
         </>

@@ -8,24 +8,47 @@
   padding: 6vh var(--oneai-gap-lg);
   z-index: 100;
   overflow-y: auto;
+  animation: oneai-overlay-in var(--oneai-dur) var(--oneai-ease);
+}
+
+@keyframes oneai-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .card {
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border-strong);
   border-radius: var(--oneai-radius-lg);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.12);
   max-width: 92vw;
   max-height: 88vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: oneai-card-in var(--oneai-dur) var(--oneai-ease);
+}
+
+@keyframes oneai-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--oneai-gap);
   padding: var(--oneai-gap) var(--oneai-gap-lg);
   border-bottom: 1px solid var(--oneai-border);
   flex-shrink: 0;
@@ -33,20 +56,22 @@
 .title {
   font-weight: 600;
   font-size: 15px;
+  letter-spacing: 0.01em;
   color: var(--oneai-text);
 }
 .close {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: none;
   background: transparent;
   color: var(--oneai-text-tertiary);
   cursor: pointer;
-  border-radius: var(--oneai-radius-sm);
+  border-radius: 50%;
   font-size: 15px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   transition: background var(--oneai-dur) var(--oneai-ease),
     color var(--oneai-dur) var(--oneai-ease);
 }
@@ -70,4 +95,74 @@
   padding: var(--oneai-gap) var(--oneai-gap-lg);
   border-top: 1px solid var(--oneai-border);
   flex-shrink: 0;
+}
+
+/* ── Shared button classes ────────────────────────────────────────────────
+ * One consistent button vocabulary for every modal footer (rename / confirm /
+ * scenario editor). Keeps shape, padding, radius, weight, and hover identical
+ * across the app's modals so the dialogs read as a family. */
+.btn {
+  padding: 8px 18px;
+  border-radius: var(--oneai-radius);
+  cursor: pointer;
+  font-family: var(--oneai-font-family);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    border-color var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease),
+    box-shadow var(--oneai-dur) var(--oneai-ease);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--oneai-brand-500);
+  outline-offset: 2px;
+}
+
+.btnPrimary {
+  border-color: var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.btnPrimary:hover:not(:disabled) {
+  background: var(--oneai-brand-600);
+  border-color: var(--oneai-brand-600);
+}
+.btnPrimary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnSecondary {
+  border-color: var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}
+.btnSecondary:hover {
+  background: var(--oneai-bg-subtle);
+  border-color: var(--oneai-border-strong);
+}
+
+.btnDanger {
+  border-color: var(--oneai-red);
+  background: var(--oneai-red);
+  color: var(--oneai-accent-fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.btnDanger:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: #991b1b;
+}
+
+/* Outlined destructive (e.g. delete-scenario in the editor footer). */
+.btnDangerOutline {
+  margin-right: auto;
+  border-color: var(--oneai-red);
+  background: transparent;
+  color: var(--oneai-red);
+}
+.btnDangerOutline:hover {
+  background: var(--oneai-red-bg);
 }

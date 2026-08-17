@@ -9,6 +9,7 @@ import { useLocale } from '../i18n'
 import type { BusScenario } from '../rpc/types'
 import type { ScenarioEntry } from './scenarioStore'
 import { Modal } from './Modal'
+import mBtn from './Modal.module.css'
 import styles from './ScenarioPicker.module.css'
 
 interface ScenarioPickerProps {
@@ -56,13 +57,13 @@ export function ScenarioPicker({
               title={e.isPreset ? t('scenario.view') : t('scenario.edit')}
               aria-label={t('scenario.edit')}
             >
-              {e.isPreset ? '👁' : '✎'}
+              {e.isPreset ? '👁️' : '✏️'}
             </button>
           </div>
         ))}
       </div>
       <div className={styles.actions}>
-        <button className={styles.newBtn} onClick={onNew}>
+        <button className={`${mBtn.btn} ${mBtn.btnPrimary}`} onClick={onNew}>
           {t('scenario.new')}
         </button>
       </div>

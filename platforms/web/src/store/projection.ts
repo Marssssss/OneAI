@@ -605,7 +605,17 @@ export class ProjectionStore {
         // speaker's streaming text node for this turn (so its bubble flips to
         // done as the round progresses, not all-at-once at turn_complete) and
         // record the new speaker so the next stream_chunk seeds a fresh node.
+        // Also finalize any still-streaming THINKING node for the turn — the
+        // previous speaker's run is over, so a lingering streaming cursor on
+        // its reasoning fragment would otherwise read as "still outputting"
+        // while the next speaker already began (scenario UX: writing workshop
+        // editor appearing before the writer's block visually settled).
         this.finalizeStreamingText(y.turn_id)
+        this.state.nodes = this.state.nodes.map((n) =>
+          n.turnId === y.turn_id && n.kind === 'thinking' && n.state === 'streaming'
+            ? { ...n, state: 'done' as NodeState }
+            : n,
+        )
         this.state.currentSpeaker = y.speaker
         this.coalescer.request()
         break

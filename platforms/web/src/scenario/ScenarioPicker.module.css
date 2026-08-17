@@ -101,17 +101,3 @@
   justify-content: flex-end;
   margin-top: var(--oneai-gap-lg);
 }
-.newBtn {
-  padding: 8px 14px;
-  border: 1px solid var(--oneai-brand-500);
-  background: var(--oneai-brand-500);
-  color: var(--oneai-accent-fg);
-  border-radius: var(--oneai-radius-sm);
-  cursor: pointer;
-  font-size: 14px;
-  font-family: var(--oneai-font-family);
-  transition: background var(--oneai-dur) var(--oneai-ease);
-}
-.newBtn:hover {
-  background: var(--oneai-brand-600);
-}

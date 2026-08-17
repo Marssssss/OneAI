@@ -17,6 +17,7 @@ import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { SessionInfo } from '../rpc/types'
 import type { SessionMeta } from '../store/sessionMeta'
+import type { ScenarioEntry } from '../scenario/scenarioStore'
 import { MoreMenu } from '../components/MoreMenu'
 import { useWorkspace, workspaceStore } from '../workspace/workspaceStore'
 import styles from './SessionList.module.css'
@@ -46,6 +47,11 @@ interface SessionListProps {
   sessions: SessionInfo[]
   currentId: string | null
   meta: SessionMeta
+  /** The scenario library — used to tag scenario-derived sessions with their
+   *  scenario icon (UI-2). A session whose auto-derived title is exactly a
+   *  scenario name, or `<name>·<topic…>`, is matched longest-name-first so a
+   *  prefix scenario (e.g. "面试") doesn't shadow a longer one ("面试演练"). */
+  scenarios: ScenarioEntry[]
   onPick: (id: string) => void
   onRename: (id: string, currentTitle: string) => void
   onArchive: (id: string) => void
@@ -53,10 +59,33 @@ interface SessionListProps {
   onDelete: (id: string) => void
 }
 
+/** Resolve a scenario icon for a session title, or null when the title isn't
+ *  scenario-derived (single-agent chats / renamed scenarios / deleted
+ *  scenarios). Matches longest scenario name first to avoid prefix shadowing. */
+function scenarioIconFor(
+  title: string,
+  scenarios: ScenarioEntry[],
+): string | null {
+  if (title.length === 0) return null
+  // Longest-name-first so "面试演练" wins over a hypothetical "面试".
+  const sorted = [...scenarios].sort(
+    (a, b) => b.scenario.name.length - a.scenario.name.length,
+  )
+  for (const e of sorted) {
+    const name = e.scenario.name
+    if (name.length === 0) continue
+    if (title === name || title.startsWith(name + '·')) {
+      return e.scenario.icon ?? '◆'
+    }
+  }
+  return null
+}
+
 export function SessionList({
   sessions,
   currentId,
   meta,
+  scenarios,
   onPick,
   onRename,
   onArchive,
@@ -79,6 +108,11 @@ export function SessionList({
 
   const row = (s: SessionInfo, archivedRow: boolean): ReactNode => {
     const title = meta.titles[s.id] ?? s.title
+    // Only the engine-derived title carries the scenario marker (the title
+    // is `<name>·<topics>`); a client-side rename override drops it, so a
+    // renamed scenario session shows no icon (by design — the user gave it
+    // a custom name).
+    const icon = meta.titles[s.id] === undefined ? scenarioIconFor(s.title, scenarios) : null
     const items = archivedRow
       ? [
           { id: 'rename', label: t('session.rename') },
@@ -96,6 +130,7 @@ export function SessionList({
         className={`${styles.item} ${s.id === currentId ? styles.active : ''}`}
       >
         <button className={styles.pick} onClick={() => onPick(s.id)} title={title}>
+          {icon !== null && <span className={styles.scenarioTag} aria-hidden>{icon}</span>}
           <span className={styles.title}>{title || s.id}</span>
         </button>
         <MoreMenu

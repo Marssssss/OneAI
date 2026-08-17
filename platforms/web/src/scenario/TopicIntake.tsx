@@ -10,6 +10,7 @@ import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { BusScenario } from '../rpc/types'
 import { Modal } from './Modal'
+import mBtn from './Modal.module.css'
 import styles from './TopicIntake.module.css'
 
 interface TopicIntakeProps {
@@ -47,11 +48,11 @@ export function TopicIntake({
       width={520}
       footer={
         <>
-          <button className={styles.secondary} onClick={onClose}>
+          <button className={`${mBtn.btn} ${mBtn.btnSecondary}`} onClick={onClose}>
             {t('scenario.cancel')}
           </button>
           <button
-            className={styles.primary}
+            className={`${mBtn.btn} ${mBtn.btnPrimary}`}
             onClick={submit}
             disabled={!anyFilled && fields.length > 0}
           >

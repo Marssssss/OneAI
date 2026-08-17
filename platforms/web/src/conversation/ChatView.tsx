@@ -104,6 +104,26 @@ export function ChatView({
               if (!finalByTurn.has(n.turnId)) finalByTurn.set(n.turnId, n.id)
             }
           }
+          // Speaker-header merging (UI-1): a single speaker within one turn
+          // may emit several blocks — a thinking fragment, then the final
+          // text answer (and possibly tool cards). Tagging each block with
+          // the speaker name repeats the label under every block. Instead,
+          // show the speaker header ONLY on the first block of a contiguous
+          // same-speaker run within a turn: a block is a "head" when no
+          // preceding block in the same turn carried the same speaker. (A
+          // user message or a different speaker always starts a new run.)
+          const headIds = new Set<string>()
+          let prevSpeaker: string | null = null
+          let prevTurnId: string | null = null
+          for (const n of nodes) {
+            const sp = n.role === 'user' ? null : n.speaker
+            const isHead =
+              sp !== null &&
+              (prevTurnId !== n.turnId || prevSpeaker !== sp)
+            if (sp !== null && isHead) headIds.add(n.id)
+            prevSpeaker = sp
+            prevTurnId = n.turnId
+          }
           return nodes.map((n) => (
             <ChatNodeSeat
               key={n.id}
@@ -117,6 +137,7 @@ export function ChatView({
               isTurnFinal={
                 n.turnId !== null && finalByTurn.get(n.turnId) === n.id
               }
+              isSpeakerHead={headIds.has(n.id)}
             />
           ))
         })()}
@@ -172,6 +193,7 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   onOpenImage,
   onSubmitFeedback,
   isTurnFinal,
+  isSpeakerHead,
 }: {
   node: ChatNode
   theme: 'light' | 'dark'
@@ -184,6 +206,11 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
    * node eligible for the 👍/👎 row (intermediate step outputs are not
    * feedbackable; feedback reacts to a turn's terminal answer). */
   isTurnFinal: boolean
+  /** True when this block is the first of a contiguous same-speaker run
+   *  within its turn — the only block that renders the speaker header, so
+   *  a single speaker's thinking + final answer show one label, not one
+   *  per block (UI-1). */
+  isSpeakerHead: boolean
 }): ReactNode {
   const { t } = useLocale()
   if (node.role === 'user') {
@@ -216,7 +243,7 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
     )
   }
   const speaker = resolveSpeaker(node.speaker, members, t('speaker.you'))
-  const showSpeaker = speaker !== null && node.kind !== 'error'
+  const showSpeaker = isSpeakerHead && speaker !== null && node.kind !== 'error'
 
   if (node.kind === 'error') {
     return (
@@ -228,7 +255,7 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   if (node.kind === 'thinking') {
     return (
       <div className={styles.row}>
-        <SpeakerHeader meta={speaker} thinking />
+        {showSpeaker && <SpeakerHeader meta={speaker} thinking />}
         <ThinkingBlock node={node} label={t('thinking')} />
       </div>
     )

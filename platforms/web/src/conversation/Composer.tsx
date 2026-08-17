@@ -23,6 +23,7 @@ import { useLocale } from '../i18n'
 import { ModelSelect } from './ModelSelect'
 import { MetricsBar } from './MetricsBar'
 import { WorkspaceDropdown } from '../workspace/WorkspaceDropdown'
+import { Tooltip } from '../components/Tooltip'
 import styles from './Composer.module.css'
 
 export type SlashCommand =
@@ -68,6 +69,11 @@ interface ComposerProps {
   /** §W4 attachments — disabled in group-chat mode (its bus directive is
    * plain-text only). When false the attach button + drop zone hide. */
   attachmentsEnabled: boolean
+  /** The workspace (working-directory) chip is hidden entirely while a
+   *  scenario is active — scenarios don't bind a host working directory, so
+   *  the picker has nothing to offer and showing it implies a switch that
+   *  can't take effect mid-scenario. */
+  workspaceEnabled: boolean
   /** The workspace (working-directory) chip label, or null when no workspace
    *  is selected. Sits left of the mode chip. Clicking routes through
    *  `onWorkspaceClick` — the caller decides dropdown-vs-blocked (the latter
@@ -140,6 +146,7 @@ export function Composer({
   metrics,
   settingsStore,
   attachmentsEnabled,
+  workspaceEnabled,
   workspaceLabel,
   onSend,
   onStop,
@@ -241,39 +248,42 @@ export function Composer({
       )}
 
       <div className={styles.chips}>
-        {workspaceDropdownOpen && (
+        {workspaceDropdownOpen && workspaceEnabled && (
           <WorkspaceDropdown
             onClose={onCloseWorkspaceDropdown}
             onSelect={onSelectWorkspace}
             onAddWorkspace={onAddWorkspace}
           />
         )}
-        <button
-          className={`${styles.chip} ${styles.workspaceChip} ${workspaceLabel !== null ? styles.chipOn : ''}`}
-          onClick={onWorkspaceClick}
-          title={t('workspace.select')}
-          aria-label={t('workspace.select')}
-        >
-          <span className={styles.chipLabel}>📂</span>
-          <span className={styles.workspaceAlias}>
-            {workspaceLabel ?? t('workspace.select')}
-          </span>
-          <span className={styles.workspaceCaret}>▾</span>
-        </button>
-        <button
-          className={`${styles.chip} ${mode !== 'normal' ? styles.chipOn : ''}`}
-          onClick={onCycleMode}
-          title={t(MODE_META[mode].tipKey)}
-          aria-label={t('mode.cycle')}
-        >
-          <span className={styles.chipLabel}>
-            {MODE_META[mode].glyph ? MODE_META[mode].glyph + ' ' : ''}
-            {t(MODE_META[mode].labelKey)}
-          </span>
-          {paradigm !== 're_act' && paradigm !== 'plan' && (
-            <span className={styles.chipParadigm}>{paradigm}{PARADIGM_GLYPH[paradigm]}</span>
-          )}
-        </button>
+        {workspaceEnabled && (
+          <button
+            className={`${styles.chip} ${styles.workspaceChip} ${workspaceLabel !== null ? styles.chipOn : ''}`}
+            onClick={onWorkspaceClick}
+            title={t('workspace.select')}
+            aria-label={t('workspace.select')}
+          >
+            <span className={styles.chipLabel}>📂</span>
+            <span className={styles.workspaceAlias}>
+              {workspaceLabel ?? t('workspace.select')}
+            </span>
+            <span className={styles.workspaceCaret}>▾</span>
+          </button>
+        )}
+        <Tooltip label={t(MODE_META[mode].tipKey)} side="top">
+          <button
+            className={`${styles.chip} ${mode !== 'normal' ? styles.chipOn : ''}`}
+            onClick={onCycleMode}
+            aria-label={t('mode.cycle')}
+          >
+            <span className={styles.chipLabel}>
+              {MODE_META[mode].glyph ? MODE_META[mode].glyph + ' ' : ''}
+              {t(MODE_META[mode].labelKey)}
+            </span>
+            {paradigm !== 're_act' && paradigm !== 'plan' && (
+              <span className={styles.chipParadigm}>{paradigm}{PARADIGM_GLYPH[paradigm]}</span>
+            )}
+          </button>
+        </Tooltip>
         {attachmentsEnabled && (
           <button
             className={styles.chip}
@@ -346,17 +356,28 @@ export function Composer({
           rows={1}
         />
         {turnActive ? (
-          <button className={styles.stopBtn} onClick={onStop} title={stopLabel}>
-            ◼
+          <button
+            className={`${styles.sendBtn} ${styles.stopBtn}`}
+            onClick={onStop}
+            aria-label={stopLabel}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden focusable="false">
+              <rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor" />
+            </svg>
           </button>
         ) : (
           <button
-            className={styles.button}
+            className={styles.sendBtn}
             onClick={submit}
             disabled={text.trim().length === 0 && images.length === 0}
-            title={sendLabel}
+            aria-label={sendLabel}
           >
-            ↑
+            <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden focusable="false">
+              <path
+                d="M10 4.2 L16 14.2 L10 11.4 L4 14.2 Z"
+                fill="currentColor"
+              />
+            </svg>
           </button>
         )}
       </div>

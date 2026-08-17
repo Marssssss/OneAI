@@ -95,7 +95,7 @@ const ZH_PRESETS: BusScenario[] = [
   {
     id: 'preset-debate',
     name: '辩论赛',
-    icon: '⚖',
+    icon: '⚖️',
     members: [
       {
         id: 'pro',
@@ -143,7 +143,7 @@ const ZH_PRESETS: BusScenario[] = [
   {
     id: 'preset-writing-workshop',
     name: '写作工坊',
-    icon: '✎',
+    icon: '✍️',
     members: [
       {
         id: 'writer',
@@ -179,7 +179,7 @@ const ZH_PRESETS: BusScenario[] = [
   {
     id: 'preset-brainstorm',
     name: '头脑风暴',
-    icon: '✦',
+    icon: '💡',
     members: [
       {
         id: 'ideator',
@@ -297,7 +297,7 @@ const EN_PRESETS: BusScenario[] = [
   {
     id: 'preset-debate',
     name: 'Debate',
-    icon: '⚖',
+    icon: '⚖️',
     members: [
       {
         id: 'pro',
@@ -345,7 +345,7 @@ const EN_PRESETS: BusScenario[] = [
   {
     id: 'preset-writing-workshop',
     name: 'Writing Workshop',
-    icon: '✎',
+    icon: '✍️',
     members: [
       {
         id: 'writer',
@@ -381,7 +381,7 @@ const EN_PRESETS: BusScenario[] = [
   {
     id: 'preset-brainstorm',
     name: 'Brainstorm',
-    icon: '✦',
+    icon: '💡',
     members: [
       {
         id: 'ideator',

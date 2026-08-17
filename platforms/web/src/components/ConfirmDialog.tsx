@@ -1,10 +1,10 @@
 // ConfirmDialog — a small in-page confirmation modal (replaces the jarring
-// browser `window.confirm`). Reuses the scenario `Modal` surface + the
-// rename-modal's button styles so it matches the rest of the app.
+// browser `window.confirm`). Uses the shared `Modal` surface + button
+// vocabulary so every dialog reads as one family.
 
 import type { ReactNode } from 'react'
 import { Modal } from '../scenario/Modal'
-import renameStyles from '../scenario/SessionRenameModal.module.css'
+import modalStyles from '../scenario/Modal.module.css'
 import styles from './ConfirmDialog.module.css'
 
 interface ConfirmDialogProps {
@@ -35,11 +35,11 @@ export function ConfirmDialog({
       width={420}
       footer={
         <>
-          <button className={renameStyles.secondary} onClick={onClose}>
+          <button className={`${modalStyles.btn} ${modalStyles.btnSecondary}`} onClick={onClose}>
             {cancelLabel}
           </button>
           <button
-            className={`${renameStyles.primary} ${danger ? styles.danger : ''}`}
+            className={`${modalStyles.btn} ${danger ? modalStyles.btnDanger : modalStyles.btnPrimary}`}
             onClick={onConfirm}
           >
             {confirmLabel}

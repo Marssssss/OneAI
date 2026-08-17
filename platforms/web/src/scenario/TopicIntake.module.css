@@ -42,35 +42,3 @@
   color: var(--oneai-text-tertiary);
   line-height: 1.5;
 }
-
-.primary {
-  padding: 8px 16px;
-  border: 1px solid var(--oneai-brand-500);
-  background: var(--oneai-brand-500);
-  color: var(--oneai-accent-fg);
-  border-radius: var(--oneai-radius-sm);
-  cursor: pointer;
-  font-size: 14px;
-  font-family: var(--oneai-font-family);
-  transition: background var(--oneai-dur) var(--oneai-ease);
-}
-.primary:hover:not(:disabled) {
-  background: var(--oneai-brand-600);
-}
-.primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.secondary {
-  padding: 8px 16px;
-  border: 1px solid var(--oneai-border-strong);
-  background: var(--oneai-bg-elevated);
-  color: var(--oneai-text);
-  border-radius: var(--oneai-radius-sm);
-  cursor: pointer;
-  font-size: 14px;
-  font-family: var(--oneai-font-family);
-}
-.secondary:hover {
-  background: var(--oneai-bg-subtle);
-}

@@ -104,43 +104,49 @@
   color: var(--oneai-text-tertiary);
 }
 
-.button {
+/* Send / Stop — a single circular action button. The send glyph is an
+ * up-pointing paper-plane; Stop swaps it for a filled square on a red disc.
+ * Circular (not the input's rounded rect) so it reads as a distinct action
+ * affordance, with a soft shadow that lifts on hover. */
+.sendBtn {
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  border-radius: var(--oneai-radius);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
   border: none;
   background: var(--oneai-brand-500);
   color: var(--oneai-accent-fg);
-  font-size: 19px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   transition: background var(--oneai-dur) var(--oneai-ease),
-    opacity var(--oneai-dur) var(--oneai-ease);
+    box-shadow var(--oneai-dur) var(--oneai-ease),
+    opacity var(--oneai-dur) var(--oneai-ease),
+    transform var(--oneai-dur-fast) var(--oneai-ease);
 }
-.button:hover:not(:disabled) {
+.sendBtn:hover:not(:disabled) {
   background: var(--oneai-brand-600);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.22);
 }
-.button:disabled {
+.sendBtn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.sendBtn:disabled {
   opacity: 0.4;
   cursor: default;
+  box-shadow: none;
 }
 
+/* Stop variant — red disc + square glyph, no lift on hover (it's a kill
+ * switch, not a primary action). */
 .stopBtn {
-  flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  border-radius: var(--oneai-radius);
-  border: none;
   background: var(--oneai-red);
-  color: var(--oneai-accent-fg);
-  font-size: 15px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+}
+.stopBtn:hover {
+  background: var(--oneai-red);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
 }
 
 .slashPopup {

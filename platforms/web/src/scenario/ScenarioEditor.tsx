@@ -24,6 +24,7 @@ import type {
 import { localizeErrors } from './errors'
 import type { ScenarioListStore } from './scenarioStore'
 import { Modal } from './Modal'
+import mBtn from './Modal.module.css'
 import styles from './ScenarioEditor.module.css'
 
 interface ScenarioEditorProps {
@@ -184,15 +185,15 @@ export function ScenarioEditor({
       footer={
         <>
           {!isPreset && (
-            <button className={styles.danger} onClick={del} disabled={saving}>
+            <button className={`${mBtn.btn} ${mBtn.btnDangerOutline}`} onClick={del} disabled={saving}>
               {t('scenario.delete')}
             </button>
           )}
-          <button className={styles.secondary} onClick={onClose}>
+          <button className={`${mBtn.btn} ${mBtn.btnSecondary}`} onClick={onClose}>
             {t('scenario.cancel')}
           </button>
           {!isPreset && (
-            <button className={styles.primary} onClick={save} disabled={saving}>
+            <button className={`${mBtn.btn} ${mBtn.btnPrimary}`} onClick={save} disabled={saving}>
               {saving ? t('scenario.saving') : t('scenario.save')}
             </button>
           )}

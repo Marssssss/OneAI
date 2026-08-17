@@ -54,6 +54,20 @@
   white-space: nowrap;
 }
 
+/* Scenario tag — the scenario icon shown before a scenario-derived session's
+ * title (UI-2). Sized to read as a leading glyph, not a full row icon. */
+.scenarioTag {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--oneai-brand-500);
+}
+
 .archivedToggle {
   display: flex;
   align-items: center;

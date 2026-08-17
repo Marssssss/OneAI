@@ -207,8 +207,8 @@
 }
 
 .allowBtn {
-  padding: 6px 14px;
-  border-radius: var(--oneai-radius-sm);
+  padding: 8px 18px;
+  border-radius: var(--oneai-radius);
   border: 1px solid var(--oneai-green);
   background: var(--oneai-green);
   color: var(--oneai-accent-fg);
@@ -216,31 +216,55 @@
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    box-shadow var(--oneai-dur) var(--oneai-ease);
+}
+.allowBtn:hover:not(:disabled) {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+.allowBtn:focus-visible {
+  outline: 2px solid var(--oneai-green);
+  outline-offset: 2px;
 }
 .allowBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .refuseBtn {
-  padding: 6px 14px;
-  border-radius: var(--oneai-radius-sm);
+  padding: 8px 18px;
+  border-radius: var(--oneai-radius);
   border: 1px solid var(--oneai-red);
-  background: var(--oneai-bg-elevated);
+  background: transparent;
   color: var(--oneai-red);
   font: inherit;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+.refuseBtn:hover {
+  background: var(--oneai-red-bg);
+}
+.refuseBtn:focus-visible {
+  outline: 2px solid var(--oneai-red);
+  outline-offset: 2px;
 }
 
 .neutralBtn {
-  padding: 6px 14px;
-  border-radius: var(--oneai-radius-sm);
+  padding: 8px 18px;
+  border-radius: var(--oneai-radius);
   border: 1px solid var(--oneai-border-strong);
   background: var(--oneai-bg-elevated);
   color: var(--oneai-text-secondary);
   font: inherit;
   font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+.neutralBtn:hover {
+  background: var(--oneai-bg-subtle);
 }

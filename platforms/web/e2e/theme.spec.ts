@@ -11,8 +11,10 @@ test('theme toggle flips the body attribute', async ({ page }) => {
     document.body.getAttribute('data-oneai-theme'),
   )
 
-  // The sidebar footer theme toggle — title is "切换主题" (zh) / "Toggle theme" (en).
-  const toggle = page.getByTitle(/切换主题|Toggle theme/)
+  // The sidebar footer theme toggle — its accessible name is the localized
+  // "切换主题" (zh) / "Toggle theme" (en), surfaced via aria-label (the hover
+  // tooltip is a separate CSS element, not the native title).
+  const toggle = page.getByRole('button', { name: /切换主题|Toggle theme/ })
   await toggle.click()
 
   await expect(async () => {

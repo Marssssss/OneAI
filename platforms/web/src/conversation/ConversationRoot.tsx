@@ -123,6 +123,7 @@ export function ConversationRoot({
       metrics={snapshot.metrics}
       settingsStore={settingsStore}
       attachmentsEnabled={snapshot.currentScenario === null}
+      workspaceEnabled={snapshot.currentScenario === null}
       workspaceLabel={workspaceLabel}
       onSend={onSend}
       onStop={onStop}

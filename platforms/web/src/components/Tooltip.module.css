@@ -1,0 +1,58 @@
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* The label — hidden by default, fades in on hover/focus after a short
+ * delay (~120ms — snappy, but not so instant it flickers on a sweeping
+ * cursor). pointer-events:none so it never steals the hover. Single-line
+ * (nowrap) so a sentence reads as one horizontal pill, not a tall column. */
+.tip {
+  position: absolute;
+  z-index: 60;
+  padding: 5px 9px;
+  background: var(--oneai-text);
+  color: var(--oneai-bg);
+  font-family: var(--oneai-font-family);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  border-radius: var(--oneai-radius-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--oneai-dur-fast) var(--oneai-ease);
+  transition-delay: 0s;
+  text-align: center;
+}
+
+.wrap:hover .tip,
+.wrap:focus-within .tip {
+  opacity: 1;
+  transition-delay: 0.12s;
+}
+
+/* Side placement — the tip is offset from the wrapper edge. Default top. */
+.side_top .tip {
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+.side_bottom .tip {
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+}
+.side_left .tip {
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+}
+.side_right .tip {
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* On touch/mobile the hover state is unreliable; keep it but the small
+ * tip max-width keeps it from overflowing. No layout change needed. */

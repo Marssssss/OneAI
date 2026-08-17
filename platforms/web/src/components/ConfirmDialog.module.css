@@ -5,12 +5,3 @@
   line-height: 1.6;
   white-space: pre-wrap;
 }
-
-/* Destructive confirm (delete) — brand button turns red. */
-.danger {
-  border-color: #dc2626;
-  background: #dc2626;
-}
-.danger:hover {
-  background: #b91c1c;
-}
