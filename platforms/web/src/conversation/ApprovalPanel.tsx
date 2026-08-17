@@ -28,6 +28,15 @@ interface ApprovalPanelProps {
   current: ApprovalItem | null
   queueDepth: number
   onRespond: (requestId: string, response: InteractionResponse) => void
+  /** Persist a host admission cross-session ("always") via `host/allow`, then
+   * the caller proceeds. Best-effort — a network failure degrades to
+   * session-only (the host won't survive restart, but the turn still
+   * proceeds). `undefined` ⇒ the "always" option is hidden (only "once"
+   * remains) — for contexts without the host/* RPC wired. */
+  onAllowAlways?: (host: string) => Promise<void>
+  /** Persist a host denial cross-session via `host/deny`, then the caller
+   * aborts. Best-effort like `onAllowAlways`. */
+  onDenyAlways?: (host: string) => Promise<void>
 }
 
 type RequestVariant =
@@ -67,6 +76,8 @@ export function ApprovalPanel({
   current,
   queueDepth,
   onRespond,
+  onAllowAlways,
+  onDenyAlways,
 }: ApprovalPanelProps): ReactNode {
   const { t } = useLocale()
   if (current === null) return null
@@ -93,7 +104,16 @@ export function ApprovalPanel({
             <PlanDecisionView decision_id={variant.decision_id} question={variant.question} context={variant.context} options={variant.options} onRespond={(r) => onRespond(current.request_id, r)} pickLabel={t('approval.pick')} />
           )}
           {variant.kind === 'network' && (
-            <NetworkApprovalView host={variant.host} requested_by={variant.requested_by} onRespond={(r) => onRespond(current.request_id, r)} allowLabel={t('approval.allow.host')} denyLabel={t('approval.deny')} />
+            <NetworkApprovalView
+              host={variant.host}
+              requested_by={variant.requested_by}
+              onRespond={(r) => onRespond(current.request_id, r)}
+              onAllowAlways={onAllowAlways}
+              onDenyAlways={onDenyAlways}
+              allowOnceLabel={t('approval.allow.host')}
+              allowAlwaysLabel={t('approval.allow.host.always')}
+              denyLabel={t('approval.deny')}
+            />
           )}
           {variant.kind === 'elicitation' && (
             <ElicitationView server={variant.server} message={variant.message} requested_schema={variant.requested_schema} onRespond={(r) => onRespond(current.request_id, r)} submitLabel={t('approval.submit')} declineLabel={t('approval.decline')} cancelLabel={t('approval.cancel')} />
@@ -225,24 +245,67 @@ function PlanDecisionView({
 }
 
 // ── NetworkApproval ────────────────────────────────────────────────────────────
-// Allow = Proceed (the engine proxy records the host in its session allow-list
-// on Proceed, so subsequent same-host attempts don't re-prompt — issue #28
-// stage 6). There is no `host/*` RPC, so a persistent cross-session "always"
-// is not wire-supported; that's a W4 gap.
+// Three egress-approval options (issue #28 stage 6 durable allowlist):
+// - Allow once: `Proceed` only — the engine proxy admits the host for the
+//   session (its in-process allowlist), but it won't survive a restart.
+// - Always: `host/allow` (durable `~/.oneai/oneai.db`) then `Proceed` — the
+//   host is honoured by the proxy on every future CONNECT across sessions.
+// - Deny: `host/deny` (durable) then `Abort` — the host is blocked without
+//   re-prompting in future sessions.
+// The "always" / "deny" RPC is best-effort: if it fails (app-server offline),
+// the button still responds (Proceed/Abort) so the turn isn't wedged — the
+// host simply degrades to session-scoped. `onAllowAlways`/`onDenyAlways`
+// absent ⇒ only the "once" option renders (no durable RPC wired).
 
 function NetworkApprovalView({
   host,
   requested_by,
   onRespond,
-  allowLabel,
+  onAllowAlways,
+  onDenyAlways,
+  allowOnceLabel,
+  allowAlwaysLabel,
   denyLabel,
 }: {
   host: string
   requested_by: string
   onRespond: (r: InteractionResponse) => void
-  allowLabel: string
+  onAllowAlways?: (host: string) => Promise<void>
+  onDenyAlways?: (host: string) => Promise<void>
+  allowOnceLabel: string
+  allowAlwaysLabel: string
   denyLabel: string
 }): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const hasAlways = onAllowAlways !== undefined
+  const hasDenyAlways = onDenyAlways !== undefined
+
+  // "Always" — persist the admission, then proceed. The persist is awaited so
+  // the durable table is written before the proxy's next CONNECT; a failure is
+  // swallowed (the host just won't persist) and we still proceed.
+  const always = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      if (onAllowAlways) await onAllowAlways(host)
+    } finally {
+      onRespond({ Proceed: null })
+      setBusy(false)
+    }
+  }
+
+  // "Deny" — persist the denial, then abort.
+  const deny = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      if (onDenyAlways) await onDenyAlways(host)
+    } finally {
+      onRespond({ Abort: { reason: `denied host ${host}` } })
+      setBusy(false)
+    }
+  }
+
   return (
     <>
       <div className={styles.attribution}>
@@ -250,10 +313,15 @@ function NetworkApprovalView({
         {requested_by && <span className={styles.just}>← {requested_by}</span>}
       </div>
       <div className={styles.actions}>
-        <button className={styles.allowBtn} onClick={() => onRespond({ Proceed: null })} title={t_networkHint()}>
-          {allowLabel}
+        <button className={styles.allowBtn} onClick={() => onRespond({ Proceed: null })} disabled={busy}>
+          {allowOnceLabel}
         </button>
-        <button className={styles.refuseBtn} onClick={() => onRespond({ Abort: { reason: `denied host ${host}` } })}>
+        {hasAlways && (
+          <button className={styles.allowBtn} onClick={always} disabled={busy} title={t_networkHint()}>
+            {allowAlwaysLabel}
+          </button>
+        )}
+        <button className={styles.refuseBtn} onClick={hasDenyAlways ? deny : () => onRespond({ Abort: { reason: `denied host ${host}` } })} disabled={busy}>
           {denyLabel}
         </button>
       </div>
@@ -264,7 +332,7 @@ function NetworkApprovalView({
 // Localized hint helper without re-rendering the parent: read from the locale
 // store lazily (good enough for a tooltip).
 function t_networkHint(): string {
-  return 'Allow admits this host for the session (no persistent allowlist RPC yet)'
+  return 'Persist this host across sessions — the engine honours it on future connections without re-prompting'
 }
 
 // ── McpElicitation (schema-driven form) ───────────────────────────────────────

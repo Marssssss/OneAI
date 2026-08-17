@@ -128,6 +128,7 @@ pub fn cmd_web(
             es.scenario_store,
             es.conversation_store,
             es.feedback_store,
+            es.host_allowlist_rpc,
             es.probe,
         )
         .await?;

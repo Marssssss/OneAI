@@ -385,6 +385,12 @@ export default function App(): React.ReactNode {
     void projection.respondApproval(requestId, response)
   }
 
+  // §B5 — durable host allow/deny from the NetworkApproval panel. The persist
+  // is best-effort (projection swallows network errors); the ApprovalPanel
+  // proceeds/aborts regardless so the turn never wedges on a failed RPC.
+  const handleAllowAlways = (host: string) => projection.admitHost(host)
+  const handleDenyAlways = (host: string) => projection.denyHost(host)
+
   // ── scenario handlers ───────────────────────────────────────────────────────
   const handlePickScenario = (scenario: BusScenario) => {
     setDrawerOpen(false)
@@ -457,6 +463,8 @@ export default function App(): React.ReactNode {
             onSlash={handleSlash}
             onSelectTool={handleSelectTool}
             onRespondApproval={handleRespondApproval}
+            onAllowAlways={handleAllowAlways}
+            onDenyAlways={handleDenyAlways}
             onPickScenario={handlePickScenario}
             onDebrief={handleDebrief}
             onSubmitFeedback={(nodeId, kind, text) =>
@@ -580,6 +588,11 @@ export default function App(): React.ReactNode {
           onToggleTheme={toggleTheme}
           onToggleLocale={toggleLocale}
           onTogglePlan={() => applyMode(interactionMode === 'plan' ? 'normal' : 'plan')}
+          hostOps={{
+            list: () => projection.listHosts(),
+            remove: (host) => projection.removeHost(host),
+            removeDenied: (host) => projection.removeDeniedHost(host),
+          }}
           onClose={() => setModal(null)}
         />
       )}

@@ -18,11 +18,23 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Modal } from '../scenario/Modal'
 import { useLocale } from '../i18n'
+import type { HostListResult } from '../rpc/types'
 import type { SettingsStore } from './settingsStore'
 import { useSettings } from './settingsStore'
 import styles from './SettingsRoot.module.css'
 
-type Section = 'general' | 'models' | 'permissions'
+type Section = 'general' | 'models' | 'permissions' | 'network'
+
+/** §B5 — durable host allow/deny CRUD surface for the Settings modal. Backed
+ * by the `host/*` JSON-RPC methods (the engine's `~/.oneai/oneai.db` durable
+ * store, shared with the `NetworkProxy` hot path). `undefined` hides the
+ * section (only relevant when host/* RPC is wired, which the app-server always
+ * wires in production). */
+export interface HostOps {
+  list: () => Promise<HostListResult>
+  remove: (host: string) => Promise<void>
+  removeDenied: (host: string) => Promise<void>
+}
 
 interface SettingsRootProps {
   store: SettingsStore
@@ -33,6 +45,7 @@ interface SettingsRootProps {
   onToggleTheme: () => void
   onToggleLocale: () => void
   onTogglePlan: () => void
+  hostOps?: HostOps
   onClose: () => void
 }
 
@@ -45,6 +58,7 @@ export function SettingsRoot({
   onToggleTheme,
   onToggleLocale,
   onTogglePlan,
+  hostOps,
   onClose,
 }: SettingsRootProps): ReactNode {
   const { t } = useLocale()
@@ -60,6 +74,7 @@ export function SettingsRoot({
     { id: 'general', label: t('settings.general') },
     { id: 'models', label: t('settings.models') },
     { id: 'permissions', label: t('settings.permissions') },
+    ...(hostOps !== undefined ? [{ id: 'network' as const, label: t('settings.network') }] : []),
   ]
 
   return (
@@ -90,6 +105,9 @@ export function SettingsRoot({
           )}
           {section === 'models' && <ModelsSection store={store} snap={snap} />}
           {section === 'permissions' && <PermissionsSection snap={snap} />}
+          {section === 'network' && hostOps !== undefined && (
+            <NetworkSection hostOps={hostOps} />
+          )}
         </div>
       </div>
     </Modal>
@@ -315,6 +333,82 @@ function PermissionsSection({ snap }: { snap: ReturnType<typeof useSettings> }):
       <Row label={t('settings.planMode')}>
         <span className={styles.value}>{cfg.plan_mode ? t('settings.on') : t('settings.off')}</span>
       </Row>
+    </div>
+  )
+}
+
+// ── Network (§B5 durable host allow/deny list) ───────────────────────────────
+// Lists the hosts the user admitted/denied cross-session + per-row revoke.
+// A host admitted via the NetworkApproval panel's "Always" lands here; the
+// engine `NetworkProxy` consults the same durable `~/.oneai/oneai.db` table on
+// every CONNECT, so removing a row here makes the next connection re-prompt.
+
+function NetworkSection({ hostOps }: { hostOps: HostOps }): ReactNode {
+  const { t } = useLocale()
+  const [list, setList] = useState<HostListResult>({ allowed: [], denied: [] })
+  const [loaded, setLoaded] = useState(false)
+
+  const refresh = async () => {
+    const r = await hostOps.list()
+    setList(r)
+    setLoaded(true)
+  }
+
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Optimistic remove: drop the row locally, then fire the RPC. The list is
+  // re-fetched on error so a failed delete resurfaces the row.
+  const remove = async (host: string, denied: boolean) => {
+    const prev = list
+    setList((cur) =>
+      denied
+        ? { ...cur, denied: cur.denied.filter((e) => e.host !== host) }
+        : { ...cur, allowed: cur.allowed.filter((e) => e.host !== host) },
+    )
+    try {
+      if (denied) await hostOps.removeDenied(host)
+      else await hostOps.remove(host)
+    } catch {
+      setList(prev) // restore on failure
+    }
+  }
+
+  return (
+    <div className={styles.stack}>
+      <div className={styles.hint}>{t('settings.networkHint')}</div>
+
+      <div className={styles.configFileLabel}>{t('settings.networkAllowed')}</div>
+      {!loaded ? (
+        <div className={styles.empty}>{t('settings.networkLoading')}</div>
+      ) : list.allowed.length === 0 ? (
+        <div className={styles.empty}>{t('settings.networkEmpty')}</div>
+      ) : (
+        list.allowed.map((e) => (
+          <div key={`a-${e.host}`} className={styles.card}>
+            <code className={styles.code}>{e.host}</code>
+            <button className={`${styles.miniBtn} ${styles.danger}`} onClick={() => void remove(e.host, false)}>
+              {t('settings.delete')}
+            </button>
+          </div>
+        ))
+      )}
+
+      <div className={styles.configFileLabel}>{t('settings.networkDenied')}</div>
+      {loaded && list.denied.length === 0 ? (
+        <div className={styles.empty}>{t('settings.networkEmpty')}</div>
+      ) : (
+        list.denied.map((e) => (
+          <div key={`d-${e.host}`} className={styles.card}>
+            <code className={styles.code}>{e.host}</code>
+            <button className={`${styles.miniBtn} ${styles.danger}`} onClick={() => void remove(e.host, true)}>
+              {t('settings.delete')}
+            </button>
+          </div>
+        ))
+      )}
     </div>
   )
 }

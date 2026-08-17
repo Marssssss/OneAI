@@ -88,6 +88,18 @@ pub mod method {
     pub const FEEDBACK_SUBMIT: &str = "feedback/submit";
     pub const FEEDBACK_LIST: &str = "feedback/list";
 
+    // Durable host allow/deny list — synchronous CRUD against the shared host
+    // allowlist store (no bus/Directive, like session/list). `host/list`
+    // returns both admitted and denied hosts so the Settings panel renders in
+    // one round-trip; `host/allow` / `host/deny` persist cross-session ("always"
+    // — the engine `NetworkProxy` consults the same `~/.oneai/oneai.db`
+    // table on every CONNECT); `host/remove` / `host/remove-denied` revoke.
+    pub const HOST_LIST: &str = "host/list";
+    pub const HOST_ALLOW: &str = "host/allow";
+    pub const HOST_DENY: &str = "host/deny";
+    pub const HOST_REMOVE: &str = "host/remove";
+    pub const HOST_REMOVE_DENIED: &str = "host/remove-denied";
+
     // Conversation ops.
     pub const CONVERSATION_COMPACT: &str = "conversation/compact";
     pub const PROJECT_INIT: &str = "project/init";

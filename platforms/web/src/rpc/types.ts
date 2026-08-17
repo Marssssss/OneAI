@@ -442,6 +442,24 @@ export interface FeedbackEntry {
   created_at_ms: number
 }
 
+// ─── Durable host allow/deny list (oneai-core::HostAllowEntry) ──────────────
+// Backs the `host/*` JSON-RPC methods. A host admitted via `host/allow`
+// ("always") persists in ~/.oneai/oneai.db and is honoured by the engine's
+// NetworkProxy on its next CONNECT — no re-prompt across sessions.
+
+export interface HostAllowEntry {
+  /** Bare lowercased hostname (no port). */
+  host: string
+  /** Epoch-millis when the host was admitted/denied. */
+  recorded_at_ms: number
+}
+
+/** `host/list` result — both lists in one round-trip. */
+export interface HostListResult {
+  allowed: HostAllowEntry[]
+  denied: HostAllowEntry[]
+}
+
 // ─── Paradigm (oneai-bus::BusParadigmKind, snake_case) ──────────────────────
 export type BusParadigmKind = 'plan' | 're_act' | 'reflect' | 'explore'
 

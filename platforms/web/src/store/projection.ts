@@ -16,6 +16,7 @@ import type {
   GroupRunParams,
   GroupSetOrderParams,
   GroupStartParams,
+  HostListResult,
   InteractionRequest,
   InteractionResponse,
   ParadigmSwitchParams,
@@ -1150,6 +1151,62 @@ export class ProjectionStore {
       this.state.lastError = e instanceof Error ? e.message : String(e)
     }
     this.emitNow()
+  }
+
+  // ── B5 actions: durable host allow/deny list ─────────────────────────────
+
+  /** Admit `host` persistently ("always") via `host/allow`. Best-effort: a
+   * network failure (app-server offline) is swallowed so the caller can still
+   * fall back to a session-only `Proceed` — the host simply won't persist
+   * across restarts. The engine `NetworkProxy` consults the same durable
+   * `~/.oneai/oneai.db` table on its next CONNECT, so the admitted host no
+   * longer re-prompts. */
+  async admitHost(host: string): Promise<void> {
+    try {
+      await this.rpc.call<{ host: string }, { ok: boolean }>('host/allow', { host })
+    } catch (e) {
+      // Swallow — the caller (ApprovalPanel "Always") still proceeds.
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  /** Deny `host` persistently via `host/deny` — future tunnel attempts are
+   * blocked without re-prompting. Best-effort like `admitHost`. */
+  async denyHost(host: string): Promise<void> {
+    try {
+      await this.rpc.call<{ host: string }, { ok: boolean }>('host/deny', { host })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  /** Both lists in one round-trip (the `host/list` result shape). Returns
+   * `{allowed:[],denied:[]}` on failure (the Settings panel shows empty). */
+  async listHosts(): Promise<HostListResult> {
+    try {
+      return await this.rpc.call<Record<string, never>, HostListResult>('host/list', {} as Record<string, never>)
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      return { allowed: [], denied: [] }
+    }
+  }
+
+  /** Revoke an admission (delete from the allowlist). */
+  async removeHost(host: string): Promise<void> {
+    try {
+      await this.rpc.call<{ host: string }, { ok: boolean }>('host/remove', { host })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  /** Revoke a denial (delete from the denylist). */
+  async removeDeniedHost(host: string): Promise<void> {
+    try {
+      await this.rpc.call<{ host: string }, { ok: boolean }>('host/remove-denied', { host })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
   }
 
   // ── W2 actions: approval / paradigm / plan-mode / cancel / details ────────

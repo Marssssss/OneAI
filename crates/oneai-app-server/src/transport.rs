@@ -29,7 +29,10 @@ use oneai_supervisor::{IpcListener, IpcStream};
 
 use crate::adapter::serve_connection;
 use crate::dispatcher::Dispatcher;
-use crate::{SharedAppProbe, SharedConversationStore, SharedFeedbackStore, SharedScenarioStore};
+use crate::{
+    SharedAppProbe, SharedConversationStore, SharedFeedbackStore, SharedHostAllowlistRpc,
+    SharedScenarioStore,
+};
 
 /// Channel buffer for the per-connection inbound/outbound JSON queues. Turns a
 /// slow frontend into back-pressure rather than unbounded memory.
@@ -44,6 +47,7 @@ pub fn serve_stdio(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -60,6 +64,7 @@ pub fn serve_stdio(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
         inbound_rx,
         outbound_tx,
@@ -69,6 +74,7 @@ pub fn serve_stdio(
 /// Run the IPC transport: bind a `oneai-supervisor` `IpcListener` (Unix domain
 /// socket / Windows named pipe) and accept connections, each bridged to a
 /// fresh `serve_connection`.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_ipc(
     path: &Path,
     bus: Arc<InProcessBus>,
@@ -76,6 +82,7 @@ pub async fn serve_ipc(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> std::io::Result<JoinHandle<()>> {
     let mut listener = IpcListener::bind(path).await?;
@@ -89,6 +96,7 @@ pub async fn serve_ipc(
                     let scenario_store = scenario_store.clone();
                     let session_store = session_store.clone();
                     let feedback_store = feedback_store.clone();
+                    let host_allowlist_rpc = host_allowlist_rpc.clone();
                     let probe = probe.clone();
                     tokio::spawn(async move {
                         serve_line_stream(
@@ -98,6 +106,7 @@ pub async fn serve_ipc(
                             scenario_store,
                             session_store,
                             feedback_store,
+                            host_allowlist_rpc,
                             probe,
                         )
                         .await;
@@ -113,6 +122,7 @@ pub async fn serve_ipc(
 }
 
 /// Bridge one newline-JSON byte stream (an `IpcStream`) to `serve_connection`.
+#[allow(clippy::too_many_arguments)]
 async fn serve_line_stream(
     stream: IpcStream,
     bus: Arc<InProcessBus>,
@@ -120,6 +130,7 @@ async fn serve_line_stream(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) {
     let (read, mut write) = tokio::io::split(stream);
@@ -170,6 +181,7 @@ async fn serve_line_stream(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
         inbound_rx,
         outbound_tx,
@@ -184,6 +196,7 @@ async fn serve_line_stream(
 /// Returns the listener task handle + the bound address (so callers/tests can
 /// discover an ephemeral port).
 #[cfg(feature = "ws")]
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_ws(
     addr: std::net::SocketAddr,
     bus: Arc<InProcessBus>,
@@ -191,6 +204,7 @@ pub async fn serve_ws(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> std::io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -206,6 +220,7 @@ pub async fn serve_ws(
                         let scenario_store = scenario_store.clone();
                         let session_store = session_store.clone();
                         let feedback_store = feedback_store.clone();
+                        let host_allowlist_rpc = host_allowlist_rpc.clone();
                         let probe = probe.clone();
                         tokio::spawn(async move {
                             match tokio_tungstenite::accept_async(stream).await {
@@ -217,6 +232,7 @@ pub async fn serve_ws(
                                         scenario_store,
                                         session_store,
                                         feedback_store,
+                                        host_allowlist_rpc,
                                         probe,
                                     )
                                     .await
@@ -241,6 +257,7 @@ pub async fn serve_ws(
 /// Bridge one WebSocket to `serve_connection`. Inbound = WS text frames →
 /// inbound_tx; outbound = outbound_rx → WS text frames.
 #[cfg(feature = "ws")]
+#[allow(clippy::too_many_arguments)]
 async fn serve_ws_stream(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     bus: Arc<InProcessBus>,
@@ -248,6 +265,7 @@ async fn serve_ws_stream(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) {
     use futures::{SinkExt, StreamExt};
@@ -287,6 +305,7 @@ async fn serve_ws_stream(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
         inbound_rx,
         outbound_tx,
@@ -323,6 +342,7 @@ pub fn serve_native_messaging(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -337,6 +357,7 @@ pub fn serve_native_messaging(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
         inbound_rx,
         outbound_tx,

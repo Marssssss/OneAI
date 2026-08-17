@@ -26,6 +26,9 @@ use oneai_app_server::{
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
+// `HostAllowlistStore` brings `add` / `add_denied` into scope —
+// `SqliteHostAllowlist`'s durable admit/deny are the trait methods.
+use oneai_core::HostAllowlistStore;
 use oneai_core::ProviderPoolConfig;
 use oneai_core::{traits::LlmProvider, Message};
 use oneai_core::{CloudProviderKind, ModelConfig, ProviderType, SkillDescriptor};
@@ -385,6 +388,64 @@ impl oneai_app_server::FeedbackStore for AppFeedbackStore {
 
     async fn list(&self, session_id: &str) -> Vec<oneai_core::FeedbackEntry> {
         self.app.list_feedback(session_id).await
+    }
+}
+
+// ─── HostAllowlistRpc impl ──────────────────────────────────────────────────
+//
+// Backs the `host/list` + `host/allow` + `host/deny` + `host/remove` +
+// `host/remove-denied` JSON-RPC methods (sync CRUD — no bus). Delegates to a
+// `SqliteHostAllowlist` built from the SAME `~/.oneai/oneai.db` the engine's
+// `NetworkProxy` consults (wired in `AppBuilder` from `app.sqlite_store`),
+// so a host admitted/denied here is honoured by the proxy's next CONNECT
+// without a shared in-memory `Arc`. When `sqlite_store` is `None` (no durable
+// persistence), the proxy runs an in-memory allowlist that's lost on exit —
+// the RPC honestly degrades: `list_*` returns empty, writes are no-ops.
+// `SqliteHostAllowlist`'s inherent methods swallow backend errors (warn +
+// empty/no-op), so this never panics or fails a turn.
+
+struct AppHostAllowlistRpc {
+    store: Option<oneai_persistence::SqliteHostAllowlist>,
+}
+
+#[async_trait::async_trait]
+impl oneai_app_server::HostAllowlistRpc for AppHostAllowlistRpc {
+    async fn list_allowed(&self) -> Vec<oneai_core::HostAllowEntry> {
+        match &self.store {
+            Some(s) => s.list_allowed().await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn list_denied(&self) -> Vec<oneai_core::HostAllowEntry> {
+        match &self.store {
+            Some(s) => s.list_denied().await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn admit(&self, host: String) {
+        if let Some(s) = &self.store {
+            s.add(host).await;
+        }
+    }
+
+    async fn deny(&self, host: String) {
+        if let Some(s) = &self.store {
+            s.add_denied(host).await;
+        }
+    }
+
+    async fn remove(&self, host: String) {
+        if let Some(s) = &self.store {
+            s.remove(&host).await;
+        }
+    }
+
+    async fn remove_denied(&self, host: String) {
+        if let Some(s) = &self.store {
+            s.remove_denied(&host).await;
+        }
     }
 }
 
@@ -784,6 +845,7 @@ pub(crate) struct EngineServer {
     pub scenario_store: SharedScenarioStore,
     pub conversation_store: oneai_app_server::SharedConversationStore,
     pub feedback_store: oneai_app_server::SharedFeedbackStore,
+    pub host_allowlist_rpc: oneai_app_server::SharedHostAllowlistRpc,
     pub probe: SharedAppProbe,
 }
 
@@ -874,6 +936,21 @@ pub(crate) async fn build_engine_server(
         Arc::new(AppConversationStore { app: app.clone() });
     let feedback_store: oneai_app_server::SharedFeedbackStore =
         Arc::new(AppFeedbackStore { app: app.clone() });
+    // Backs `host/*` JSON-RPC. Mirrors the durable store the engine's
+    // `NetworkProxy` consults (builder.rs wires `SqliteHostAllowlist` from
+    // the SAME `app.sqlite_store` when sqlite is configured), so a host
+    // admitted/denied via the web UI lands in the same `~/.oneai/oneai.db`
+    // table the proxy reads on its next CONNECT — no shared in-memory Arc
+    // needed. When sqlite isn't configured the proxy runs an in-memory
+    // allowlist (lost on exit, re-prompts next session), so the RPC returns
+    // empty / no-ops (honest degradation — there's nothing durable to list).
+    let host_allowlist_rpc: oneai_app_server::SharedHostAllowlistRpc =
+        Arc::new(AppHostAllowlistRpc {
+            store: app
+                .sqlite_store
+                .as_ref()
+                .map(|s| oneai_persistence::SqliteHostAllowlist::from_store(s.as_ref())),
+        });
     let probe: SharedAppProbe = Arc::new(AppProbeImpl {
         app: app.clone(),
         domain_pack_name: domain.map(|d| d.to_string()),
@@ -912,6 +989,7 @@ pub(crate) async fn build_engine_server(
         scenario_store,
         conversation_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
     })
 }
@@ -978,6 +1056,7 @@ pub fn cmd_app_server(
             es.scenario_store,
             es.conversation_store,
             es.feedback_store,
+            es.host_allowlist_rpc,
             es.probe,
         )
         .await?;

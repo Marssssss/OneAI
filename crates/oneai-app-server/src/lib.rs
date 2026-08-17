@@ -44,6 +44,7 @@ pub mod conversation;
 pub mod dialog;
 pub mod dispatcher;
 pub mod feedback;
+pub mod host_allowlist;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod probe;
@@ -56,6 +57,9 @@ pub use dispatcher::Dispatcher;
 pub use feedback::{
     FeedbackEntry, FeedbackStore, InMemoryFeedbackStore, SharedFeedbackStore, KIND_DOWN, KIND_NOTE,
     KIND_UP,
+};
+pub use host_allowlist::{
+    HostAllowEntry, HostAllowlistRpc, InMemoryHostAllowlistRpc, SharedHostAllowlistRpc,
 };
 #[cfg(feature = "http")]
 pub use http::serve_web;
@@ -205,6 +209,7 @@ pub async fn serve_all(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> Result<JoinHandle<()>> {
     if specs.is_empty() {
@@ -227,6 +232,7 @@ pub async fn serve_all(
         let scenario_store = scenario_store.clone();
         let session_store = session_store.clone();
         let feedback_store = feedback_store.clone();
+        let host_allowlist_rpc = host_allowlist_rpc.clone();
         let probe = probe.clone();
         let handle = match spec {
             ListenSpec::Stdio => {
@@ -239,6 +245,7 @@ pub async fn serve_all(
                     scenario_store,
                     session_store,
                     feedback_store,
+                    host_allowlist_rpc,
                     probe,
                 )
             }
@@ -250,6 +257,7 @@ pub async fn serve_all(
                     scenario_store,
                     session_store,
                     feedback_store,
+                    host_allowlist_rpc,
                     probe,
                 )
                 .await?;
@@ -265,6 +273,7 @@ pub async fn serve_all(
                         scenario_store,
                         session_store,
                         feedback_store,
+                        host_allowlist_rpc,
                         probe,
                     )
                     .await?;
@@ -279,6 +288,7 @@ pub async fn serve_all(
                         scenario_store,
                         session_store,
                         feedback_store,
+                        host_allowlist_rpc,
                         probe,
                     );
                     return Err(AppServerError::InvalidSpec(
@@ -292,6 +302,7 @@ pub async fn serve_all(
                 scenario_store,
                 session_store,
                 feedback_store,
+                host_allowlist_rpc,
                 probe,
             ),
         };
@@ -379,6 +390,7 @@ mod integration {
         conversation::{InMemoryConversationStore, SharedConversationStore},
         dispatcher::Dispatcher,
         feedback::{InMemoryFeedbackStore, SharedFeedbackStore},
+        host_allowlist::{InMemoryHostAllowlistRpc, SharedHostAllowlistRpc},
         protocol::{method, Request, Response},
         scenario::{builtin_presets, InMemoryScenarioStore},
         serve_all, NullAppProbe, SharedScenarioStore,
@@ -563,12 +575,15 @@ mod integration {
         let scenario_store: SharedScenarioStore =
             std::sync::Arc::new(InMemoryScenarioStore::from_seed(builtin_presets()));
         let feedback_store: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            std::sync::Arc::new(InMemoryHostAllowlistRpc::new());
         tokio::spawn(serve_connection(
             bus.clone(),
             dispatcher,
             scenario_store,
             session_store,
             feedback_store,
+            host_allowlist_rpc,
             std::sync::Arc::new(NullAppProbe),
             inbound_rx,
             outbound_tx,
@@ -708,12 +723,15 @@ mod integration {
         let sessions: SharedConversationStore =
             std::sync::Arc::new(InMemoryConversationStore::new());
         let feedback: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            std::sync::Arc::new(InMemoryHostAllowlistRpc::new());
         let err = serve_all(
             vec![],
             bus,
             store,
             sessions,
             feedback,
+            host_allowlist_rpc,
             std::sync::Arc::new(NullAppProbe),
         )
         .await
@@ -743,6 +761,8 @@ mod integration {
         let session_store: SharedConversationStore =
             std::sync::Arc::new(InMemoryConversationStore::new());
         let feedback_store: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            std::sync::Arc::new(InMemoryHostAllowlistRpc::new());
         let (_handle, bound) = super::transport::serve_ws(
             "127.0.0.1:0".parse().unwrap(),
             bus.clone(),
@@ -750,6 +770,7 @@ mod integration {
             scenario_store,
             session_store,
             feedback_store,
+            host_allowlist_rpc,
             std::sync::Arc::new(NullAppProbe),
         )
         .await

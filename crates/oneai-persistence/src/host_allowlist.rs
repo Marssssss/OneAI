@@ -188,6 +188,77 @@ impl SqliteHostAllowlist {
     pub fn db_path(&self) -> &std::path::Path {
         &self.db_path
     }
+
+    /// All admitted hosts (the `host_allowlist` table), ordered by host. Used
+    /// by the `host/list` RPC to render the Settings allowlist panel. An
+    /// open/read failure returns empty (errors swallowed + warned, matching
+    /// [`HostAllowlistStore::is_allowed`]).
+    pub async fn list_allowed(&self) -> Vec<oneai_core::HostAllowEntry> {
+        self.list_table("host_allowlist").await
+    }
+
+    /// All denied hosts (the `host_denylist` table), ordered by host.
+    pub async fn list_denied(&self) -> Vec<oneai_core::HostAllowEntry> {
+        self.list_table("host_denylist").await
+    }
+
+    /// Shared read for both tables. `recorded_at` is unix-seconds in the
+    /// schema; ×1000 to epoch-millis on the wire.
+    async fn list_table(&self, table: &str) -> Vec<oneai_core::HostAllowEntry> {
+        match self.open_connection() {
+            Ok(conn) => {
+                // `table` is a static literal here (caller passes one of two
+                // compile-time-known names), not user input — safe to format
+                // into the SQL.
+                let sql = format!("SELECT host, recorded_at FROM {table} ORDER BY host ASC");
+                let mut stmt = match conn.prepare(&sql) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("SqliteHostAllowlist::list({table}) prepare: {e}");
+                        return Vec::new();
+                    }
+                };
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok(oneai_core::HostAllowEntry {
+                            host: r.get::<_, String>(0)?,
+                            recorded_at_ms: r.get::<_, i64>(1).unwrap_or(0).max(0) as u64 * 1000,
+                        })
+                    })
+                    .ok();
+                match rows {
+                    Some(iter) => iter.filter_map(|r| r.ok()).collect(),
+                    None => Vec::new(),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("SqliteHostAllowlist::list({table}) open failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Remove `host` from the allowlist (un-admit). Idempotent — a missing row
+    /// is a no-op. Lowercases to match the storage normal form.
+    pub async fn remove(&self, host: &str) {
+        self.delete_from("host_allowlist", host).await
+    }
+
+    /// Remove `host` from the denylist (un-deny).
+    pub async fn remove_denied(&self, host: &str) {
+        self.delete_from("host_denylist", host).await
+    }
+
+    async fn delete_from(&self, table: &str, host: &str) {
+        let host = host.to_ascii_lowercase();
+        match self.open_connection() {
+            Ok(conn) => {
+                let sql = format!("DELETE FROM {table} WHERE host = ?1");
+                let _ = conn.execute(&sql, rusqlite::params![&host]);
+            }
+            Err(e) => tracing::warn!("SqliteHostAllowlist::delete({table}) open failed: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,14 +266,21 @@ mod tests {
     use super::*;
 
     /// A throwaway db in a unique temp path per test (no shared ~/.oneai).
+    /// A process-wide atomic counter guarantees uniqueness even when tokio
+    /// schedules two `#[tokio::test]`s within the same nanosecond — otherwise
+    /// they'd share the same dir + `hosts.db` and cross-contaminate.
     fn tmp_store() -> SqliteHostAllowlist {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "oneai-host-allow-{}-{}",
+            "oneai-host-allow-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
+            n,
         ));
         let _ = std::fs::create_dir_all(&dir);
         SqliteHostAllowlist::new(dir.join("hosts.db"))
@@ -279,6 +357,72 @@ mod tests {
         let s2 = SqliteHostAllowlist::new(&path);
         assert!(s2.is_allowed("persisted.example").await);
         assert!(s2.is_denied("blocked.example").await);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn list_empty_then_populated() {
+        let store = tmp_store();
+        assert!(store.list_allowed().await.is_empty());
+        assert!(store.list_denied().await.is_empty());
+        store.add("beta.example".to_string()).await;
+        store.add("alpha.example".to_string()).await; // ordering check
+        store.add_denied("evil.example".to_string()).await;
+        let allowed = store.list_allowed().await;
+        let denied = store.list_denied().await;
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed[0].host, "alpha.example"); // ORDER BY host
+        assert_eq!(allowed[1].host, "beta.example");
+        assert!(allowed[0].recorded_at_ms > 0);
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].host, "evil.example");
+    }
+
+    #[tokio::test]
+    async fn remove_clears_row() {
+        let store = tmp_store();
+        store.add("once-ok.example".to_string()).await;
+        store.add_denied("bad.example".to_string()).await;
+        assert!(store.is_allowed("once-ok.example").await);
+        store.remove("once-ok.example").await;
+        assert!(!store.is_allowed("once-ok.example").await);
+        assert!(store.list_allowed().await.is_empty());
+        // deny remove
+        store.remove_denied("bad.example").await;
+        assert!(!store.is_denied("bad.example").await);
+        assert!(store.list_denied().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_is_idempotent_for_missing_host() {
+        let store = tmp_store();
+        store.remove("never-seen.example").await; // no panic
+        store.remove_denied("never-seen.example").await;
+        assert!(store.list_allowed().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_survives_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "oneai-host-list-reopen-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        {
+            let s = SqliteHostAllowlist::new(&path);
+            s.add("persisted.example".to_string()).await;
+            s.add_denied("blocked.example".to_string()).await;
+        }
+        let s2 = SqliteHostAllowlist::new(&path);
+        let allowed = s2.list_allowed().await;
+        let denied = s2.list_denied().await;
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].host, "persisted.example");
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].host, "blocked.example");
         let _ = std::fs::remove_file(&path);
     }
 }

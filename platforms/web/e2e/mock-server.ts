@@ -20,6 +20,14 @@ interface ConnState {
   awaitingApproval: boolean
 }
 
+/** §B5 — in-memory host allow/deny store for the mock (seeded with one
+ * admitted host so the Settings panel renders non-empty). Mirrors the durable
+ * `~/.oneai/oneai.db` shape the real app-server returns. */
+const hostStore: { allowed: { host: string; recorded_at_ms: number }[]; denied: { host: string; recorded_at_ms: number }[] } = {
+  allowed: [{ host: 'api.example.com', recorded_at_ms: 1710000000000 }],
+  denied: [],
+}
+
 function send(ws: WebSocket, obj: unknown): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj))
 }
@@ -104,6 +112,50 @@ export async function startMockServer(): Promise<{ close: () => Promise<void> }>
         case 'group/set_order':
           respond(ws, id, { ok: true })
           break
+
+        // ── durable host allow/deny list (§B5) ──
+        // The mock keeps an in-memory store so the Settings panel's list + remove
+        // round-trips deterministically (no engine / SQLite). Seeded with one
+        // admitted host so the panel renders non-empty on open.
+        case 'host/list':
+          respond(ws, id, { allowed: hostStore.allowed, denied: hostStore.denied })
+          break
+        case 'host/allow': {
+          const h = String((params as { host?: string })?.host ?? '').toLowerCase()
+          if (h) {
+            hostStore.allowed = [
+              ...hostStore.allowed.filter((e) => e.host !== h),
+              { host: h, recorded_at_ms: Date.now() },
+            ].sort((a, b) => a.host.localeCompare(b.host))
+            hostStore.denied = hostStore.denied.filter((e) => e.host !== h)
+          }
+          respond(ws, id, { ok: true })
+          break
+        }
+        case 'host/deny': {
+          const h = String((params as { host?: string })?.host ?? '').toLowerCase()
+          if (h) {
+            hostStore.denied = [
+              ...hostStore.denied.filter((e) => e.host !== h),
+              { host: h, recorded_at_ms: Date.now() },
+            ].sort((a, b) => a.host.localeCompare(b.host))
+            hostStore.allowed = hostStore.allowed.filter((e) => e.host !== h)
+          }
+          respond(ws, id, { ok: true })
+          break
+        }
+        case 'host/remove': {
+          const h = String((params as { host?: string })?.host ?? '').toLowerCase()
+          hostStore.allowed = hostStore.allowed.filter((e) => e.host !== h)
+          respond(ws, id, { ok: true })
+          break
+        }
+        case 'host/remove-denied': {
+          const h = String((params as { host?: string })?.host ?? '').toLowerCase()
+          hostStore.denied = hostStore.denied.filter((e) => e.host !== h)
+          respond(ws, id, { ok: true })
+          break
+        }
 
         // ── turns ──
         case 'turn/run': {

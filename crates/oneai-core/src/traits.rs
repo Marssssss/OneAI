@@ -1531,6 +1531,27 @@ pub struct FeedbackEntry {
     pub created_at_ms: u64,
 }
 
+// ─── HostAllowEntry ─────────────────────────────────────────────────────────
+
+/// One row of the durable host allow/deny list — a host the user admitted (or
+/// blocked) for sandboxed egress, persisted across sessions. Lives in core
+/// (like [`FeedbackEntry`]) so both `oneai-persistence` (the durable
+/// [`HostAllowlistStore`] impl, which builds these from its `host_allowlist` /
+/// `host_denylist` tables) and `oneai-app-server` (the `HostAllowlistRpc` trait
+/// + wire shape) share one type without a dep-direction violation.
+///
+/// `recorded_at_ms` is epoch-millis (the durable table stores unix-seconds;
+/// the persistence impl ×1000s on read) so a frontend orders rows without a
+/// second round-trip. A plain data DTO — no `#[non_exhaustive]`, matching
+/// [`FeedbackEntry`], since it is constructed by value across crates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostAllowEntry {
+    /// Bare lowercased hostname (no port).
+    pub host: String,
+    /// Epoch-millis when the host was admitted/denied.
+    pub recorded_at_ms: u64,
+}
+
 // ─── EmbeddingService ──────────────────────────────────────────────────────
 
 /// Embedding service — generates vector embeddings from text.

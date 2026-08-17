@@ -30,9 +30,12 @@ use oneai_bus::{EngineBus, InProcessBus};
 
 use crate::adapter::serve_connection;
 use crate::dispatcher::Dispatcher;
-use crate::{SharedAppProbe, SharedConversationStore, SharedFeedbackStore, SharedScenarioStore};
+use crate::{
+    SharedAppProbe, SharedConversationStore, SharedFeedbackStore, SharedHostAllowlistRpc,
+    SharedScenarioStore,
+};
 
-/// Per-connection shared handles — the same five the ws transport threads
+/// Per-connection shared handles — the same six the ws transport threads
 /// through `serve_ws_stream`, captured into the axum router state so the
 /// upgrade handler can hand them to `serve_ws_axum`.
 struct WebState {
@@ -41,6 +44,7 @@ struct WebState {
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 }
 
@@ -55,6 +59,7 @@ const CHANNEL_BUFFER: usize = 256;
 /// Returns the bound address (the caller asked for `:0` to get an ephemeral
 /// port) + a `JoinHandle` that completes when the server stops. The shared
 /// `Dispatcher` yield-consumer is spawned here (mirrors `serve_all` lib.rs).
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_web(
     addr: SocketAddr,
     static_dir: Option<PathBuf>,
@@ -62,6 +67,7 @@ pub async fn serve_web(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> std::io::Result<(JoinHandle<()>, SocketAddr)> {
     // One process-wide dispatcher (subscribe before spawning so the receiver
@@ -76,6 +82,7 @@ pub async fn serve_web(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
     });
 
@@ -115,6 +122,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(st): State<Arc<WebState>>) -> im
             st.scenario_store.clone(),
             st.session_store.clone(),
             st.feedback_store.clone(),
+            st.host_allowlist_rpc.clone(),
             st.probe.clone(),
         )
     })
@@ -124,6 +132,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(st): State<Arc<WebState>>) -> im
 /// the same shape `transport::serve_ws_stream` builds for a tungstenite
 /// stream. Inbound text frames → `inbound_tx`; `outbound_rx` → outbound text
 /// frames. `serve_connection` owns all JSON-RPC request/event handling.
+#[allow(clippy::too_many_arguments)]
 async fn serve_ws_axum(
     socket: WebSocket,
     bus: Arc<InProcessBus>,
@@ -131,6 +140,7 @@ async fn serve_ws_axum(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
@@ -170,6 +180,7 @@ async fn serve_ws_axum(
         scenario_store,
         session_store,
         feedback_store,
+        host_allowlist_rpc,
         probe,
         inbound_rx,
         outbound_tx,
@@ -184,7 +195,8 @@ async fn serve_ws_axum(
 mod tests {
     use super::*;
     use crate::{
-        InMemoryConversationStore, InMemoryFeedbackStore, InMemoryScenarioStore, NullAppProbe,
+        InMemoryConversationStore, InMemoryFeedbackStore, InMemoryHostAllowlistRpc,
+        InMemoryScenarioStore, NullAppProbe,
     };
     use oneai_bus::InProcessBus;
     use serde_json::{json, Value};
@@ -204,6 +216,7 @@ mod tests {
             Arc::new(InMemoryScenarioStore::from_seed(vec![]));
         let session_store: SharedConversationStore = Arc::new(InMemoryConversationStore::new());
         let feedback_store: SharedFeedbackStore = Arc::new(InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc = Arc::new(InMemoryHostAllowlistRpc::new());
 
         let (_handle, bound) = serve_web(
             "127.0.0.1:0".parse().unwrap(),
@@ -212,6 +225,7 @@ mod tests {
             scenario_store,
             session_store,
             feedback_store,
+            host_allowlist_rpc,
             Arc::new(NullAppProbe),
         )
         .await
@@ -270,6 +284,7 @@ mod tests {
             Arc::new(InMemoryScenarioStore::from_seed(vec![])),
             Arc::new(InMemoryConversationStore::new()),
             Arc::new(InMemoryFeedbackStore::new()),
+            Arc::new(InMemoryHostAllowlistRpc::new()),
             Arc::new(NullAppProbe),
         )
         .await

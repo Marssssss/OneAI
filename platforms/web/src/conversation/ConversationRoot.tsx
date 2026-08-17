@@ -37,6 +37,11 @@ interface ConversationRootProps {
   onSlash: (cmd: SlashCommand) => void
   onSelectTool: (nodeId: string) => void
   onRespondApproval: (requestId: string, response: InteractionResponse) => void
+  /** §B5 — persist a host admission cross-session ("always") via `host/allow`,
+   *  then the caller proceeds. Best-effort. */
+  onAllowAlways?: (host: string) => Promise<void>
+  /** §B5 — persist a host denial cross-session via `host/deny`, then abort. */
+  onDenyAlways?: (host: string) => Promise<void>
   onPickScenario: (scenario: BusScenario) => void
   onDebrief: () => void
   /** §W4 B4 — record a 👍/👎/note against one assistant message node. */
@@ -73,6 +78,8 @@ export function ConversationRoot({
   onSlash,
   onSelectTool,
   onRespondApproval,
+  onAllowAlways,
+  onDenyAlways,
   onPickScenario,
   onDebrief,
   onSubmitFeedback,
@@ -210,6 +217,8 @@ export function ConversationRoot({
         current={snapshot.currentApproval}
         queueDepth={snapshot.approvalQueueDepth}
         onRespond={onRespondApproval}
+        onAllowAlways={onAllowAlways}
+        onDenyAlways={onDenyAlways}
       />
 
       <GoalBar working={snapshot.working} />

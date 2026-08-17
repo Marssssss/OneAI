@@ -36,7 +36,9 @@ use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo
 use crate::dispatcher::Dispatcher;
 use crate::probe::{ProviderEntryDto, SharedAppProbe};
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
-use crate::{SharedConversationStore, SharedFeedbackStore, SharedScenarioStore};
+use crate::{
+    SharedConversationStore, SharedFeedbackStore, SharedHostAllowlistRpc, SharedScenarioStore,
+};
 
 /// Serve one connection until either side closes.
 ///
@@ -51,6 +53,7 @@ pub async fn serve_connection(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
     mut inbound_rx: mpsc::Receiver<String>,
     outbound_tx: mpsc::Sender<String>,
@@ -78,6 +81,7 @@ pub async fn serve_connection(
                 let scenario_store = scenario_store.clone();
                 let session_store = session_store.clone();
                 let feedback_store = feedback_store.clone();
+                let host_allowlist_rpc = host_allowlist_rpc.clone();
                 let probe = probe.clone();
                 let out_tx = outbound_tx.clone();
                 // Each request runs on its own task so a long turn/run (awaiting
@@ -92,6 +96,7 @@ pub async fn serve_connection(
                         scenario_store,
                         session_store,
                         feedback_store,
+                        host_allowlist_rpc,
                         probe,
                     )
                     .await;
@@ -140,6 +145,7 @@ fn send(out_tx: &mpsc::Sender<String>, resp: &Response) {
 
 /// Map one JSON-RPC request to a Directive + bus submission and produce the
 /// JSON-RPC response.
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: crate::protocol::Request,
     bus: Arc<InProcessBus>,
@@ -147,6 +153,7 @@ async fn handle_request(
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
     feedback_store: SharedFeedbackStore,
+    host_allowlist_rpc: SharedHostAllowlistRpc,
     probe: SharedAppProbe,
 ) -> Response {
     let id = req.id.clone();
@@ -360,6 +367,61 @@ async fn handle_request(
                 })
                 .collect();
             Response::ok(id, json!({"feedback": arr}))
+        }
+        // host/list — both admitted and denied hosts in one round-trip so the
+        // Settings panel renders without a second call. Sync CRUD against the
+        // shared durable store (no bus/Directive, like feedback/list).
+        method::HOST_LIST => {
+            let allowed = host_allowlist_rpc.list_allowed().await;
+            let denied = host_allowlist_rpc.list_denied().await;
+            let allow_arr: Vec<Value> = allowed
+                .iter()
+                .map(|e| json!({"host": e.host, "recorded_at_ms": e.recorded_at_ms}))
+                .collect();
+            let deny_arr: Vec<Value> = denied
+                .iter()
+                .map(|e| json!({"host": e.host, "recorded_at_ms": e.recorded_at_ms}))
+                .collect();
+            Response::ok(id, json!({"allowed": allow_arr, "denied": deny_arr}))
+        }
+        // host/allow — admit a host persistently ("always"); the engine
+        // NetworkProxy consults the same durable table on its next CONNECT, so
+        // the host no longer re-prompts across sessions.
+        method::HOST_ALLOW => {
+            let host = match field::<String>(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            host_allowlist_rpc.admit(host).await;
+            ack(id)
+        }
+        // host/deny — block a host persistently; future tunnel attempts are
+        // blocked without re-prompting.
+        method::HOST_DENY => {
+            let host = match field::<String>(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            host_allowlist_rpc.deny(host).await;
+            ack(id)
+        }
+        // host/remove — revoke an admission (delete from the allowlist).
+        method::HOST_REMOVE => {
+            let host = match field::<String>(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            host_allowlist_rpc.remove(host).await;
+            ack(id)
+        }
+        // host/remove-denied — revoke a denial (delete from the denylist).
+        method::HOST_REMOVE_DENIED => {
+            let host = match field::<String>(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            host_allowlist_rpc.remove_denied(host).await;
+            ack(id)
         }
         // session/delete + conversation/compact are ack methods — their result
         // (SessionDeleted / CompactResult / Error) arrives as an `event`
@@ -670,6 +732,8 @@ mod tests {
             Arc::new(crate::conversation::InMemoryConversationStore::new());
         let feedback_store: SharedFeedbackStore =
             Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(1), "no/such/method", json!({}));
         let resp = handle_request(
@@ -679,6 +743,7 @@ mod tests {
             scenario_store,
             session_store,
             feedback_store,
+            host_allowlist_rpc,
             probe,
         )
         .await;
@@ -700,6 +765,8 @@ mod tests {
             Arc::new(crate::conversation::InMemoryConversationStore::new());
         let feedback_store: SharedFeedbackStore =
             Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(2), method, params);
         handle_request(
@@ -709,6 +776,7 @@ mod tests {
             scenario_store,
             session_store,
             feedback_store,
+            host_allowlist_rpc,
             probe,
         )
         .await
@@ -821,6 +889,8 @@ mod tests {
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
         let session_store: SharedConversationStore =
             Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(3), method, params);
         handle_request(
@@ -830,6 +900,7 @@ mod tests {
             scenario_store,
             session_store,
             store,
+            host_allowlist_rpc,
             probe,
         )
         .await
@@ -876,6 +947,92 @@ mod tests {
         assert_eq!(err.code, error_code::INVALID_PARAMS);
     }
 
+    /// Shared harness for the `host/*` synchronous-CRUD methods — one
+    /// `InMemoryHostAllowlistRpc` held across allow/list so the round-trip is
+    /// observable (mirrors `feedback_response`).
+    async fn host_response(store: SharedHostAllowlistRpc, method: &str, params: Value) -> Response {
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let dispatcher = Dispatcher::default();
+        let scenario_store: SharedScenarioStore =
+            Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let session_store: SharedConversationStore =
+            Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let feedback_store: SharedFeedbackStore =
+            Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let req = crate::protocol::Request::new(json!(5), method, params);
+        handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            session_store,
+            feedback_store,
+            store,
+            probe,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn host_allow_then_list_round_trips() {
+        let store: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
+        let allow = host_response(
+            store.clone(),
+            "host/allow",
+            json!({"host": "api.example.com"}),
+        )
+        .await;
+        assert!(allow.error.is_none());
+        assert_eq!(allow.result.unwrap()["ok"], json!(true));
+
+        let deny = host_response(store.clone(), "host/deny", json!({"host": "evil.example"})).await;
+        assert!(deny.error.is_none());
+
+        let list = host_response(store, "host/list", json!({})).await;
+        assert!(list.error.is_none());
+        let res = list.result.unwrap();
+        let allowed = res["allowed"].as_array().unwrap();
+        let denied = res["denied"].as_array().unwrap();
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0]["host"], json!("api.example.com"));
+        assert!(allowed[0]["recorded_at_ms"].is_u64());
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0]["host"], json!("evil.example"));
+    }
+
+    #[tokio::test]
+    async fn host_remove_revokes() {
+        let store: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
+        host_response(store.clone(), "host/allow", json!({"host": "a.example"})).await;
+        host_response(store.clone(), "host/deny", json!({"host": "b.example"})).await;
+        let rm = host_response(store.clone(), "host/remove", json!({"host": "a.example"})).await;
+        assert_eq!(rm.result.unwrap()["ok"], json!(true));
+        let rm_d = host_response(
+            store.clone(),
+            "host/remove-denied",
+            json!({"host": "b.example"}),
+        )
+        .await;
+        assert_eq!(rm_d.result.unwrap()["ok"], json!(true));
+        let list = host_response(store, "host/list", json!({})).await;
+        let res = list.result.unwrap();
+        assert!(res["allowed"].as_array().unwrap().is_empty());
+        assert!(res["denied"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_allow_rejects_missing_host() {
+        let store: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
+        let resp = host_response(store, "host/allow", json!({})).await;
+        let err = resp.error.expect("error response");
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
+    }
+
     /// Shared harness for the `session/*` synchronous-CRUD methods, wired with a
     /// seeded conversation store so rename/archive/list round-trip one store.
     async fn session_response(
@@ -890,6 +1047,8 @@ mod tests {
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
         let feedback_store: SharedFeedbackStore =
             Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(4), method, params);
         handle_request(
@@ -899,6 +1058,7 @@ mod tests {
             scenario_store,
             store,
             feedback_store,
+            host_allowlist_rpc,
             probe,
         )
         .await
