@@ -6,14 +6,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Versioning restarts at 0.1.0.** The `1.0.0` (2026-07-15) and `1.1.0`
-(2026-07-21) tags were premature — `crates.io` was never published and there
-are no external users — and substantial iteration / optimization remains ahead
-(see `docs/gap-analysis-2026-07.md` + `docs/evolution-plan-2026-07.md`). They
-are **retracted**: the shared crate version is reset from `1.1.0` → `0.1.0`,
-and the next release will be `0.1.0`, inheriting all work shipped through the
-`1.1.0` macOS builds. The existing `v1.0.0` / `v1.1.0` GitHub Releases
-(macOS `.app` zips) remain as historical artifacts.
+Tracking `docs/gap-analysis-2026-07.md` + `docs/evolution-plan-2026-07.md`. The
+`1.0.0` / `1.1.0` tags were premature (never published on crates.io, no
+external users) and are **retracted** — versioning restarted at `0.1.0`.
+
+## [0.2.0] — 2026-08-17
+
+First release to ship the **WebUI** (`oneai web` / `npx oneai-cli web`) — one
+command launches the engine + React SPA + `/ws` JSON-RPC on one port and
+opens the browser. The web dist is bundled into the npm tarball
+(`prepublishOnly` runs `build-web.sh`); cargo/binary users auto-detect
+`./platforms/web/dist` or `~/.oneai/web-dist`, or pass `--dist`.
+
+### WebUI (browser frontend, recommended)
+
+- W1–W5: React 19 + Vite SPA over the `oneai-app-server` ws JSON-RPC protocol
+  — projection store, 20fps stream coalescer, column-yield geometry + mobile
+  overlay drawer, scenario group-chat with speaker routing, settings/probe
+  RPC + live `ProviderPool` management, dark tokens (zero hard-coded colors),
+  vitest + Playwright e2e. `docs/webui-mechanism.md`.
+- `oneai web` one-command launch: `serve_web` (axum `http` feature, default-on)
+  serves `ServeDir` (SPA fallback) + `WebSocketUpgrade` on one route, bridging
+  to the existing `serve_connection` seam — zero duplicated JSON-RPC.
+- Attachments (drag/paste → base64 image `ContentBlock`), deliverables
+  (`ToolOutput.artifacts` from `write_file`/`apply_patch`), per-message
+  👍/👎 feedback (`feedback/submit`·`feedback/list` SQLite).
+- Network-egress authorization persisted: `host/*` sync RPC + web
+  Allow once/Always/Deny + Settings Network panel.
+- Session rename/archive land in the engine (`session/rename` +
+  `session/archive` RPC); WebUI drops localStorage session meta.
+
+### Engine / cross-frontend
+
+- Canonical session DB `~/.oneai/oneai.db` — macOS (FFI + sidecar), Windows,
+  and WebUI/TUI all share one backend (was `~/Library/Application Support/...`
+  on mac, diverging from the canonical default).
+- Architecture documented as migrating from in-process FFI to JSON-RPC 2.0 /
+  separate-process: the `oneai-uniffi` cdylib now exports only a 3-symbol bus
+  pump (`oneai_submit_directive` / `oneai_poll_yield` / `oneai_shutdown`) —
+  same `Directive`/`EngineYield` protocol as the sidecar. WebUI / VS Code /
+  browser are fully on the sidecar; macOS has FFI (default) + sidecar (opt-in);
+  Android stays in-process on-device; Windows has a sidecar skeleton (its C#
+  P/Invoke surface is stale vs the collapsed facade, pending migration).
+
+### Docs
+
+- README: webUI brand logo (theme-aware), WebUI promoted to the primary
+  frontend (npm + source run), "at a glance" removed, macOS sidecar build
+  steps updated.
+- `architecture.md` / `cross-platform-mechanism.md` (CN+EN) reframed for the
+  FFI → JSON-RPC migration; the legacy 29-symbol C facade references removed
+  in favor of the 3-symbol bus pump; honest per-target migration status table.
 
 ## [1.0.0] — 2026-07-15 (retracted)
 

@@ -1,6 +1,6 @@
 {
   "name": "oneai-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cross-platform launcher for the OneAI engine (oneai-cli TUI + subcommands, `oneai web` one-command webUI). Postinstall fetches the platform binary from GitHub Releases; the bin forwards argv + stdio with zero business logic. The web dist is bundled here (built at publish via prepublishOnly). Falls back to `oneai` on PATH if no binary is downloaded (e.g. a dev who `cargo install`-ed).",
   "license": "Apache-2.0",
   "repository": {
