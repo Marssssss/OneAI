@@ -130,9 +130,12 @@ entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Mod
   copy/share context menu, dark theme (follows system), first-run hint, stop button →
   `oneai_group_interrupt` / `oneai_session_interrupt`.
 - Provider settings (openai/anthropic/ollama presets) persisted as a JSON file;
-  SQLite db and the scenarios file all live under `%LOCALAPPDATA%\OneAI\`
-  (`provider.json`, `oneai.db`, `oneai_scenarios.json`). The app is unpackaged, so
-  `Windows.Storage.ApplicationData` (needs package identity) is NOT used.
+  provider config + scenarios live under `%LOCALAPPDATA%\OneAI\` (`provider.json`,
+  `oneai_scenarios.json`). The session SQLite db lives at the canonical
+  `%USERPROFILE%\.oneai\oneai.db` (same file the Rust default resolves, `oneai web` /
+  TUI / the future sidecar all share), so sessions created here appear in the webUI/TUI
+  and vice versa. The app is unpackaged, so `Windows.Storage.ApplicationData` (needs
+  package identity) is NOT used.
 - **Voice dictation deferred** — the input bar has a disabled mic placeholder button
   (WinRT speech recognition needs package identity in unpackaged WinUI 3; tracked as a
   follow-up).

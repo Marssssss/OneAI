@@ -520,14 +520,27 @@ final class ChatViewModel: ObservableObject {
     private var groupStreamKey: String = ""
 
     var dbPath: String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        // Canonical OneAI store — `~/.oneai/oneai.db`, the same file the Rust
+        // `SqliteSessionStore::with_defaults()` resolves (sqlite_store.rs) and
+        // that `oneai web` / the TUI write to. Keeping the FFI app + sidecar on
+        // this path means every client shares one backend DB: a session saved
+        // anywhere (macOS app, TUI, webUI) surfaces in every other client's
+        // sidebar. The old `~/Library/Application Support/oneai.db` was a valid
+        // non-container path but diverged from the canonical default, so macOS
+        // sessions never appeared in the webUI/TUI list. SQLite WAL +
+        // busy_timeout make cross-process sharing safe; only one engine is
+        // active at a time (the FFI app isn't built in sidecar mode).
+        let dir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".oneai")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("oneai.db").path
     }
 
     /// Application Support dir (no trailing file) — passed to
     /// `initOneaiLog` so the Rust `tracing` subscriber writes oneai_rust.log
-    /// next to oneai_stream.log / oneai.db.
+    /// next to oneai_stream.log. (The session DB no longer lives here —
+    /// `dbPath` now points at the canonical ~/.oneai/oneai.db so all clients
+    /// share one backend store.)
     var appSupportDir: String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -615,7 +628,7 @@ final class ChatViewModel: ObservableObject {
             let mgr = EngineProcessManager()
             mgr.extraEnv = providerEnvMap()
             // Share the SAME SQLite DB as the in-process FFI engine
-            // (~/Library/Application Support/oneai.db — `dbPath`). The
+            // (~/.oneai/oneai.db — `dbPath`, the canonical OneAI store). The
             // sidecar reads ONEAI_DB_PATH and calls sqlite_persistence_at,
             // so a session saved under FFI appears in the sidecar's sidebar
             // and vice versa — switching transports never loses history.

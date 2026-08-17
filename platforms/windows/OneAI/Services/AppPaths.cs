@@ -32,8 +32,30 @@ public static class AppPaths
     /// <summary>Provider config (kind/model/apiKey/baseUrl) as JSON.</summary>
     public static string ProviderConfigPath => Path.Combine(AppDataDir, "provider.json");
 
-    /// <summary>SQLite session/Memory db consumed by the Rust core.</summary>
-    public static string DbPath => Path.Combine(AppDataDir, "oneai.db");
+    /// <summary>
+    /// Canonical OneAI session/Memory db — `%USERPROFILE%\.oneai\oneai.db`,
+    /// the same file the Rust <c>SqliteSessionStore::with_defaults()</c>
+    /// resolves (sqlite_store.rs reads <c>HOME</c> then <c>USERPROFILE</c>)
+    /// and that <c>oneai web</c> / the TUI write to. Keeping the FFI app (and,
+    /// later, the sidecar via <c>ONEAI_DB_PATH</c>) on this path means every
+    /// client shares one backend DB: a session saved anywhere surfaces in
+    /// every other client's sidebar. Previously
+    /// <c>%LOCALAPPDATA%\OneAI\oneai.db</c>, which diverged from the canonical
+    /// default and so never appeared in the webUI/TUI session list. WAL +
+    /// busy_timeout make the cross-process sharing safe.
+    /// </summary>
+    public static string DbPath
+    {
+        get
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var dir = string.IsNullOrEmpty(home)
+                ? Path.Combine(AppContext.BaseDirectory, "data")
+                : Path.Combine(home, ".oneai");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "oneai.db");
+        }
+    }
 
     /// <summary>User-edited + preset scenarios (schema-versioned wrapper).</summary>
     public static string ScenariosPath => Path.Combine(AppDataDir, "oneai_scenarios.json");
