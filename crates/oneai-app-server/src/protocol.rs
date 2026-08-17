@@ -56,10 +56,19 @@ pub mod method {
     /// `scenario/list`: handled directly against the shared conversation
     /// store, no bus/Directive). Returns `{sessions: [...]}` where each entry
     /// carries `id` / `created_at_ms` / `updated_at_ms` / `message_count` /
-    /// `title` — the same shape the FFI `list_conversations` returns as
-    /// `SessionInfoView`, so a foreign UI renders one list regardless of
-    /// transport.
+    /// `title` / `archived` / `workspace?` — the same shape the FFI
+    /// `list_conversations` returns as `SessionInfoView`, so a foreign UI
+    /// renders one list regardless of transport.
     pub const SESSION_LIST: &str = "session/list";
+    /// Rename a saved conversation (§W4 #10). Sync CRUD against the shared
+    /// conversation store (no bus/Directive, like session/list). Params:
+    /// `{id, title}`; an empty/whitespace title is a no-op (keep current).
+    /// Returns `{ok: true}` on success, `-32603` when no session matches `id`.
+    pub const SESSION_RENAME: &str = "session/rename";
+    /// Toggle a saved conversation's archived flag (§W4 #10). Sync CRUD.
+    /// Params: `{id, archived: bool}`; returns `{ok: true}` or `-32603` when
+    /// not found.
+    pub const SESSION_ARCHIVE: &str = "session/archive";
 
     /// Open the native OS directory picker (deepseek-harness parity). The
     /// sidecar — a local process — shells out to the platform's folder-chooser

@@ -270,6 +270,39 @@ async fn handle_request(
             let arr: Vec<Value> = sessions.iter().map(session_info_to_json).collect();
             Response::ok(id, json!({"sessions": arr}))
         }
+        // session/rename — synchronous CRUD against the shared conversation
+        // store (no Directive/bus round-trip, like session/list). Params:
+        // {id, title}. The store swallows backend errors (returning false),
+        // so a false result is surfaced to the frontend as a not-found error;
+        // an empty title is a no-op (keep current) and acks.
+        method::SESSION_RENAME => {
+            let sid = match field::<String>(&params, "id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let title = match field::<String>(&params, "title") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            if session_store.rename(&sid, &title).await {
+                ack(id)
+            } else {
+                Response::err(id, RpcError::internal(format!("session not found: {sid}")))
+            }
+        }
+        // session/archive — toggle the archived flag. Params: {id, archived}.
+        method::SESSION_ARCHIVE => {
+            let sid = match field::<String>(&params, "id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let archived = opt_field::<bool>(&params, "archived").unwrap_or(true);
+            if session_store.set_archived(&sid, archived).await {
+                ack(id)
+            } else {
+                Response::err(id, RpcError::internal(format!("session not found: {sid}")))
+            }
+        }
         // dialog/pick_directory — open the native OS folder picker (macOS
         // `osascript choose folder` / Linux zenity·kdialog / Windows
         // FolderBrowserDialog) and return the chosen absolute path. The local
@@ -597,6 +630,7 @@ fn session_info_to_json(s: &SessionInfo) -> Value {
         "updated_at_ms": s.updated_at.timestamp_millis(),
         "message_count": s.message_count,
         "title": s.title,
+        "archived": s.archived,
     });
     if let Some(w) = &s.workspace {
         v["workspace"] = json!(w);
@@ -840,5 +874,98 @@ mod tests {
         let resp = feedback_response(store, "feedback/submit", json!({"kind": "up"})).await;
         let err = resp.error.expect("error response");
         assert_eq!(err.code, error_code::INVALID_PARAMS);
+    }
+
+    /// Shared harness for the `session/*` synchronous-CRUD methods, wired with a
+    /// seeded conversation store so rename/archive/list round-trip one store.
+    async fn session_response(
+        store: SharedConversationStore,
+        method: &str,
+        params: Value,
+    ) -> Response {
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let dispatcher = Dispatcher::default();
+        let scenario_store: SharedScenarioStore =
+            Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let feedback_store: SharedFeedbackStore =
+            Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let req = crate::protocol::Request::new(json!(4), method, params);
+        handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            store,
+            feedback_store,
+            probe,
+        )
+        .await
+    }
+
+    fn seeded_session_store() -> SharedConversationStore {
+        use chrono::Utc;
+        Arc::new(crate::conversation::InMemoryConversationStore::from_seed(
+            vec![oneai_core::SessionInfo::new(
+                "s1".into(),
+                Utc::now(),
+                Utc::now(),
+                3,
+            )],
+        ))
+    }
+
+    #[tokio::test]
+    async fn session_list_includes_archived_field() {
+        let store = seeded_session_store();
+        let resp = session_response(store, "session/list", json!({})).await;
+        assert!(resp.error.is_none());
+        let s = &resp.result.unwrap()["sessions"][0];
+        assert_eq!(s["id"], json!("s1"));
+        assert_eq!(s["archived"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn session_rename_then_list_reflects_new_title() {
+        let store = seeded_session_store();
+        let rename = session_response(
+            store.clone(),
+            "session/rename",
+            json!({"id": "s1", "title": "Renamed"}),
+        )
+        .await;
+        assert!(rename.error.is_none());
+        assert_eq!(rename.result.unwrap()["ok"], json!(true));
+
+        let list = session_response(store, "session/list", json!({})).await;
+        assert_eq!(
+            list.result.unwrap()["sessions"][0]["title"],
+            json!("Renamed")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_rename_missing_id_is_internal_error() {
+        let store = seeded_session_store();
+        let resp =
+            session_response(store, "session/rename", json!({"id": "nope", "title": "x"})).await;
+        let err = resp.error.expect("error response");
+        assert_eq!(err.code, error_code::INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn session_archive_toggles_then_list_reflects() {
+        let store = seeded_session_store();
+        let archive = session_response(
+            store.clone(),
+            "session/archive",
+            json!({"id": "s1", "archived": true}),
+        )
+        .await;
+        assert_eq!(archive.result.unwrap()["ok"], json!(true));
+
+        let list = session_response(store, "session/list", json!({})).await;
+        assert_eq!(list.result.unwrap()["sessions"][0]["archived"], json!(true));
     }
 }

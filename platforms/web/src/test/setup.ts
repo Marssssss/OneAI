@@ -5,7 +5,7 @@ import '@testing-library/jest-dom/vitest'
 
 // jsdom in this Vitest config exposes `localStorage` as a bare object without
 // the Storage interface (getItem/setItem/clear are undefined), so any code
-// touching localStorage (the workspace + sessionMeta stores) silently no-ops.
+// touching localStorage (the workspace store) silently no-ops.
 // Install a minimal in-memory Storage so those code paths are testable.
 const store = new Map<string, string>()
 const localStorageMock: Storage = {

@@ -2848,6 +2848,28 @@ impl App {
         }
     }
 
+    /// Rename a saved conversation's title (§W4 #10). Persists the new title to
+    /// both the `title` column and `metadata["title"]` (the override channel a
+    /// subsequent `save_conversation` honors, so the rename survives the next
+    /// turn). An empty/whitespace title is a no-op. No-op (Ok) when SQLite
+    /// persistence is not enabled; errors when no saved session matches `id`.
+    pub async fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
+        match &self.sqlite_store {
+            Some(store) => store.rename_conversation(id, title).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Toggle a saved conversation's archived flag (§W4 #10). Archived sessions
+    /// fold into a collapsed sidebar group. No-op (Ok) when SQLite persistence
+    /// is not enabled; errors when no saved session matches `id`.
+    pub async fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        match &self.sqlite_store {
+            Some(store) => store.set_conversation_archived(id, archived).await,
+            None => Ok(()),
+        }
+    }
+
     /// Record one per-message feedback entry (§W4). Best-effort no-op when
     /// SQLite persistence is not enabled or the write fails — feedback is
     /// non-critical UX state, never a turn failure.

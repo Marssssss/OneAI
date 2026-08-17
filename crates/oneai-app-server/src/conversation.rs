@@ -33,6 +33,17 @@ pub trait ConversationStore: Send + Sync {
     /// Errors are swallowed by the production impl (it `unwrap_or_default`s),
     /// so this returns the list directly; a backend that fails returns empty.
     async fn list(&self) -> Vec<SessionInfo>;
+
+    /// Rename a conversation's title. Returns `true` when a row was updated,
+    /// `false` when no saved session matches `id` (errors are swallowed — a
+    /// failing backend returns `false`, mirroring `list`'s swallow contract;
+    /// the adapter surfaces `false` as a not-found error to the frontend).
+    /// Empty/whitespace titles are a no-op returning `true`.
+    async fn rename(&self, id: &str, title: &str) -> bool;
+
+    /// Toggle a conversation's archived flag. Returns `true` when a row was
+    /// updated, `false` when not found (errors swallowed → `false`).
+    async fn set_archived(&self, id: &str, archived: bool) -> bool;
 }
 
 /// Shared, thread-safe handle threaded through `serve_all` → transports →
@@ -70,6 +81,31 @@ impl ConversationStore for InMemoryConversationStore {
     async fn list(&self) -> Vec<SessionInfo> {
         self.sessions.lock().await.clone()
     }
+    async fn rename(&self, id: &str, title: &str) -> bool {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            // No-op matches the durable impl: an empty rename is "keep current".
+            return true;
+        }
+        let mut sessions = self.sessions.lock().await;
+        for s in sessions.iter_mut() {
+            if s.id == id {
+                s.title = Some(trimmed.to_string());
+                return true;
+            }
+        }
+        false
+    }
+    async fn set_archived(&self, id: &str, archived: bool) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        for s in sessions.iter_mut() {
+            if s.id == id {
+                s.archived = archived;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -95,5 +131,28 @@ mod tests {
     async fn empty_store_returns_empty() {
         let store = InMemoryConversationStore::new();
         assert!(store.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_updates_title_and_returns_false_when_missing() {
+        let store = InMemoryConversationStore::from_seed(vec![info("a", 1)]);
+        assert!(store.rename("a", "New Title").await);
+        assert_eq!(store.list().await[0].title.as_deref(), Some("New Title"));
+        // Empty title is a no-op (keeps current), still returns true.
+        assert!(store.rename("a", "  ").await);
+        assert_eq!(store.list().await[0].title.as_deref(), Some("New Title"));
+        // Missing id → false.
+        assert!(!store.rename("nope", "x").await);
+    }
+
+    #[tokio::test]
+    async fn set_archived_toggles_and_returns_false_when_missing() {
+        let store = InMemoryConversationStore::from_seed(vec![info("a", 1)]);
+        assert!(!store.list().await[0].archived);
+        assert!(store.set_archived("a", true).await);
+        assert!(store.list().await[0].archived);
+        assert!(store.set_archived("a", false).await);
+        assert!(!store.list().await[0].archived);
+        assert!(!store.set_archived("nope", true).await);
     }
 }

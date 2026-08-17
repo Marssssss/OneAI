@@ -36,7 +36,6 @@ import { SettingsRoot } from './settings/SettingsRoot'
 import { SettingsStore } from './settings/settingsStore'
 import { SkillsModal } from './skills/SkillsModal'
 import { DomainPackModal } from './domainpack/DomainPackModal'
-import { sessionMetaStore, useSessionMeta } from './store/sessionMeta'
 import { localeStore, useLocale } from './i18n'
 import './theme/markdown.css'
 import styles from './App.module.css'
@@ -180,16 +179,13 @@ export default function App(): React.ReactNode {
   const snap = useProjection(projection)
   const sessions = useSessionList(sessionList)
   const scenarios = useScenarioList(scenarioList)
-  const sessionMeta = useSessionMeta()
   const workspaceSnap = useWorkspace()
 
-  // Resolve the active session's display title for the conversation header
-  // (client-side rename override wins over the engine's auto-derived title).
+  // Resolve the active session's display title for the conversation header.
+  // The title is engine-authoritative (a `session/rename` RPC persists it), so
+  // no client-side override remains.
   const activeSession = sessions.find((s) => s.id === snap.sessionId) ?? null
-  const sessionTitle =
-    activeSession !== null
-      ? (sessionMeta.titles[activeSession.id] ?? activeSession.title)
-      : null
+  const sessionTitle = activeSession !== null ? activeSession.title : null
 
   // ── handlers ────────────────────────────────────────────────────────────────
   const currentWorkspacePath = workspaceSnap.current
@@ -226,11 +222,27 @@ export default function App(): React.ReactNode {
   const handleRenameSession = (id: string, currentTitle: string) => {
     setModal({ kind: 'renameSession', id, title: currentTitle })
   }
-  const handleArchiveSession = (id: string) => {
-    sessionMetaStore.archive(id)
+  const handleArchiveSession = async (id: string) => {
+    try {
+      await rpc.call<{ id: string; archived: boolean }, { ok: boolean }>(
+        'session/archive',
+        { id, archived: true },
+      )
+    } catch {
+      /* offline — keep the list as-is */
+    }
+    await sessionList.refresh()
   }
-  const handleUnarchiveSession = (id: string) => {
-    sessionMetaStore.unarchive(id)
+  const handleUnarchiveSession = async (id: string) => {
+    try {
+      await rpc.call<{ id: string; archived: boolean }, { ok: boolean }>(
+        'session/archive',
+        { id, archived: false },
+      )
+    } catch {
+      /* offline */
+    }
+    await sessionList.refresh()
   }
   const handleDeleteSession = (id: string) => {
     // In-page confirm (no browser `window.confirm`). The actual delete runs on
@@ -242,9 +254,9 @@ export default function App(): React.ReactNode {
     try {
       await rpc.call<{ id: string }, { ok: boolean }>('session/delete', { id })
     } catch {
-      /* offline — still clear local meta so the row doesn't linger broken */
+      /* offline — the row lingers; refresh will drop it when the engine
+         catches up, or it stays until reconnect */
     }
-    sessionMetaStore.forget(id)
     await sessionList.refresh()
   }
 
@@ -417,7 +429,6 @@ export default function App(): React.ReactNode {
             currentSessionId={snap.sessionId}
             theme={theme}
             scenarios={scenarios}
-            sessionMeta={sessionMeta}
             onNewSession={handleNewSession}
             onPickSession={handlePickSession}
             onRenameSession={handleRenameSession}
@@ -520,8 +531,16 @@ export default function App(): React.ReactNode {
       {modal?.kind === 'renameSession' && (
         <SessionRenameModal
           currentTitle={modal.title}
-          onSubmit={(title) => {
-            sessionMetaStore.rename(modal.id, title)
+          onSubmit={async (title) => {
+            try {
+              await rpc.call<{ id: string; title: string }, { ok: boolean }>(
+                'session/rename',
+                { id: modal.id, title },
+              )
+            } catch {
+              /* offline — keep the prior title */
+            }
+            await sessionList.refresh()
             setModal(null)
           }}
           onClose={() => setModal(null)}

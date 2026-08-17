@@ -1,10 +1,10 @@
 // SessionList — the saved-conversations list backed by the `session/list`
-// synchronous RPC. Each row shows the (possibly client-overridden) title + a
-// "⋯" more menu (rename / archive / delete). Archived sessions (web-local
-// localStorage flag) are hidden from the main list and shown under a
-// collapsed "已归档 (N)" expander with an un-archive action. Delete is
-// engine-backed (`session/delete`); rename + archive are web-local until a
-// server-side RPC lands.
+// synchronous RPC. Each row shows the engine-authoritative title + a "⋯" more
+// menu (rename / archive / delete). Archived sessions fold into a collapsed
+// "已归档 (N)" expander with an un-archive action. Rename + archive are now
+// engine-backed (`session/rename` / `session/archive` RPCs) — the prior
+// web-local localStorage override was dropped so the state syncs across
+// frontends (native included). Delete is `session/delete`.
 //
 // Workspace grouping (deepseek-harness parity): the list defaults to grouping
 // active sessions by their bound `workspace` path (the picker sets it at
@@ -16,7 +16,6 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { SessionInfo } from '../rpc/types'
-import type { SessionMeta } from '../store/sessionMeta'
 import type { ScenarioEntry } from '../scenario/scenarioStore'
 import { MoreMenu } from '../components/MoreMenu'
 import { useWorkspace, workspaceStore } from '../workspace/workspaceStore'
@@ -46,11 +45,10 @@ function writeGroupMode(m: GroupMode): void {
 interface SessionListProps {
   sessions: SessionInfo[]
   currentId: string | null
-  meta: SessionMeta
   /** The scenario library — used to tag scenario-derived sessions with their
-   *  scenario icon (UI-2). A session whose auto-derived title is exactly a
-   *  scenario name, or `<name>·<topic…>`, is matched longest-name-first so a
-   *  prefix scenario (e.g. "面试") doesn't shadow a longer one ("面试演练"). */
+   *  scenario icon (UI-2). A session whose title is exactly a scenario name,
+   *  or `<name>·<topic…>`, is matched longest-name-first so a prefix scenario
+   *  (e.g. "面试") doesn't shadow a longer one ("面试演练"). */
   scenarios: ScenarioEntry[]
   onPick: (id: string) => void
   onRename: (id: string, currentTitle: string) => void
@@ -84,7 +82,6 @@ function scenarioIconFor(
 export function SessionList({
   sessions,
   currentId,
-  meta,
   scenarios,
   onPick,
   onRename,
@@ -103,16 +100,16 @@ export function SessionList({
     return <div className={styles.empty}>{t('sidebar.empty')}</div>
   }
 
-  const active = sessions.filter((s) => !meta.archived.has(s.id))
-  const archived = sessions.filter((s) => meta.archived.has(s.id))
+  const active = sessions.filter((s) => !s.archived)
+  const archived = sessions.filter((s) => s.archived)
 
   const row = (s: SessionInfo, archivedRow: boolean): ReactNode => {
-    const title = meta.titles[s.id] ?? s.title
-    // Only the engine-derived title carries the scenario marker (the title
-    // is `<name>·<topics>`); a client-side rename override drops it, so a
-    // renamed scenario session shows no icon (by design — the user gave it
-    // a custom name).
-    const icon = meta.titles[s.id] === undefined ? scenarioIconFor(s.title, scenarios) : null
+    const title = s.title
+    // The engine-derived title carries the scenario marker (the title is
+    // `<name>·<topics>`); a renamed session drops it (the user gave it a
+    // custom name that no longer matches a scenario), so a renamed scenario
+    // session shows no icon by design.
+    const icon = scenarioIconFor(s.title, scenarios)
     const items = archivedRow
       ? [
           { id: 'rename', label: t('session.rename') },

@@ -1430,6 +1430,15 @@ pub struct SessionInfo {
     /// workspace without re-reading every conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+
+    /// Whether the user archived this session (sidebar UX — archived sessions
+    /// fold into a collapsed "已归档" group and stay out of the active list).
+    /// Persisted as `conversation.metadata["archived"] = "1"` (absent ⇔ false);
+    /// surfaced in `session/list` so every frontend renders archive state
+    /// consistently (the prior web-only localStorage flag did not sync to
+    /// native). Defaults false for legacy/unknown rows.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 impl SessionInfo {
@@ -1447,6 +1456,7 @@ impl SessionInfo {
             message_count,
             title: None,
             workspace: None,
+            archived: false,
         }
     }
 
@@ -1466,6 +1476,7 @@ impl SessionInfo {
             message_count,
             title,
             workspace: None,
+            archived: false,
         }
     }
 
@@ -1474,6 +1485,13 @@ impl SessionInfo {
     /// conversation set it directly.
     pub fn with_workspace(mut self, workspace: Option<String>) -> Self {
         self.workspace = workspace;
+        self
+    }
+
+    /// Builder-style archived setter — `list_conversations` derives this from
+    /// `conversation.metadata["archived"]`.
+    pub fn with_archived(mut self, archived: bool) -> Self {
+        self.archived = archived;
         self
     }
 }

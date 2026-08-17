@@ -9,7 +9,6 @@ import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { BusScenario, SessionInfo } from '../rpc/types'
 import type { ScenarioEntry } from '../scenario/scenarioStore'
-import type { SessionMeta } from '../store/sessionMeta'
 import { MoreMenu } from '../components/MoreMenu'
 import { Tooltip } from '../components/Tooltip'
 import { SessionList } from './SessionList'
@@ -20,7 +19,6 @@ interface SidebarRootProps {
   currentSessionId: string | null
   theme: 'light' | 'dark'
   scenarios: ScenarioEntry[]
-  sessionMeta: SessionMeta
   onNewSession: () => void
   onPickSession: (id: string) => void
   onRenameSession: (id: string, currentTitle: string) => void
@@ -40,7 +38,6 @@ export function SidebarRoot({
   currentSessionId,
   theme,
   scenarios,
-  sessionMeta,
   onNewSession,
   onPickSession,
   onRenameSession,
@@ -92,7 +89,6 @@ export function SidebarRoot({
         <SessionList
           sessions={sessions}
           currentId={currentSessionId}
-          meta={sessionMeta}
           scenarios={scenarios}
           onPick={onPickSession}
           onRename={onRenameSession}

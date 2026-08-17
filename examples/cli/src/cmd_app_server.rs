@@ -344,6 +344,15 @@ impl oneai_app_server::ConversationStore for AppConversationStore {
     async fn list(&self) -> Vec<oneai_core::SessionInfo> {
         self.app.list_conversations().await
     }
+    async fn rename(&self, id: &str, title: &str) -> bool {
+        self.app.rename_conversation(id, title).await.is_ok()
+    }
+    async fn set_archived(&self, id: &str, archived: bool) -> bool {
+        self.app
+            .set_conversation_archived(id, archived)
+            .await
+            .is_ok()
+    }
 }
 
 // ─── FeedbackStore impl ─────────────────────────────────────────────────────

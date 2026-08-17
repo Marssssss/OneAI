@@ -566,6 +566,11 @@ export interface SessionInfo {
   updated_at_ms: number
   message_count: number
   title: string
+  /** Whether the user archived this session (sidebar UX — archived sessions
+   *  fold into a collapsed "已归档" group). Engine-backed (`session/archive`
+   *  RPC) so it syncs across frontends; previously a web-local localStorage
+   *  flag that did not reach native. Defaults false for legacy rows. */
+  archived: boolean
   /** The workspace (host working-dir path) this session was bound to at
    *  creation; absent for legacy/workspace-less sessions. The sidebar groups
    *  by this (the "其他" bucket holds absent ones). */

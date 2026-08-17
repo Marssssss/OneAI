@@ -8,9 +8,9 @@
 // is real to it.
 //
 // External store so `useWorkspace` re-renders the sidebar + composer chip on
-// change. localStorage-backed (like SessionMetaStore); limitation: a workspace
-// added in the web UI isn't shared with the macOS/native app (no shared store
-// for the alias map — the engine only knows the path string).
+// change. localStorage-backed; limitation: a workspace added in the web UI
+// isn't shared with the macOS/native app (no shared store for the alias map —
+// the engine only knows the path string).
 
 import { useSyncExternalStore } from 'react'
 

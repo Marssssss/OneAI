@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::MemoryPersistence;
 use oneai_core::{Conversation, MemoryEntry, MemoryFact, SessionInfo};
+use rusqlite::OptionalExtension;
 
 /// Folded "visible bubble" count for a slice of stored messages, mirroring
 /// the chat-view render fold (Swift `rebuildEntries` / Android `loadSession`
@@ -351,6 +352,111 @@ impl SqliteSessionStore {
             Err(_) => Vec::new(),
         }
     }
+
+    // ─── Session metadata edits (rename / archive) ──────────────────────────
+    //
+    // These mutate `conversations` metadata in place — a targeted UPDATE on
+    // `metadata_json` (and the `title` column for rename) without loading the
+    // full message blob, so a rename/archive is cheap and does not race a
+    // concurrent `save_conversation` that rewrites the whole row. `metadata
+    // ["title"]` is the override channel `conversation_title` already prefers,
+    // so a rename survives a later resave (which re-derives the title column
+    // from `conversation_title` → the renamed value). `metadata["archived"]`
+    // = "1" is the archive marker `list_conversations` reads back.
+
+    /// Read a conversation's `metadata_json` as a `HashMap` and whether the row
+    /// exists. Missing/legacy/corrupt metadata degrades to an empty map (with
+    /// `exists=true` when the row is present) so a rename/archive still writes
+    /// a clean blob rather than failing.
+    fn read_metadata_map(
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<(std::collections::HashMap<String, String>, bool)> {
+        let mut stmt = conn
+            .prepare("SELECT metadata_json FROM conversations WHERE id = ?1")
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare metadata read for '{id}': {e}"))
+            })?;
+        let mut rows = stmt.query(rusqlite::params![id]).map_err(|e| {
+            OneAIError::Persistence(format!("Failed to query metadata for '{id}': {e}"))
+        })?;
+        let row_opt = rows.next().map_err(|e| {
+            OneAIError::Persistence(format!("Failed to read metadata row for '{id}': {e}"))
+        })?;
+        match row_opt {
+            Some(row) => {
+                let json: Option<String> = row
+                    .get(0)
+                    .map_err(|e| OneAIError::Persistence(format!("metadata column read: {e}")))?;
+                Ok((deserialize_metadata(json.as_deref().unwrap_or("")), true))
+            }
+            None => Ok((std::collections::HashMap::new(), false)),
+        }
+    }
+
+    /// Rename a conversation's title. `title` is trimmed; an empty result is a
+    /// no-op (the caller treats empty as "keep current", so we never write an
+    /// empty title). Persists the new title both in the `title` column (so
+    /// `list_conversations` labels the row without re-deriving) and in
+    /// `metadata["title"]` (the override channel `conversation_title` prefers,
+    /// so a later `save_conversation` keeps the rename). Errors when no row
+    /// matches `id`.
+    pub async fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let conn = self.open_connection()?;
+        let (mut metadata, exists) = Self::read_metadata_map(&conn, id)?;
+        if !exists {
+            return Err(OneAIError::Persistence(format!("session '{id}' not found")));
+        }
+        metadata.insert("title".to_string(), trimmed.to_string());
+        let metadata_json = serialize_metadata(&metadata);
+        let rows = conn
+            .execute(
+                "UPDATE conversations SET title = ?1, metadata_json = ?2 WHERE id = ?3",
+                rusqlite::params![trimmed, metadata_json, id],
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to rename conversation '{id}': {e}"))
+            })?;
+        if rows == 0 {
+            return Err(OneAIError::Persistence(format!("session '{id}' not found")));
+        }
+        tracing::debug!("Renamed conversation '{id}' → '{trimmed}'");
+        Ok(())
+    }
+
+    /// Toggle a conversation's archived flag. Sets `metadata["archived"] = "1"`
+    /// when archiving, removes the key when un-archiving. Errors when no row
+    /// matches `id`.
+    pub async fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        let conn = self.open_connection()?;
+        let (mut metadata, exists) = Self::read_metadata_map(&conn, id)?;
+        if !exists {
+            return Err(OneAIError::Persistence(format!("session '{id}' not found")));
+        }
+        if archived {
+            metadata.insert("archived".to_string(), "1".to_string());
+        } else {
+            metadata.remove("archived");
+        }
+        let metadata_json = serialize_metadata(&metadata);
+        let rows = conn
+            .execute(
+                "UPDATE conversations SET metadata_json = ?1 WHERE id = ?2",
+                rusqlite::params![metadata_json, id],
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to archive conversation '{id}': {e}"))
+            })?;
+        if rows == 0 {
+            return Err(OneAIError::Persistence(format!("session '{id}' not found")));
+        }
+        tracing::debug!("Set conversation '{id}' archived={archived}");
+        Ok(())
+    }
 }
 
 // ─── Helper functions ───────────────────────────────────────────────────────
@@ -383,24 +489,11 @@ fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String>
     serde_json::from_str(json).unwrap_or_default()
 }
 
-/// Derive a short title from a conversation's first user message: take the
-/// first `User` message's text content, collapse runs of whitespace into
-/// single spaces, and truncate to `max` chars (appending "…" when truncated).
-/// Returns `None` when the conversation has no user message. Used as the
-/// `conversations.title` column so `list_conversations` can label rows without
-/// loading full histories.
-fn conversation_title(conversation: &Conversation, max: usize) -> Option<String> {
-    // An explicit title (set e.g. by group-chat scenarios as
-    // `metadata["title"] = "面试演练·前端工程师"`) wins over the default
-    // first-user-message derivation — group chats rarely carry a user message
-    // for the opener turn, so without this they fall back to "新对话".
-    if let Some(title) = conversation.metadata.get("title") {
-        let normalized = normalize_title(title, max);
-        if normalized.is_empty() {
-            return None;
-        }
-        return Some(normalized);
-    }
+/// First-user-message title derivation (the fallback when no explicit
+/// `metadata["title"]` override is present). Shared by `save_conversation`,
+/// which honors a rename override persisted in the DB before falling back to
+/// this.
+fn first_user_message_title(conversation: &Conversation, max: usize) -> Option<String> {
     let first_user = conversation
         .messages
         .iter()
@@ -781,26 +874,53 @@ impl MemoryPersistence for SqliteSessionStore {
         let messages_json = serde_json::to_string(&conversation.messages).map_err(|e| {
             OneAIError::Persistence(format!("Failed to serialize conversation '{}': {}", id, e))
         })?;
-        let metadata_json = serialize_metadata(&conversation.metadata);
         let now = chrono::Utc::now().to_rfc3339();
-        let title = conversation_title(conversation, 80);
 
-        // Check if conversation already exists
-        let exists: bool = conn
+        // Fetch existing metadata so a resave doesn't clobber override keys the
+        // live conversation doesn't carry. `session/rename` writes
+        // `metadata["title"]` and `session/archive` writes `metadata["archived"]`
+        // directly to the DB; without this merge, the next turn's save would
+        // overwrite them with the in-memory `conversation.metadata` (which lacks
+        // them) and silently revert the rename/archive. `conversation.metadata`
+        // wins for keys it sets (workspace / speaker / a scenario's own title)
+        // — it is the authoritative live state.
+        let existing_metadata: Option<(
+            std::collections::HashMap<String, String>,
+            bool, // row exists
+        )> = conn
             .query_row(
-                "SELECT COUNT(*) FROM conversations WHERE id = ?1",
+                "SELECT metadata_json FROM conversations WHERE id = ?1",
                 rusqlite::params![id],
-                |row| row.get::<_, i64>(0).map(|c| c > 0),
+                |row| row.get::<_, Option<String>>(0),
             )
+            .optional()
             .map_err(|e| {
-                OneAIError::Persistence(format!("Failed to check conversation existence: {}", e))
-            })?;
+                OneAIError::Persistence(format!("Failed to read existing metadata for '{id}': {e}"))
+            })?
+            .map(|j| (deserialize_metadata(j.as_deref().unwrap_or("")), true));
+        let (merged, exists) = match existing_metadata {
+            Some((m, _)) => (m, true),
+            None => (HashMap::new(), false),
+        };
+        let mut merged = merged;
+        for (k, v) in &conversation.metadata {
+            merged.insert(k.clone(), v.clone());
+        }
+        let metadata_json = serialize_metadata(&merged);
+        // Title: the merged override wins (so a rename persists across a
+        // resave); else derive from the conversation's first user message.
+        let title = merged
+            .get("title")
+            .map(|t| normalize_title(t, 80))
+            .filter(|t| !t.is_empty())
+            .or_else(|| first_user_message_title(conversation, 80));
 
         if exists {
             // Recompute the title on update too — the first user message could
-            // have changed (e.g. history rewritten by a compact). The metadata
-            // (which may carry an explicit `title`) is persisted verbatim so a
-            // resumed session keeps it; `conversation_title` still honors it.
+            // have changed (e.g. history rewritten by a compact). The merged
+            // metadata (which may carry an explicit `title` from a rename or a
+            // group-chat scenario) is persisted so a resumed session keeps it;
+            // `conversation_title`/`first_user_message_title` honor it.
             conn.execute(
                 "UPDATE conversations SET messages_json = ?2, metadata_json = ?3, updated_at = ?4, title = ?5 WHERE id = ?1",
                 rusqlite::params![id, messages_json, metadata_json, now, title],
@@ -1049,6 +1169,7 @@ impl MemoryPersistence for SqliteSessionStore {
             Option<String>,
             usize,
             Option<String>,
+            bool,
         )> = Vec::new();
 
         for row in rows {
@@ -1068,18 +1189,32 @@ impl MemoryPersistence for SqliteSessionStore {
                 .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
                 .and_then(|v| v.get("workspace").cloned())
                 .and_then(|v| v.as_str().map(|s| s.to_string()));
+            let archived = metadata_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                .and_then(|v| v.get("archived").cloned())
+                .and_then(|v| v.as_str().map(|s| s == "1"))
+                .unwrap_or(false);
             if id.contains(oneai_core::DISCARDED_SNAPSHOT_MARKER) {
                 if let Some(parent) = id.split(oneai_core::DISCARDED_SNAPSHOT_MARKER).next() {
                     snapshots.entry(parent.to_string()).or_default().push(msgs);
                 }
             } else {
                 let count = folded_display_count(&msgs);
-                tops.push((id, created_at_str, updated_at_str, title, count, workspace));
+                tops.push((
+                    id,
+                    created_at_str,
+                    updated_at_str,
+                    title,
+                    count,
+                    workspace,
+                    archived,
+                ));
             }
         }
 
         let mut sessions = Vec::with_capacity(tops.len());
-        for (id, created_at_str, updated_at_str, title, mut count, workspace) in tops {
+        for (id, created_at_str, updated_at_str, title, mut count, workspace, archived) in tops {
             if let Some(children) = snapshots.get(&id) {
                 for child in children {
                     count += folded_display_count(child);
@@ -1093,7 +1228,8 @@ impl MemoryPersistence for SqliteSessionStore {
                 .unwrap_or_else(|_| chrono::Utc::now());
             sessions.push(
                 SessionInfo::with_title(id, created_at, updated_at, count, title)
-                    .with_workspace(workspace),
+                    .with_workspace(workspace)
+                    .with_archived(archived),
             );
         }
 
@@ -1935,6 +2071,71 @@ mod tests {
         let (store, _dir) = make_store();
         let loaded = store.load_conversation("nonexistent").await.unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rename_conversation_round_trip() {
+        let (store, _dir) = make_store();
+        let mut conv = Conversation::with_id("rc".to_string());
+        conv.add_message(oneai_core::Message::user("Hello original".to_string()));
+        store.save_conversation("rc", &conv).await.unwrap();
+
+        // Derived title comes from the first user message before rename.
+        assert_eq!(
+            store.list_conversations().await.unwrap()[0]
+                .title
+                .as_deref(),
+            Some("Hello original")
+        );
+
+        store
+            .rename_conversation("rc", "My Renamed Chat")
+            .await
+            .unwrap();
+        let info = store.list_conversations().await.unwrap()[0].clone();
+        assert_eq!(info.title.as_deref(), Some("My Renamed Chat"));
+        assert!(!info.archived);
+
+        // The rename must survive a later resave (the override channel
+        // metadata["title"] is what conversation_title prefers).
+        store.save_conversation("rc", &conv).await.unwrap();
+        assert_eq!(
+            store.list_conversations().await.unwrap()[0]
+                .title
+                .as_deref(),
+            Some("My Renamed Chat")
+        );
+
+        // Empty title is a no-op — the previous title is retained.
+        store.rename_conversation("rc", "   ").await.unwrap();
+        assert_eq!(
+            store.list_conversations().await.unwrap()[0]
+                .title
+                .as_deref(),
+            Some("My Renamed Chat")
+        );
+
+        // Renaming a missing session errors.
+        assert!(store.rename_conversation("nope", "x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_archive_conversation_round_trip() {
+        let (store, _dir) = make_store();
+        let mut conv = Conversation::with_id("ac".to_string());
+        conv.add_message(oneai_core::Message::user("Hi".to_string()));
+        store.save_conversation("ac", &conv).await.unwrap();
+        assert!(!store.list_conversations().await.unwrap()[0].archived);
+
+        store.set_conversation_archived("ac", true).await.unwrap();
+        assert!(store.list_conversations().await.unwrap()[0].archived);
+
+        // Un-archive clears the flag.
+        store.set_conversation_archived("ac", false).await.unwrap();
+        assert!(!store.list_conversations().await.unwrap()[0].archived);
+
+        // Archiving a missing session errors.
+        assert!(store.set_conversation_archived("nope", true).await.is_err());
     }
 
     #[tokio::test]
