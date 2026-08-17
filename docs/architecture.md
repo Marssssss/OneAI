@@ -8,11 +8,11 @@ OneAI 是一个用 Rust 编写的全栈 Agent 框架，提供构建、运行、�
 
 - **模块化** —— 31 个独立 crate，各司其职，按需使用。
 - **类型安全** —— 密封枚举层级（公开枚举都加 `#[non_exhaustive]`）、trait 驱动抽象，无字符串配置。
-- **统一引擎总线 + 前端协议三层** —— [oneai-bus](bus-mechanism.md) 是引擎与一切前端之间的唯一 seam：`Directive`（前端→引擎）+ `EngineYield`（引擎→前端）两通道，TUI / 六端原生 App / `oneai serve` sidecar 全走它，前端只当「Directive writer + Yield reader」。非 Rust 前端（IDE / web / TS-JS / 桌面 Swift·C#）不直说 newline-JSON，而经 [oneai-app-server](app-server-mechanism.md) 的 JSON-RPC 2.0 前端协议层（L2 适配器，映射到 L3 bus 的 Directive/EngineYield），一个引擎进程并发喂 VS Code / 浏览器 / macOS·Windows 桌面 sidecar 四类前端。
+- **统一引擎总线 + 前端协议三层** —— [oneai-bus](bus-mechanism.md) 是引擎与一切前端之间的唯一 seam：`Directive`（前端→引擎）+ `EngineYield`（引擎→前端）两通道，TUI / 六端原生 App / `oneai serve` sidecar 全走它，前端只当「Directive writer + Yield reader」。非 Rust 前端（IDE / web / TS-JS / 桌面 Swift·C#）不直说 newline-JSON，而经 [oneai-app-server](app-server-mechanism.md) 的 JSON-RPC 2.0 前端协议层（L2 适配器，映射到 L3 bus 的 Directive/EngineYield），一个引擎进程并发喂 [WebUI](webui-mechanism.md)（浏览器，零安装主推）/ VS Code / 浏览器 / macOS·Windows 桌面 sidecar 四类前端——`oneai web` 一行起引擎 + SPA + `/ws`。
 - **领域可插拔** —— [DomainPack](domain-pack-mechanism.md) 让领域知识声明式、可组合、一行切换；可对照 JSON Schema 校验，并通过 pack 市场共享。
 - **多 Agent 原生** —— 模型驱动的 SubAgent 分层委托（`delegate` 元工具，一轮多委托 + 依赖感知并行波次调度）+ 范式切换（`switch_paradigm` 进入 Plan/Reflect/Explore 图流）+ 引擎级 [GroupChat](multi-agent-mechanism.md) 原语驱动场景化多角色对话（群聊 yield 带 `speaker` 标签经 bus 发出）。
 - **生产级基础设施** —— [ProviderPool](provider-mechanism.md) 降级链、SmartRouter 多因子路由、用量统计、限流、熔断、Token 感知的上下文管理。
-- **跨平台** —— [UniFFI + 手写 extern "C" facade](cross-platform-mechanism.md) 支持 macOS / Windows / Linux / Android / iOS / HarmonyOS，同一套 Rust 内核。
+- **跨平台** —— [UniFFI + 手写 extern "C" bus pump](cross-platform-mechanism.md) 支持 macOS / Windows / Linux / Android / iOS / HarmonyOS，同一套 Rust 内核；**正从 in-process FFI 迁向 JSON-RPC 2.0 / 分离进程**——桌面/IDE/web 走 `oneai app-server` sidecar（WebUI/VS Code/浏览器已全量、macOS opt-in），移动端 on-device 保留 in-process（C-ABI 表面已塌成 3 符号 bus pump，与 sidecar 同一 `Directive`/`EngineYield` 协议）。
 - **可评测可自演进** —— 内置 [OpenInference 兼容轨迹](trace-mechanism.md) + 独立[评测框架](eval-mechanism.md)（6 指标、3 套件 + SWE-bench 三轴）+ [自演进外循环](self-evolution-mechanism.md)（GEPA 式在 pack/loop 配置空间变异 + Pareto 选择，不动权重）。
 - **人机协作 + 沙箱** —— 高风险工具通过[原生 UI 对话框审批](permission-mechanism.md)；执行前的 Plan 模式审批门；`code_interpreter` / `shell` 在 Seatbelt（mac）/ Bubblewrap（linux）沙箱内执行，出网经本地 CONNECT 代理 + per-host 审批白名单。
 - **动态 Agentic Loop** —— 不是固定管线；每轮迭代动态决策（直接回答 / 工具调用 / 委托子 Agent / 切换范式）。
@@ -50,6 +50,7 @@ oneai-uniffi + oneai-platform-* FFI / 原生平台适配（c_facade 3 符号 bus
 flowchart TB
     subgraph FE ["🖥️ 前端 · Frontends —— 同一内核，多条接入路径"]
         direction LR
+        WebUI["WebUI（浏览器，主推）<br/>platforms/web · React SPA<br/>ws 直连 app-server，零安装跨端"]
         TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>通用 Agentic 执行 / 子系统探索"]
         Native["原生 App<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>场景化多 Agent 群聊"]
         Nrc["非 Rust 前端<br/>VS Code 扩展 · 浏览器扩展<br/>桌面 sidecar（Swift/C#）"]
@@ -58,10 +59,10 @@ flowchart TB
     subgraph FFI ["🔌 FFI 层 · oneai-uniffi + oneai-platform-*"]
         direction LR
         UniFFI["UniFFI 绑定<br/>Kotlin · Swift · Python"]
-        CFacade["手写 extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON 过界，CJK 正确往返<br/>+ 3 符号 bus 泵"]
+        CFacade["手写 extern C bus pump（3 符号）<br/>C# · C++ · ArkTS<br/>submit_directive / poll_yield / shutdown<br/>UTF-8 JSON 过界，CJK 正确往返"]
     end
 
-    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 前端协议层（L2）<br/>method/event ↔ Directive/EngineYield<br/>多 transport：stdio / ipc / ws / native-messaging<br/>喂 Nrc 四类前端（Codex 式 auto-spawn）"]
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 前端协议层（L2）<br/>method/event ↔ Directive/EngineYield<br/>多 transport：stdio / ipc / ws / native-messaging<br/>喂 WebUI + VS Code / 浏览器 / 桌面 sidecar 多类前端（Codex 式 auto-spawn）"]
 
     Bus["🚌 oneai-bus · 统一引擎总线（L3）<br/>Directive (前端→引擎, mpsc 512)<br/>EngineYield (引擎→前端, broadcast 1024)<br/>in-process Arc<InProcessBus> 或 oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
 
@@ -112,6 +113,7 @@ flowchart TB
 
     Native --> UniFFI
     Native --> CFacade
+    WebUI -->|JSON-RPC over ws| AppServer
     TUI --> Bus
     UniFFI --> Bus
     CFacade --> Bus
@@ -171,6 +173,7 @@ flowchart TB
 |---|---|---|
 | 引擎总线 | [bus-mechanism.md](bus-mechanism.md) | Directive/EngineYield 协议 + in-process/sidecar 双形态 |
 | App-Server | [app-server-mechanism.md](app-server-mechanism.md) | JSON-RPC 2.0 前端协议层 + 多 transport + 四类非 Rust 前端 |
+| WebUI（浏览器前端）| [webui-mechanism.md](webui-mechanism.md) | React SPA + ws JSON-RPC + 投影/节流/场景 + `oneai web` 一行启动 |
 | AgentLoop / 委托 / GroupChat | [multi-agent-mechanism.md](multi-agent-mechanism.md) | 动态循环 + 模型驱动委托 + 场景化多角色对话 |
 | 记忆 | [memory-mechanism.md](memory-mechanism.md) | Letta 三层 + 压缩增量抽取 + 持久化 |
 | 上下文管理 | [context-management-mechanism.md](context-management-mechanism.md) | 持久/瞬时分离装配 + token 预算 + 三层模型上下文解析 |
@@ -193,6 +196,6 @@ flowchart TB
 | Supervisor | [supervisor-mechanism.md](supervisor-mechanism.md) | headless daemon + 实例注册表 + 崩溃恢复 + IPC |
 | 轨迹日志 | [trace-mechanism.md](trace-mechanism.md) | OpenInference 兼容 + OTEL 导出 |
 | 持久化 | [persistence-mechanism.md](persistence-mechanism.md) | SQLite + 文件事件日志双通路 |
-| 跨平台 | [cross-platform-mechanism.md](cross-platform-mechanism.md) | UniFFI + extern C facade，一套内核六端 |
+| 跨平台 | [cross-platform-mechanism.md](cross-platform-mechanism.md) | UniFFI + 3 符号 C-ABI bus pump，一套内核六端；正迁向 JSON-RPC 分离进程 |
 
 > 演进背景与缺口分析见 [evolution-plan-2026-07.md](evolution-plan-2026-07.md) 与 [gap-analysis-2026-07.md](gap-analysis-2026-07.md)（内部规划文档）。

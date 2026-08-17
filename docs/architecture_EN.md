@@ -8,11 +8,11 @@ OneAI is a full-stack agent framework written in Rust, providing everything need
 
 - **Modular** — 31 independent crates, each with one job, used on demand.
 - **Type-safe** — sealed-enum hierarchies (every public enum is `#[non_exhaustive]`), trait-driven abstractions, no string-config.
-- **Unified engine bus + three-layer frontend protocol** — [oneai-bus](bus-mechanism_EN.md) is the single seam between the engine and every frontend: two channels `Directive` (frontend → engine) + `EngineYield` (engine → frontend). TUI / six native apps / the `oneai serve` sidecar all consume it; a frontend is just a "Directive writer + Yield reader". Non-Rust frontends (IDE / web / TS-JS / desktop Swift·C#) don't speak newline-JSON directly — they go through [oneai-app-server](app-server-mechanism_EN.md), a JSON-RPC 2.0 frontend-protocol layer (an L2 adapter mapping to the L3 bus's Directive/EngineYield). One engine process feeds four frontend classes concurrently: VS Code / browser / macOS·Windows desktop sidecar.
+- **Unified engine bus + three-layer frontend protocol** — [oneai-bus](bus-mechanism_EN.md) is the single seam between the engine and every frontend: two channels `Directive` (frontend → engine) + `EngineYield` (engine → frontend). TUI / six native apps / the `oneai serve` sidecar all consume it; a frontend is just a "Directive writer + Yield reader". Non-Rust frontends (IDE / web / TS-JS / desktop Swift·C#) don't speak newline-JSON directly — they go through [oneai-app-server](app-server-mechanism_EN.md), a JSON-RPC 2.0 frontend-protocol layer (an L2 adapter mapping to the L3 bus's Directive/EngineYield). One engine process feeds four frontend classes concurrently — the [WebUI](webui-mechanism_EN.md) (browser, zero-install, recommended) / VS Code / browser / macOS·Windows desktop sidecar — where `oneai web` launches the engine + SPA + `/ws` in one command.
 - **Domain-pluggable** — [DomainPack](domain-pack-mechanism_EN.md) makes domain knowledge declarative, composable, one-line-switchable; validatable against a JSON Schema and shareable via a pack market.
 - **Natively multi-agent** — model-driven SubAgent hierarchical delegation (`delegate` meta-tool, multi-delegate per turn + dependency-aware parallel-wave scheduling) + paradigm switch (`switch_paradigm` into Plan/Reflect/Explore graph flows) + engine-level [GroupChat](multi-agent-mechanism_EN.md) primitive for scenario-based multi-role conversations (group-chat yields carry a `speaker` tag over the bus).
 - **Production-grade infrastructure** — [ProviderPool](provider-mechanism_EN.md) fallback chain, SmartRouter multi-factor routing, usage tracking, rate limiting, circuit breaking, token-aware context management.
-- **Cross-platform** — [UniFFI + hand-written extern "C" facade](cross-platform-mechanism_EN.md) for macOS / Windows / Linux / Android / iOS / HarmonyOS, one Rust core.
+- **Cross-platform** — [UniFFI + hand-written extern "C" bus pump](cross-platform-mechanism_EN.md) for macOS / Windows / Linux / Android / iOS / HarmonyOS, one Rust core; **migrating from in-process FFI to JSON-RPC 2.0 / separate-process** — desktop/IDE/web go through a `oneai app-server` sidecar (WebUI/VS Code/browser fully on it, macOS opt-in), mobile stays in-process on-device (the C-ABI surface collapsed to a 3-symbol bus pump, same `Directive`/`EngineYield` protocol as the sidecar).
 - **Evaluable & self-evolving** — built-in [OpenInference-compatible tracing](trace-mechanism_EN.md) + a standalone [eval framework](eval-mechanism_EN.md) (6 metrics, 3 suites + SWE-bench three-axis) + an [outer self-evolution loop](self-evolution-mechanism_EN.md) (GEPA-style mutation + Pareto selection over the pack/loop config space, no weight updates).
 - **Human-in-the-loop & sandboxed** — high-risk tools gated by [native UI dialogs](permission-mechanism_EN.md); a Plan-mode approval gate before execution; `code_interpreter` / `shell` run inside a Seatbelt (mac) / Bubblewrap (linux) sandbox, with outbound network funnelled through a local CONNECT proxy + per-host approval allowlist.
 - **Dynamic Agentic Loop** — not a fixed pipeline; each iteration dynamically decides (direct answer / tool call / delegate to a sub-agent / switch paradigm).
@@ -50,6 +50,7 @@ The integration point is **`oneai-app`'s `AppBuilder`** (`crates/oneai-app/src/b
 flowchart TB
     subgraph FE ["🖥️ Frontends — one core, multiple access paths"]
         direction LR
+        WebUI["WebUI (browser, recommended)<br/>platforms/web · React SPA<br/>ws to app-server, zero-install, cross-platform"]
         TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>general agentic execution / subsystem exploration"]
         Native["Native apps<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>scenario-based multi-agent group chat"]
         Nrc["Non-Rust frontends<br/>VS Code extension · browser extension<br/>desktop sidecar (Swift/C#)"]
@@ -58,10 +59,10 @@ flowchart TB
     subgraph FFI ["🔌 FFI layer · oneai-uniffi + oneai-platform-*"]
         direction LR
         UniFFI["UniFFI bindings<br/>Kotlin · Swift · Python"]
-        CFacade["Hand-written extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON across the boundary, CJK round-trips correctly<br/>+ 3-symbol bus pump"]
+        CFacade["Hand-written extern C bus pump (3 symbols)<br/>C# · C++ · ArkTS<br/>submit_directive / poll_yield / shutdown<br/>UTF-8 JSON across the boundary, CJK round-trips correctly"]
     end
 
-    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 frontend-protocol layer (L2)<br/>method/event ↔ Directive/EngineYield<br/>multi-transport: stdio / ipc / ws / native-messaging<br/>feeds the four Nrc frontend classes (Codex-style auto-spawn)"]
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 frontend-protocol layer (L2)<br/>method/event ↔ Directive/EngineYield<br/>multi-transport: stdio / ipc / ws / native-messaging<br/>feeds WebUI + VS Code / browser / desktop sidecar (Codex-style auto-spawn)"]
 
     Bus["🚌 oneai-bus · unified engine bus (L3)<br/>Directive (frontend→engine, mpsc 512)<br/>EngineYield (engine→frontend, broadcast 1024)<br/>in-process Arc<InProcessBus> or oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
 
@@ -112,6 +113,7 @@ flowchart TB
 
     Native --> UniFFI
     Native --> CFacade
+    WebUI -->|JSON-RPC over ws| AppServer
     TUI --> Bus
     UniFFI --> Bus
     CFacade --> Bus
@@ -171,6 +173,7 @@ flowchart TB
 |---|---|---|
 | Engine bus | [bus-mechanism_EN.md](bus-mechanism_EN.md) | Directive/EngineYield protocol + in-process/sidecar dual form |
 | App-Server | [app-server-mechanism_EN.md](app-server-mechanism_EN.md) | JSON-RPC 2.0 frontend protocol layer + multi-transport + four non-Rust frontend classes |
+| WebUI (browser frontend) | [webui-mechanism_EN.md](webui-mechanism_EN.md) | React SPA + ws JSON-RPC + projection/throttle/scenarios + `oneai web` one-command launch |
 | AgentLoop / delegation / GroupChat | [multi-agent-mechanism_EN.md](multi-agent-mechanism_EN.md) | Dynamic loop + model-driven delegation + scenario multi-role chat |
 | Memory | [memory-mechanism_EN.md](memory-mechanism_EN.md) | Letta 3 tiers + compression-coupled extraction + persistence |
 | Context management | [context-management-mechanism_EN.md](context-management-mechanism_EN.md) | Durable/ephemeral separation + token budget + 3-layer model-context resolution |
@@ -193,6 +196,6 @@ flowchart TB
 | Supervisor | [supervisor-mechanism_EN.md](supervisor-mechanism_EN.md) | Headless daemon + instance registry + crash recovery + IPC |
 | Tracing | [trace-mechanism_EN.md](trace-mechanism_EN.md) | OpenInference-compatible + OTEL export |
 | Persistence | [persistence-mechanism_EN.md](persistence-mechanism_EN.md) | SQLite + file event log, two paths |
-| Cross-platform | [cross-platform-mechanism_EN.md](cross-platform-mechanism_EN.md) | UniFFI + extern C facade, one core six targets |
+| Cross-platform | [cross-platform-mechanism_EN.md](cross-platform-mechanism_EN.md) | UniFFI + 3-symbol C-ABI bus pump, one core six targets; migrating to JSON-RPC separate-process |
 
 > Evolution background and gap analysis in [evolution-plan-2026-07.md](evolution-plan-2026-07.md) and [gap-analysis-2026-07.md](gap-analysis-2026-07.md) (Chinese — internal planning docs).
