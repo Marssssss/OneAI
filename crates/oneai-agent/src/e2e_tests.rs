@@ -25,7 +25,8 @@ use oneai_parser::ThreeLayerParser;
 use oneai_skill::SkillSelector;
 
 use crate::agent_loop::{
-    AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest,
+    AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult, DelegateProgressEvent,
+    DelegationPolicy, ParadigmKind, ToolCallRequest,
 };
 use crate::context_assembler::ContextAssembler;
 use crate::mock_provider::{MockProvider, ScriptedResponse};
@@ -111,6 +112,7 @@ enum TestEvent {
     ToolResult(String, String, ToolOutput),
     Delegate(String, SubAgentKind),
     DelegateComplete(SubAgentSummary),
+    DelegateProgress(String, SubAgentKind, DelegateProgressEvent),
     ParadigmSwitch(ParadigmKind),
     Checkpoint(usize),
     Complete(AgentLoopResult),
@@ -157,6 +159,21 @@ impl AgentLoopObserver for TestObserver {
             .lock()
             .unwrap()
             .push(TestEvent::DelegateComplete(summary.clone()));
+    }
+    fn on_delegate_progress(
+        &self,
+        delegate_id: &str,
+        kind: &SubAgentKind,
+        event: &DelegateProgressEvent,
+    ) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::DelegateProgress(
+                delegate_id.to_string(),
+                kind.clone(),
+                event.clone(),
+            ));
     }
     fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
         self.events
@@ -963,6 +980,10 @@ struct RecordingSubAgentFactory {
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     runs: Arc<Mutex<Vec<(String, String)>>>,
+    /// (kind, spec) pairs captured at `create_with_spec` — used by Opt 3/4
+    /// plumbing tests to assert the handler threaded specialization/seed into
+    /// the factory.
+    specs: Arc<Mutex<Vec<(SubAgentKind, crate::sub_agent::DelegationSpec)>>>,
 }
 
 impl RecordingSubAgentFactory {
@@ -971,6 +992,7 @@ impl RecordingSubAgentFactory {
             active: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
             runs: Arc::new(Mutex::new(Vec::new())),
+            specs: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn peak(&self) -> usize {
@@ -978,6 +1000,9 @@ impl RecordingSubAgentFactory {
     }
     fn runs(&self) -> Vec<(String, String)> {
         self.runs.lock().unwrap().clone()
+    }
+    fn specs(&self) -> Vec<(SubAgentKind, crate::sub_agent::DelegationSpec)> {
+        self.specs.lock().unwrap().clone()
     }
 }
 
@@ -995,11 +1020,40 @@ impl SubAgentFactory for RecordingSubAgentFactory {
             runs: self.runs.clone(),
         }))
     }
+    async fn create_with_spec(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        spec: crate::sub_agent::DelegationSpec,
+    ) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
+        self.specs
+            .lock()
+            .unwrap()
+            .push((kind.clone(), spec.clone()));
+        // Delegate to `create` so the run-path recording still works; the
+        // spec is recorded above and (for these mock tests) not otherwise
+        // consumed by the mock SubAgent.
+        let _ = budget;
+        self.create(kind, budget).await
+    }
     fn available_kinds(&self) -> Vec<SubAgentKind> {
-        vec![SubAgentKind::Explore, SubAgentKind::Code]
+        vec![
+            SubAgentKind::Explore,
+            SubAgentKind::Code,
+            SubAgentKind::Plan,
+            SubAgentKind::Review,
+            SubAgentKind::Custom("custom".to_string()),
+        ]
     }
     fn is_available(&self, kind: &SubAgentKind) -> bool {
-        matches!(kind, SubAgentKind::Explore | SubAgentKind::Code)
+        matches!(
+            kind,
+            SubAgentKind::Explore
+                | SubAgentKind::Code
+                | SubAgentKind::Plan
+                | SubAgentKind::Review
+                | SubAgentKind::Custom(_)
+        )
     }
 }
 
@@ -1060,10 +1114,20 @@ impl crate::sub_agent::SubAgent for RecordingSubAgent {
 
 /// Helper: build an AgentLoop wired to a given sub-agent factory.
 fn build_delegating_loop(provider: MockProvider, factory: Arc<dyn SubAgentFactory>) -> AgentLoop {
+    build_delegating_loop_with_provider(Arc::new(provider), factory)
+}
+
+/// Helper: build an AgentLoop from an already-Arc'd provider (used by tests
+/// that share the provider between the parent loop and a `DefaultSubAgentFactory`
+/// so sub-agents run real `AgentLoop`s over the same mock).
+fn build_delegating_loop_with_provider(
+    provider: Arc<dyn oneai_core::traits::LlmProvider>,
+    factory: Arc<dyn SubAgentFactory>,
+) -> AgentLoop {
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));
     AgentLoop::new(
-        Arc::new(provider),
+        provider,
         tools_map,
         Arc::new(ThreeLayerParser::new()),
         Arc::new(oneai_tool::NoopInteractionGate),
@@ -1203,6 +1267,399 @@ async fn e2e_dependency_cycle_errors() {
         res.is_err(),
         "a dependency cycle must error, not hang; got {:?}",
         res.as_ref().err().map(|e| e.to_string())
+    );
+}
+
+// ─── Opt 1: sub-agent progress forwarding + partial failure ─────────────────
+
+/// Two REAL sub-agent loops (via `DefaultSubAgentFactory`) running
+/// concurrently — mirrors the user's "launch two explore sub-agents" web
+/// scenario. Verifies the batch returns and the parent resumes to summarize
+/// after both sub-agents complete, under the concurrent select! progress loop.
+#[tokio::test]
+async fn e2e_two_real_subagents_concurrent() {
+    use crate::mock_provider::DelegateSpec;
+    use crate::sub_agent::DefaultSubAgentFactory;
+    use oneai_core::traits::LlmProvider;
+
+    // Parent iter1 → delegate_batch(2 Explore). Each sub-agent iter1 →
+    // direct_answer (1-iteration loop). Parent iter2 → summarize.
+    let provider = Arc::new(MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("a", "explore reggae music", "Explore"),
+            DelegateSpec::new("b", "explore r&b music", "Explore"),
+        ]),
+        ScriptedResponse::direct_answer("reggae findings"),
+        ScriptedResponse::direct_answer("rnb findings"),
+        ScriptedResponse::direct_answer("reggae and rnb both come from..."),
+    ])) as Arc<dyn LlmProvider>;
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let factory: Arc<dyn SubAgentFactory> = Arc::new(DefaultSubAgentFactory::new(
+        provider.clone(),
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        tools_map,
+    ));
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop_with_provider(provider.clone(), factory)
+        .run_with_observer("explore both then summarize", &observer)
+        .await
+        .unwrap();
+
+    assert!(
+        result.completed,
+        "parent must resume + summarize after both sub-agents"
+    );
+    assert_eq!(result.sub_agent_results.len(), 2, "both summaries fed back");
+    let events = observer.events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, TestEvent::Delegate(_, _)))
+            .count(),
+        2,
+        "two Delegate start events"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, TestEvent::DelegateComplete(_)))
+            .count(),
+        2,
+        "two DelegateComplete events"
+    );
+}
+
+/// A real sub-agent (via `DefaultSubAgentFactory`, which builds an actual
+/// `AgentLoop` over the shared `MockProvider`) must forward its iteration
+/// events to the parent observer as `DelegateProgress` (Opt 1 Op-channel-lite)
+/// — so the parent isn't blind during a delegation.
+#[tokio::test]
+async fn e2e_delegation_progress_forwarded() {
+    use crate::mock_provider::DelegateSpec;
+    use crate::sub_agent::DefaultSubAgentFactory;
+    use oneai_core::traits::LlmProvider;
+
+    // Parent iter 1 → delegate; sub-agent iter 1 → direct_answer (loop ends
+    // after one iteration, emitting on_iteration_start); parent iter 2 → done.
+    let provider = Arc::new(MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![DelegateSpec::new(
+            "s1",
+            "explore something",
+            "Explore",
+        )]),
+        ScriptedResponse::direct_answer("sub-agent result"),
+        ScriptedResponse::direct_answer("done"),
+    ])) as Arc<dyn LlmProvider>;
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let factory: Arc<dyn SubAgentFactory> = Arc::new(DefaultSubAgentFactory::new(
+        provider.clone(),
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        tools_map,
+    ));
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop_with_provider(provider.clone(), factory)
+        .run_with_observer("delegate then finish", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let events = observer.events.lock().unwrap();
+    let progress = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::DelegateProgress(..)))
+        .count();
+    assert!(
+        progress >= 1,
+        "expected >=1 DelegateProgress event (sub-agent iteration visible to parent); got {progress}"
+    );
+}
+
+// ─── Opt 2: concurrency cap + depth gate + budget pool ──────────────────────
+
+/// `max_concurrent = 1` serializes a wave of independent tasks (peak == 1).
+#[tokio::test]
+async fn e2e_concurrency_cap_serial() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("p1", "explore A", "Explore"),
+            DelegateSpec::new("p2", "explore B", "Explore"),
+            DelegateSpec::new("p3", "explore C", "Explore"),
+        ]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let policy = DelegationPolicy {
+        max_concurrent: 1,
+        ..Default::default()
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .with_delegation_policy(policy)
+        .run_with_observer("serial", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+    assert_eq!(
+        factory.peak(),
+        1,
+        "max_concurrent=1 must serialize the wave"
+    );
+    assert_eq!(factory.runs().len(), 3, "all three still run");
+}
+
+/// `max_concurrent = 2` caps a wave of 4 independent tasks at peak 2.
+#[tokio::test]
+async fn e2e_concurrency_cap_limited() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("p1", "explore A", "Explore"),
+            DelegateSpec::new("p2", "explore B", "Explore"),
+            DelegateSpec::new("p3", "explore C", "Explore"),
+            DelegateSpec::new("p4", "explore D", "Explore"),
+        ]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let policy = DelegationPolicy {
+        max_concurrent: 2,
+        ..Default::default()
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .with_delegation_policy(policy)
+        .run_with_observer("capped", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+    assert!(
+        factory.peak() <= 2,
+        "max_concurrent=2 must cap live sub-agents at 2; got {}",
+        factory.peak()
+    );
+    assert!(
+        factory.peak() >= 2,
+        "with 4 tasks the cap should be reached"
+    );
+    assert_eq!(factory.runs().len(), 4);
+}
+
+/// `DepthLimitedSubAgentFactory` gate: refuses when `level > max_depth`,
+/// delegates to inner otherwise.
+#[tokio::test]
+async fn e2e_depth_limited_gate() {
+    use crate::sub_agent::{DepthLimitedSubAgentFactory, SubAgentFactoryNone};
+
+    // A gate at level 2 with max_depth 1 → refuses (2 > 1), like None.
+    let gate = DepthLimitedSubAgentFactory::new(Arc::new(SubAgentFactoryNone), 2, 1);
+    let res = gate
+        .create(SubAgentKind::Explore, TokenBudget::new(1000))
+        .await;
+    assert!(res.is_err(), "level 2 > max_depth 1 must refuse");
+
+    // A gate at level 1 with max_depth 2 → delegates to inner (which here is
+    // SubAgentFactoryNone, so the inner itself refuses — but the GATE let it
+    // through, proving the gate didn't short-circuit).
+    let gate2 = DepthLimitedSubAgentFactory::new(Arc::new(SubAgentFactoryNone), 1, 2);
+    let res2 = gate2
+        .create(SubAgentKind::Explore, TokenBudget::new(1000))
+        .await;
+    assert!(
+        res2.is_err(),
+        "inner None refuses, but the gate at level 1 <= max_depth 2 must not refuse itself"
+    );
+    // Distinguish: gate-refusal message vs inner-refusal message.
+    let msg = res2.err().unwrap().to_string();
+    assert!(
+        !msg.contains("Delegation depth limit"),
+        "gate must delegate, not refuse; got: {msg}"
+    );
+}
+
+/// A small global `budget_pool` short-circuits later wave tasks with a
+/// budget-exceeded summary rather than running them.
+#[tokio::test]
+async fn e2e_budget_pool_exhausts() {
+    use crate::mock_provider::DelegateSpec;
+    // Each delegation defaults to budget 5000; a pool of 5000 covers exactly
+    // one task's reservation, so the rest short-circuit with an exhausted
+    // summary.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("p1", "explore A", "Explore"),
+            DelegateSpec::new("p2", "explore B", "Explore"),
+            DelegateSpec::new("p3", "explore C", "Explore"),
+        ]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let policy = DelegationPolicy {
+        budget_pool: Some(TokenBudget::new(5000)),
+        ..Default::default()
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .with_delegation_policy(policy)
+        .run_with_observer("budgeted", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+    // At most one task actually ran (the one that reserved the pool).
+    let ran = factory.runs().len();
+    assert!(
+        ran <= 1,
+        "budget pool of 5000 with 5000-per-task reservation must allow ≤1 run; got {ran}"
+    );
+    // The exhausted tasks surface as completed:false summaries.
+    let exhausted = result
+        .sub_agent_results
+        .iter()
+        .filter(|s| s.summary.contains("budget pool exhausted"))
+        .count();
+    assert!(
+        exhausted >= 1,
+        "expected ≥1 budget-exhausted summary; got {exhausted}"
+    );
+}
+
+// ─── Opt 3: per-delegation specialization ────────────────────────────────────
+
+/// `delegate` with custom_role + system_prompt + tools threads the spec into
+/// the factory's `create_with_spec`.
+#[tokio::test]
+async fn e2e_delegation_specialization() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![DelegateSpec::new(
+            "sec",
+            "audit for injection",
+            "Custom",
+        )
+        .with_custom_role("security-reviewer")
+        .with_system_prompt("You are a security reviewer focused on injection bugs.")
+        .with_tools(vec!["read_file".to_string(), "grep".to_string()])]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .run_with_observer("specialized delegate", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let specs = factory.specs();
+    assert_eq!(specs.len(), 1);
+    let (kind, spec) = &specs[0];
+    assert!(
+        matches!(kind, SubAgentKind::Custom(ref n) if n == "security-reviewer"),
+        "Custom kind should carry the custom_role name"
+    );
+    assert_eq!(
+        spec.system_prompt.as_deref(),
+        Some("You are a security reviewer focused on injection bugs.")
+    );
+    assert_eq!(
+        spec.tools,
+        Some(vec!["read_file".to_string(), "grep".to_string()])
+    );
+}
+
+// ─── Opt 4: Fork-lite context inheritance ────────────────────────────────────
+
+/// `delegate inherit_context` snapshots the parent's trailing non-system
+/// messages into the sub-agent's seed (COW — parent durable log untouched).
+#[tokio::test]
+async fn e2e_delegation_inherit_context() {
+    use crate::mock_provider::DelegateSpec;
+    use oneai_core::{Conversation, Message};
+
+    // Parent iter 1 → delegate with inherit_context. The sub-agent is a mock
+    // (doesn't consume the seed), but the FACTORY receives spec.seed_messages,
+    // which lets us assert the handler snapshotted the parent conversation.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![DelegateSpec::new(
+            "inh",
+            "continue from here",
+            "Explore",
+        )
+        .with_inherit_context(2)]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    // Pre-seed the parent conversation with two non-system messages.
+    let mut conv = Conversation::new();
+    conv.add_message(Message::user("earlier user question"));
+    conv.add_message(Message::assistant("earlier assistant answer"));
+    // The task is appended by run_with_conversation as the latest user msg.
+    let parent_len_before = conv.messages.len();
+
+    let result = build_delegating_loop(provider, factory.clone())
+        .run_with_conversation(conv, "delegate with inherit", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    // Parent durable log should have grown (delegate result + final answer)
+    // but the SEED must contain exactly the 2 pre-seeded + the task user msg
+    // that run_with_conversation appended before the delegate fired (so 3, the
+    // trailing 2 non-system messages at delegate time).
+    let specs = factory.specs();
+    assert_eq!(specs.len(), 1);
+    let seed = specs[0]
+        .1
+        .seed_messages
+        .as_ref()
+        .expect("seed messages set");
+    assert!(
+        !seed.is_empty(),
+        "seed must snapshot the parent's trailing turns"
+    );
+    // The trailing-2 non-system messages at delegate time are the assistant
+    // answer + the task user message run_with_conversation appended.
+    assert_eq!(seed.len(), 2, "inherit_last_n=2 → seed has 2 messages");
+    let seed_text: String = seed
+        .iter()
+        .filter_map(|m| match &m.content.first() {
+            Some(oneai_core::ContentBlock::Text { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        seed_text.contains("earlier assistant answer"),
+        "seed must contain the parent's pre-seeded assistant turn; got: {seed_text}"
+    );
+    // Parent log grew beyond the pre-seed count (proving the seed is COW, not
+    // a move that would have emptied the parent).
+    assert!(
+        result.conversation.messages.len() > parent_len_before,
+        "parent durable log must survive the COW seed"
     );
 }
 

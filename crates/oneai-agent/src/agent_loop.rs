@@ -75,6 +75,20 @@ pub trait AgentLoopObserver: Send + Sync {
     /// the start. Default empty to keep existing implementations compiling.
     fn on_delegate_complete(&self, _summary: &crate::sub_agent::SubAgentSummary) {}
 
+    /// Called with mid-run progress from a delegated sub-agent (Opt 1
+    /// Op-channel-lite). Sub-agent iteration/tool-result/usage events are
+    /// forwarded here by [`spawn_sub_agents_batch`](struct.AgentLoop.html)
+    /// so the parent UI is not blind during a possibly-minutes-long
+    /// delegation. Default empty so existing observers keep compiling. See
+    /// [`DelegateProgressEvent`].
+    fn on_delegate_progress(
+        &self,
+        _delegate_id: &str,
+        _kind: &crate::sub_agent::SubAgentKind,
+        _event: &DelegateProgressEvent,
+    ) {
+    }
+
     /// Called when the model switches to a different paradigm.
     fn on_paradigm_switch(&self, paradigm: ParadigmKind);
 
@@ -157,7 +171,154 @@ pub enum ReflectionTrigger {
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
 
-/// One delegation request parsed out of a `delegate` meta-tool call.
+// ─── DelegateProgressEvent ───────────────────────────────────────────────────
+
+/// A coarse mid-run progress event forwarded from a delegated sub-agent to
+/// the parent loop's observer (Opt 1). Only the high-signal events the
+/// parent/UI cares about are surfaced — full per-token streams stay inside
+/// the sub-agent to avoid event flooding.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DelegateProgressEvent {
+    /// The sub-agent started a new iteration under `paradigm`.
+    IterationStart {
+        iteration: usize,
+        paradigm: ParadigmKind,
+    },
+    /// A tool finished inside the sub-agent. `snapshot` is a short result
+    /// preview (truncated) — not the full output.
+    ToolResult { tool_name: String, snapshot: String },
+    /// Token usage after a sub-agent inference.
+    TokenUsage { prompt: u32, completion: u32 },
+    /// The sub-agent was cancelled (parent interrupt propagated).
+    Cancelled,
+}
+
+/// Build a `completed:false` [`SubAgentSummary`] for a sub-agent that failed
+/// or was interrupted, so a dependent task in the same batch can still proceed
+/// (prefixed with this note) instead of tripping the cycle guard. Used by
+/// [`AgentLoop::spawn_sub_agents_batch`] for partial-failure handling (Opt 1).
+fn failure_summary(
+    kind: crate::sub_agent::SubAgentKind,
+    note: &str,
+) -> crate::sub_agent::SubAgentSummary {
+    crate::sub_agent::SubAgentSummary {
+        completed: false,
+        summary: note.to_string(),
+        key_findings: Vec::new(),
+        budget_exceeded: false,
+        agent_kind: kind,
+        tokens_used: 0,
+    }
+}
+
+// ─── DelegationPolicy ────────────────────────────────────────────────────────
+
+/// Resource bounds for delegated sub-agents (Opt 2 resource guardrail).
+/// Defaults preserve today's behavior: `max_concurrent=4` (a wave's live LLM
+/// sessions are capped — previously unbounded), `max_depth=1` (sub-agents
+/// can't nest — identical to the old hard-coded `SubAgentFactoryNone`),
+/// `budget_pool=None` (no global sub-agent budget accounting).
+#[derive(Clone)]
+pub struct DelegationPolicy {
+    /// Max sub-agents running LLM inference concurrently within a single
+    /// delegate batch wave. A semaphore gates `spawn_sub_agents_batch`.
+    pub max_concurrent: usize,
+    /// Max delegation depth. `1` = sub-agents can't spawn further
+    /// sub-agents (today's behavior). `>1` unlocks nested delegation; the
+    /// `DepthLimitedSubAgentFactory` chain refuses beyond this.
+    pub max_depth: usize,
+    /// Optional shared token budget across ALL sub-agents in a run. When
+    /// exhausted, remaining wave tasks short-circuit with a budget-exceeded
+    /// summary. `None` = no global pool (each task's `budget` cap governs).
+    pub budget_pool: Option<oneai_core::budget::TokenBudget>,
+}
+
+impl Default for DelegationPolicy {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 4,
+            max_depth: 1,
+            budget_pool: None,
+        }
+    }
+}
+
+// ─── ForwardingObserver ──────────────────────────────────────────────────────
+
+/// Owned, `'static` observer that a spawned sub-agent task uses to forward
+/// its high-signal progress events back to the parent loop's (borrowed)
+/// observer via an mpsc channel. The parent drains the channel from outside
+/// the `'static` spawn and calls `on_delegate_progress` on its borrowed
+/// observer — bridging the lifetime gap (a borrowed `&dyn` can't move into a
+/// `'static` `tokio::spawn`).
+///
+/// Only `on_iteration_start` / `on_tool_result` / `on_token_usage_full` are
+/// forwarded — the high-signal events a parent UI cares about. Per-token
+/// streams stay inside the sub-agent to avoid flooding.
+struct ForwardingObserver {
+    delegate_id: String,
+    kind: crate::sub_agent::SubAgentKind,
+    tx: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        crate::sub_agent::SubAgentKind,
+        DelegateProgressEvent,
+    )>,
+}
+
+impl AgentLoopObserver for ForwardingObserver {
+    fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
+        let _ = self.tx.send((
+            self.delegate_id.clone(),
+            self.kind.clone(),
+            DelegateProgressEvent::IterationStart {
+                iteration,
+                paradigm,
+            },
+        ));
+    }
+
+    fn on_direct_answer(&self, _: &str) {}
+    fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
+    fn on_tool_result(&self, _call_id: &str, tool_name: &str, _output: &oneai_core::ToolOutput) {
+        // Forward just the tool name + an empty snapshot to avoid pulling the
+        // full ToolOutput shape across the channel; the parent UI only needs
+        // "the sub-agent ran tool X" as a liveness signal.
+        let _ = self.tx.send((
+            self.delegate_id.clone(),
+            self.kind.clone(),
+            DelegateProgressEvent::ToolResult {
+                tool_name: tool_name.to_string(),
+                snapshot: String::new(),
+            },
+        ));
+    }
+
+    fn on_token_usage_full(
+        &self,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        _cache_read_tokens: u32,
+        _cache_creation_tokens: u32,
+    ) {
+        let _ = self.tx.send((
+            self.delegate_id.clone(),
+            self.kind.clone(),
+            DelegateProgressEvent::TokenUsage {
+                prompt: prompt_tokens,
+                completion: completion_tokens,
+            },
+        ));
+    }
+
+    fn on_delegate(&self, _: &str, _: &crate::sub_agent::SubAgentKind) {}
+    fn on_paradigm_switch(&self, _: ParadigmKind) {}
+    fn on_checkpoint(&self, _: usize) {}
+    fn on_complete(&self, _: &AgentLoopResult) {}
+}
+
+// ─── DelegateTask / AgentDecision ────────────────────────────────────────────
+
 ///
 /// A single turn may contain several `delegate` calls — the model fans them
 /// out by emitting multiple `delegate` blocks in one inference response, and
@@ -183,6 +344,30 @@ pub struct DelegateTask {
     /// Ids of delegations in the same batch that must complete first.
     /// References to unknown ids are dropped (with a warning) at parse time.
     pub depends_on: Vec<String>,
+    /// The actual tool-call id (e.g. `call_abc123`) of the `delegate`
+    /// ContentBlock — used to feed back a synthetic `tool_result` so the
+    /// frontend's tool-call card (created from the streaming `on_tool_calls`
+    /// the parser fires for every tool call, including the intercepted
+    /// `delegate` meta-tool) resolves to "done" instead of staying
+    /// "running" forever. Distinct from `id` (the model's own dependency
+    /// id, which may be a semantic name like "explore-reggae").
+    pub call_id: String,
+    /// Opt 3: name for a `Custom` kind (ignored for fixed kinds).
+    pub custom_role: Option<String>,
+    /// Opt 3: override the kind's default system prompt (role layering).
+    pub system_prompt_override: Option<String>,
+    /// Opt 3: narrow the sub-agent's toolset (intersected with the kind
+    /// default — never widened) below the kind default.
+    pub tools_override: Option<Vec<String>>,
+    /// Opt 4: whether to seed the sub-agent with the parent's recent turns.
+    pub inherit_context: bool,
+    /// Opt 4: how many of the parent's trailing non-system messages to seed.
+    /// `0` with `inherit_context=true` defaults to 6 at materialization.
+    pub inherit_last_n: usize,
+    /// Opt 4 (materialized by the Delegate handler, not parse_decision):
+    /// the actual seed messages snapshot, set from the parent conversation
+    /// before the batch runs. `None` until the handler fills it.
+    pub seed_messages: Option<Vec<oneai_core::Message>>,
 }
 
 /// The decision type produced by parsing the model's output each loop iteration.
@@ -952,6 +1137,21 @@ pub struct AgentLoop {
     plan_mode_active: Arc<AtomicBool>,
     config: AgentLoopConfig,
     domain_pack: Option<Arc<MergedDomainPack>>,
+    /// Inherited permission resolver for delegated sub-agents. When `Some`
+    /// (set via `with_permission_pack` by `DefaultSubAgentFactory`, which
+    /// threads the PARENT's domain pack here), the loop's tool-permission
+    /// check consults this pack's `resolve_permission` — so a sub-agent
+    /// inherits the parent's permission policy (e.g. the CodingPack
+    /// auto-approves `web_search`/`web_fetch` → the Explore sub-agent's web
+    /// calls don't prompt). INHERITANCE OF PERMISSION ONLY: exposure,
+    /// paradigm strategies, context sources, and tool-def filtering still come
+    /// from `domain_pack` (None for sub-agents → tool defaults: all Direct,
+    /// no CodingPack context bloat). See `domain_permission_checks`.
+    permission_pack: Option<Arc<MergedDomainPack>>,
+    /// Opt 2 resource bounds for delegated sub-agents (concurrency cap,
+    /// max nesting depth, optional global budget pool). Default preserves
+    /// today's behavior. Set via [`AgentLoop::with_delegation_policy`].
+    delegation_policy: DelegationPolicy,
 }
 
 /// Manual Clone implementation for AgentLoop — all fields are Arc/RwLock/Arc<RwLock>,
@@ -987,6 +1187,8 @@ impl Clone for AgentLoop {
             plan_mode_active: self.plan_mode_active.clone(),
             config: self.config.clone(),
             domain_pack: self.domain_pack.clone(),
+            permission_pack: self.permission_pack.clone(),
+            delegation_policy: self.delegation_policy.clone(),
         }
     }
 }
@@ -1057,6 +1259,8 @@ impl AgentLoop {
             active_skill: None,
             config,
             domain_pack: None,
+            permission_pack: None,
+            delegation_policy: DelegationPolicy::default(),
         }
     }
 
@@ -1101,6 +1305,47 @@ impl AgentLoop {
             active_skill: None,
             config,
             domain_pack: Some(domain_pack),
+            permission_pack: None,
+            delegation_policy: DelegationPolicy::default(),
+        }
+    }
+
+    /// Set the delegation resource bounds (Opt 2): max concurrent sub-agents
+    /// per wave, max nesting depth, and an optional global budget pool.
+    /// Default (`max_concurrent=4`, `max_depth=1`, no pool) matches today's
+    /// behavior. **Note**: raising `max_depth` only takes effect if the
+    /// installed `sub_agent_factory` is a `DepthLimitedSubAgentFactory` chain
+    /// built with that `max_depth` (the factory, not this policy, embeds the
+    /// depth gate into spawned sub-agents).
+    pub fn with_delegation_policy(self, policy: DelegationPolicy) -> Self {
+        Self {
+            delegation_policy: policy,
+            ..self
+        }
+    }
+
+    /// Inherit a parent's permission policy (permission-inheritance for
+    /// delegated sub-agents). The loop's tool-permission check consults this
+    /// pack's `resolve_permission` BEFORE falling back to its own
+    /// `domain_pack`, so a sub-agent (whose `domain_pack` is None) inherits the
+    /// parent's auto-approve / require-confirmation decisions — e.g. the
+    /// CodingPack auto-approves `web_search`/`web_fetch`, so an Explore
+    /// sub-agent's web calls don't prompt. Permission ONLY: this does not
+    /// inherit exposure / context / paradigm (those stay None → tool defaults).
+    pub fn with_permission_pack(self, pack: Arc<MergedDomainPack>) -> Self {
+        Self {
+            permission_pack: Some(pack),
+            ..self
+        }
+    }
+
+    /// Like [`Self::with_permission_pack`] but accepts `None` (no parent
+    /// domain pack → no inheritance, sub-agents fall back to tool-level
+    /// permission). Used by `DefaultSubAgentFactory::build`.
+    pub fn with_optional_permission_pack(self, pack: Option<Arc<MergedDomainPack>>) -> Self {
+        match pack {
+            Some(p) => self.with_permission_pack(p),
+            None => self,
         }
     }
 
@@ -3184,10 +3429,66 @@ impl AgentLoop {
                     // Schedule the batch: independent tasks run concurrently,
                     // dependent tasks run after their deps and receive the deps'
                     // summaries prepended to their task text.
-                    let summaries = self.spawn_sub_agents_batch(tasks).await?;
-                    for summary in &summaries {
+                    //
+                    // Opt 4 Fork-lite: for tasks that set `inherit_context`,
+                    // snapshot the parent's trailing non-system messages here
+                    // (COW clone — the parent durable log is untouched). Done
+                    // in the handler rather than `parse_decision` because the
+                    // parent conversation lives in `state`, which parse_decision
+                    // doesn't see. `parse_decision` only records the flags.
+                    let mut tasks = tasks;
+                    for task in &mut tasks {
+                        if task.inherit_context {
+                            let n = if task.inherit_last_n == 0 {
+                                6
+                            } else {
+                                task.inherit_last_n
+                            };
+                            let seed: Vec<oneai_core::Message> = {
+                                let all_non_sys: Vec<oneai_core::Message> = state
+                                    .conversation
+                                    .messages
+                                    .iter()
+                                    .filter(|m| m.role != Role::System)
+                                    .cloned()
+                                    .collect();
+                                let len = all_non_sys.len();
+                                if len > n {
+                                    all_non_sys[len - n..].to_vec()
+                                } else {
+                                    all_non_sys
+                                }
+                            };
+                            if !seed.is_empty() {
+                                task.seed_messages = Some(seed);
+                            }
+                        }
+                    }
+                    // Capture each delegation's tool-call id (the streaming
+                    // path already fired `on_tool_calls` for the `delegate`
+                    // meta-tool calls, so the frontend has a pending tool-call
+                    // card per delegation; `delegate` is intercepted here and
+                    // never dispatched to the ToolExecutor, so without a
+                    // synthetic `tool_result` those cards would stay "running"
+                    // forever). `summaries` come back in input order, so the
+                    // zip lines each summary up with its call id.
+                    let call_ids: Vec<String> = tasks.iter().map(|t| t.call_id.clone()).collect();
+                    let summaries = self.spawn_sub_agents_batch(tasks, observer).await?;
+                    for (summary, call_id) in summaries.iter().zip(call_ids.iter()) {
                         state.feed_sub_agent_result(summary.clone());
                         observer.on_delegate_complete(summary);
+                        // Synthetic tool_result so the frontend's `delegate`
+                        // tool-call card resolves to "done" with the
+                        // sub-agent's summary as its output (mirrors how
+                        // `switch_project` feeds back a confirmation).
+                        let tool_output = oneai_core::ToolOutput {
+                            success: summary.completed,
+                            content: summary.summary.clone(),
+                            error: None,
+                            added_tool_names: Vec::new(),
+                            ..Default::default()
+                        };
+                        observer.on_tool_result(call_id, "delegate", &tool_output);
                     }
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
@@ -3680,12 +3981,53 @@ impl AgentLoop {
                                         .collect()
                                 })
                                 .unwrap_or_default();
+                            let custom_role = args_value
+                                .get("custom_role")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let system_prompt_override = args_value
+                                .get("system_prompt")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let tools_override = args_value
+                                .get("tools")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect::<Vec<String>>()
+                                });
+                            let inherit_context = args_value
+                                .get("inherit_context")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let inherit_last_n = args_value
+                                .get("inherit_last_n_messages")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as usize)
+                                .unwrap_or(0);
+                            // Map the agent_type string → SubAgentKind. "Custom"
+                            // carries its `custom_role` name (defaulting to
+                            // "custom" when the model omitted it).
+                            let agent_type = match agent_type_str {
+                                "Custom" => crate::sub_agent::SubAgentKind::Custom(
+                                    custom_role.clone().unwrap_or_else(|| "custom".to_string()),
+                                ),
+                                other => crate::sub_agent::SubAgentKind::from_str(other),
+                            };
                             delegate_tasks.push(DelegateTask {
                                 id: task_id,
                                 task: task.to_string(),
-                                agent_type: SubAgentKind::from_str(agent_type_str),
+                                agent_type,
                                 budget: oneai_core::budget::TokenBudget::new(budget_tokens as u32),
                                 depends_on,
+                                custom_role,
+                                system_prompt_override,
+                                tools_override,
+                                inherit_context,
+                                inherit_last_n,
+                                seed_messages: None,
+                                call_id: id.clone(),
                             });
                         }
                         // A `delegate` block is never dispatched to the
@@ -3883,9 +4225,20 @@ impl AgentLoop {
         let domain_permission_checks: Vec<Option<PermissionAction>> = routed_calls
             .iter()
             .map(|call| {
-                self.domain_pack
-                    .as_ref()
-                    .map(|dp| dp.resolve_permission(&call.name, &call.args))
+                // Permission inheritance: a sub-agent whose `permission_pack`
+                // is set (the parent's domain pack) consults it first, so it
+                // inherits the parent's auto-approve / require-confirmation
+                // policy (e.g. CodingPack auto-approves web_search/web_fetch
+                // → a delegated Explore sub-agent's web calls don't prompt).
+                // Falls back to the loop's own `domain_pack` (the parent loop
+                // path), then None (bare agents → tool's own permission_level).
+                if let Some(pack) = self.permission_pack.as_ref() {
+                    Some(pack.resolve_permission(&call.name, &call.args))
+                } else {
+                    self.domain_pack
+                        .as_ref()
+                        .map(|dp| dp.resolve_permission(&call.name, &call.args))
+                }
             })
             .collect();
 
@@ -4541,7 +4894,9 @@ impl AgentLoop {
         }
     }
 
-    /// Schedule a batch of delegations with dependency-aware concurrency.
+    /// Schedule a batch of delegations with dependency-aware concurrency,
+    /// bounded live concurrency, optional global budget, progress
+    /// forwarding, and parent-interrupt propagation.
     ///
     /// Implements a wave-based (Kahn's algorithm) scheduler over the
     /// `DelegateTask` DAG:
@@ -4549,14 +4904,27 @@ impl AgentLoop {
     /// - Each iteration selects the *wave* = all tasks whose `depends_on` ids
     ///   are already in `completed`. These run **concurrently** via a tokio
     ///   `JoinSet` — independent sub-agents execute in parallel.
+    /// - **Concurrency cap (Opt 2)**: a `Semaphore(max_concurrent)` gates the
+    ///   number of sub-agents running LLM inference at once within the wave.
     /// - A task with unsatisfied dependencies is held back until its deps
     ///   finish, so dependent tasks run **serially** after their upstream.
     /// - Before a dependent task starts, its `task` text is prefixed with the
     ///   summaries of its dependencies (one `[Dependency '<id>' result]: …`
     ///   block each), so the dependent sub-agent receives upstream results
     ///   without the model re-stating them.
-    /// - Cycles are detected (a wave that makes no progress with pending
-    ///   tasks left) and surfaced as an error rather than looping forever.
+    /// - **Progress forwarding (Opt 1)**: each spawned sub-agent runs with a
+    ///   `ForwardingObserver` that ships its iteration/tool/usage events over
+    ///   an mpsc channel; the parent drains the channel (via `select!` while
+    ///   awaiting the wave) and calls `observer.on_delegate_progress` — so
+    ///   the parent UI is not blind during a long delegation.
+    /// - **Interrupt propagation (Opt 1)**: each sub-agent gets a child
+    ///   `CancellationToken` of the parent's; a parent interrupt lands at the
+    ///   sub-agent's next iteration boundary.
+    /// - **Partial failure (Opt 1)**: a single sub-agent failure or panic no
+    ///   longer aborts the whole batch — it records a `completed:false`
+    ///   failure summary so dependent tasks proceed (prefixed with the
+    ///   upstream's failure note) and siblings complete. Cycles (no task can
+    ///   make progress) still surface as an error.
     ///
     /// Returns summaries in **input order** (the order tasks appeared in the
     /// turn), regardless of completion order — this keeps the fed-back results
@@ -4564,8 +4932,12 @@ impl AgentLoop {
     async fn spawn_sub_agents_batch(
         &self,
         tasks: Vec<DelegateTask>,
+        observer: &dyn AgentLoopObserver,
     ) -> Result<Vec<SubAgentSummary>> {
         use std::collections::HashMap;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Semaphore};
         use tokio::task::JoinSet;
 
         if tasks.is_empty() {
@@ -4575,11 +4947,32 @@ impl AgentLoop {
         // Preserve input order for deterministic result feed-back.
         let order: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
 
+        // Opt 2: concurrency cap + optional global budget pool.
+        let sem = Arc::new(Semaphore::new(self.delegation_policy.max_concurrent));
+        let pool: Option<Arc<AtomicU32>> = self
+            .delegation_policy
+            .budget_pool
+            .as_ref()
+            .map(|b| Arc::new(AtomicU32::new(b.total)));
+
+        // Opt 1: progress channel — spawned ('static) sub-agent tasks ship
+        // events here; the parent drains them onto the borrowed `observer`.
+        let (tx, mut rx) = mpsc::unbounded_channel::<(
+            String,
+            crate::sub_agent::SubAgentKind,
+            DelegateProgressEvent,
+        )>();
+        // Keep tx alive for the whole batch so rx.recv() arm stays armed even
+        // between waves (sub-agents only send while running, but the select
+        // needs a live sender reference model). Cloned per-task below.
+        let _tx_keepalive = tx.clone();
+
         // Pending tasks keyed by id (clone-able for the spawned closure).
         let mut pending: HashMap<String, DelegateTask> =
             tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
 
-        // id → completed summary.
+        // id → completed summary (success OR failure — failures recorded so
+        // dependents proceed rather than tripping the cycle guard).
         let mut completed: HashMap<String, SubAgentSummary> = HashMap::new();
 
         while !pending.is_empty() {
@@ -4600,17 +4993,23 @@ impl AgentLoop {
             }
 
             tracing::info!(
-                "Delegate batch: running wave of {} task(s) in parallel: [{}]",
+                "Delegate batch: running wave of {} task(s) in parallel (max_concurrent={}): [{}]",
                 wave_ids.len(),
+                self.delegation_policy.max_concurrent,
                 wave_ids.join(", ")
             );
 
-            let mut join_set: JoinSet<Result<(String, SubAgentSummary)>> = JoinSet::new();
+            let mut join_set: JoinSet<(
+                String,
+                crate::sub_agent::SubAgentKind,
+                std::result::Result<SubAgentSummary, oneai_core::error::OneAIError>,
+            )> = JoinSet::new();
 
             for id in wave_ids {
                 let task = pending.remove(&id).expect("wave id present in pending");
                 // Prepend dependency summaries to the task text so the
-                // dependent sub-agent receives upstream results.
+                // dependent sub-agent receives upstream results (or failure
+                // notes for upstream that broke).
                 let mut augmented_task = String::new();
                 for dep in &task.depends_on {
                     if let Some(dep_summary) = completed.get(dep) {
@@ -4632,48 +5031,134 @@ impl AgentLoop {
                 }
                 augmented_task.push_str(&task.task);
 
+                // Opt 3: carry specialization into the factory.
+                let spec = crate::sub_agent::DelegationSpec {
+                    system_prompt: task.system_prompt_override.clone(),
+                    tools: task.tools_override.clone(),
+                    seed_messages: task.seed_messages.clone(),
+                };
                 let agent_type = task.agent_type.clone();
                 let budget = task.budget.clone();
                 let factory = self.sub_agent_factory.clone();
                 let task_id = id.clone();
+                let kind = task.agent_type.clone();
+                let tx2 = tx.clone();
+                let sem2 = sem.clone();
+                let pool2 = pool.clone();
+                // Opt 1: child cancellation token — parent interrupt propagates.
+                // We pass the parent's own token; the SubAgentWrapper watcher
+                // awaits it and fires the sub-agent loop's own token at the
+                // next iteration boundary.
+                let child_cancel = self.cancel_token.clone();
 
                 join_set.spawn(async move {
-                    let sub_agent = factory.create(agent_type.clone(), budget).await?;
-                    let summary = sub_agent.run(&augmented_task).await?;
-                    Ok((task_id, summary))
+                    let inner = async {
+                        // Opt 2: concurrency cap.
+                        let _permit = match sem2.acquire_owned().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                return Err(oneai_core::error::OneAIError::Agent(format!(
+                                    "Delegate semaphore closed: {e}"
+                                )));
+                            }
+                        };
+                        // Opt 2: global budget pool gate — reserve this task's
+                        // allocated budget upfront; if the pool can't cover it,
+                        // short-circuit with an exhausted summary (so a
+                        // too-small pool caps how many sub-agents actually run).
+                        // Reservation is conservative (budget cap, not actual
+                        // usage) — no post-completion refund, keeping the
+                        // accounting simple and the cap a hard sum-of-budgets.
+                        if let Some(p) = &pool2 {
+                            let need = budget.total;
+                            let prev = p.fetch_sub(need, Ordering::Relaxed);
+                            if prev < need {
+                                // Underflow: pool couldn't cover this task.
+                                p.store(0, Ordering::Relaxed);
+                                return Ok(failure_summary(
+                                    kind.clone(),
+                                    "[budget pool exhausted]",
+                                ));
+                            }
+                        }
+                        let forwarder = ForwardingObserver {
+                            delegate_id: task_id.clone(),
+                            kind: kind.clone(),
+                            tx: tx2,
+                        };
+                        let sub_agent = factory
+                            .create_with_spec(agent_type.clone(), budget, spec)
+                            .await?;
+                        let summary = sub_agent
+                            .run_with_observer(
+                                &augmented_task,
+                                Some(&forwarder),
+                                Some(child_cancel),
+                            )
+                            .await?;
+                        Ok(summary)
+                    }
+                    .await;
+                    (task_id, kind, inner)
                 });
             }
 
-            // Await the entire wave before advancing — dependent tasks in the
-            // next wave need *all* of this wave's results.
-            while let Some(join_result) = join_set.join_next().await {
-                match join_result {
-                    Ok(Ok((id, summary))) => {
-                        completed.insert(id, summary);
-                    }
-                    Ok(Err(e)) => {
-                        // A single sub-agent failure surfaces immediately rather
-                        // than silently dropping its result. Pending tasks that
-                        // depended on the failed one will trip the cycle guard on
-                        // the next wave — that's acceptable: a broken upstream
-                        // cannot be satisfied.
-                        return Err(e);
-                    }
-                    Err(join_err) => {
-                        return Err(oneai_core::error::OneAIError::Agent(format!(
-                            "Delegate sub-agent task panicked or was cancelled: {}",
-                            join_err
-                        )));
+            // Await the wave while concurrently forwarding progress to the
+            // parent observer (Opt 1). The `select!` drains the channel
+            // between join completions so the UI sees live sub-agent events.
+            loop {
+                tokio::select! {
+                    jr = join_set.join_next() => match jr {
+                        None => break,
+                        Some(Ok((id, _kind, Ok(summary)))) => {
+                            // Budget pool is reserved upfront (pre-run), so no
+                            // post-completion decrement here.
+                            completed.insert(id, summary);
+                        }
+                        Some(Ok((id, kind, Err(e)))) => {
+                            // Opt 1 partial-failure: record a failure summary
+                            // so dependents proceed (prefixed with the note)
+                            // instead of aborting the whole batch.
+                            tracing::warn!("Delegate sub-agent '{}' failed (recorded, batch continues): {e}", id);
+                            completed.insert(id, failure_summary(kind, &format!("[failed: {e}]")));
+                        }
+                        Some(Err(join_err)) => {
+                            // A spawned task panicked or was runtime-cancelled
+                            // (not a parent-interrupt — that surfaces as an
+                            // `Ok(Err(..))` via the sub-agent's cancel check).
+                            // Rare; surface it rather than guess which id broke.
+                            tracing::error!("Delegate sub-agent task panicked/cancelled: {join_err}");
+                            return Err(oneai_core::error::OneAIError::Agent(format!(
+                                "Delegate sub-agent task panicked or was cancelled: {join_err}"
+                            )));
+                        }
+                    },
+                    Some((id, kind, ev)) = rx.recv() => {
+                        observer.on_delegate_progress(&id, &kind, &ev);
                     }
                 }
             }
+
+            // Drain any progress events buffered while the last tasks finished.
+            while let Ok((id, kind, ev)) = rx.try_recv() {
+                observer.on_delegate_progress(&id, &kind, &ev);
+            }
+            tracing::info!(
+                "delegate wave complete; {} task(s) resolved so far",
+                completed.len()
+            );
         }
 
         // Emit in input order.
-        let summaries = order
+        let summaries: Vec<SubAgentSummary> = order
             .iter()
             .filter_map(|id| completed.get(id).cloned())
             .collect();
+        tracing::info!(
+            batch_size = order.len(),
+            completed = summaries.iter().filter(|s| s.completed).count(),
+            "delegate batch complete"
+        );
         Ok(summaries)
     }
 

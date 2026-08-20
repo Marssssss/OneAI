@@ -21,9 +21,15 @@ use std::sync::Arc;
 use oneai_core::budget::TokenBudget;
 use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
+use oneai_core::{Conversation, Message};
+use oneai_domain::MergedDomainPack;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopObserver};
 use crate::worktree_isolation::{MergeResult, WorktreeConfig, WorktreeHandle, WorktreeIsolation};
+
+// Re-export so `agent_loop.rs` can reference the cancellation type without a
+// second `tokio_util` import site at the call boundary.
+pub use tokio_util::sync::CancellationToken;
 
 // ─── SubAgentKind ───────────────────────────────────────────────────────────
 
@@ -150,7 +156,22 @@ impl SubAgentKind {
     /// Get the default available tools for this sub-agent kind.
     pub fn default_tools(&self) -> &[&str] {
         match self {
-            Self::Explore => &["read_file", "grep", "glob", "list_directory"],
+            Self::Explore => &[
+                "read_file",
+                "grep",
+                "glob",
+                "list_directory",
+                // Web research tools — an Explore delegation often targets
+                // non-local knowledge (e.g. "explore reggae music") that the
+                // local fs tools can't reach. Without these the Explore
+                // sub-agent could only parrot training data. Both are
+                // `PermissionLevel::Standard` (the tool's own level — the
+                // sub-agent has no DomainPack), so each web call routes
+                // through the InteractionGate for approval, same as the
+                // parent's Standard tools (edit_file/shell).
+                "web_search",
+                "web_fetch",
+            ],
             Self::Code => &["read_file", "edit_file", "shell", "grep", "glob"],
             Self::Plan => &["read_file", "grep", "glob"],
             Self::Review => &["read_file", "grep", "glob"],
@@ -169,6 +190,28 @@ impl SubAgentKind {
             Self::Custom(_) => &["read_file", "grep", "glob", "edit_file", "shell"],
         }
     }
+}
+
+// ─── DelegationSpec ─────────────────────────────────────────────────────────
+
+/// Per-delegation specialization carried from a `delegate` meta-tool call to
+/// the factory (Opt 3 role-layering + Opt 4 Fork-lite context inheritance).
+///
+/// `system_prompt` / `tools` override the kind's defaults; `seed_messages`
+/// seeds the sub-agent's conversation with the parent's recent turns (a
+/// Copy-On-Write clone — the parent's durable log is never mutated). All
+/// fields optional → absent means "use the kind default / start from
+/// scratch", i.e. today's behavior.
+#[derive(Debug, Clone, Default)]
+pub struct DelegationSpec {
+    /// Override the kind's default system prompt (role layering).
+    pub system_prompt: Option<String>,
+    /// Narrow the sub-agent's toolset below the kind default. Names outside
+    /// the kind's default set are dropped at resolution time (never widened).
+    pub tools: Option<Vec<String>>,
+    /// Seed the sub-agent conversation with these (already-stripped-of-system)
+    /// parent messages before the task. Enables "continue from where I am".
+    pub seed_messages: Option<Vec<Message>>,
 }
 
 // ─── SubAgentSummary ────────────────────────────────────────────────────────
@@ -231,6 +274,23 @@ pub trait SubAgent: Send + Sync {
     /// After completion, only the summary is returned.
     async fn run(&self, task: &str) -> Result<SubAgentSummary>;
 
+    /// Run the sub-agent with optional progress forwarding + cancellation.
+    ///
+    /// `observer`, when `Some`, receives the sub-agent's iteration events
+    /// (so the parent loop / UI can see mid-run progress — Opt 1). `cancel`,
+    /// when `Some`, propagates a parent interrupt into the sub-agent's loop
+    /// at its iteration boundary. Both default to `None` → the call degrades
+    /// to `run` (silent, uncancellable), preserving the legacy contract.
+    async fn run_with_observer(
+        &self,
+        task: &str,
+        observer: Option<&dyn AgentLoopObserver>,
+        cancel: Option<CancellationToken>,
+    ) -> Result<SubAgentSummary> {
+        let _ = (observer, cancel);
+        self.run(task).await
+    }
+
     /// Get the kind of this sub-agent.
     fn kind(&self) -> &SubAgentKind;
 
@@ -269,6 +329,12 @@ pub struct SubAgentWrapper {
     /// For strict validation with ModelRetry, use the AgentLoop's
     /// structured_output config instead.
     structured_output_schema: Option<serde_json::Value>,
+    /// Seed messages (Opt 4 Fork-lite). When `Some`, the sub-agent's
+    /// conversation is pre-seeded with these parent messages (system
+    /// messages already stripped) before the task, so the sub-agent
+    /// continues from the parent's current reasoning instead of from
+    /// scratch. `None` = start from scratch (today's behavior).
+    seed_messages: Option<Vec<Message>>,
 }
 
 impl SubAgentWrapper {
@@ -281,6 +347,7 @@ impl SubAgentWrapper {
             worktree_config: WorktreeConfig::read_only(),
             project_path: None,
             structured_output_schema: None,
+            seed_messages: None,
         }
     }
 
@@ -304,6 +371,7 @@ impl SubAgentWrapper {
             worktree_config,
             project_path: Some(project_path),
             structured_output_schema: None,
+            seed_messages: None,
         }
     }
 
@@ -326,7 +394,16 @@ impl SubAgentWrapper {
             worktree_config: WorktreeConfig::read_only(),
             project_path: None,
             structured_output_schema: Some(schema),
+            seed_messages: None,
         }
+    }
+
+    /// Set seed messages for Fork-lite context inheritance (Opt 4). The
+    /// sub-agent's conversation is pre-seeded with these (system-stripped)
+    /// parent messages before the task. Builder-style.
+    pub fn with_seed_messages(mut self, messages: Vec<Message>) -> Self {
+        self.seed_messages = Some(messages);
+        self
     }
 
     /// Determine the appropriate worktree config based on the sub-agent kind.
@@ -344,27 +421,59 @@ impl SubAgentWrapper {
     }
 }
 
+/// A no-op observer used when a sub-agent is run without progress
+/// forwarding (the `delegate` factory's own `run` path, or the seed path
+/// with no parent observer). Mirrors `AgentLoop::run`'s internal
+/// `SilentObserver` but lives here so it can be borrowed across the
+/// `run_with_conversation` call.
+struct NullSubAgentObserver;
+impl AgentLoopObserver for NullSubAgentObserver {
+    fn on_iteration_start(&self, _: usize, _: crate::agent_loop::ParadigmKind) {}
+    fn on_direct_answer(&self, _: &str) {}
+    fn on_tool_calls(&self, _: &[crate::agent_loop::ToolCallRequest]) {}
+    fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
+    fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+    fn on_paradigm_switch(&self, _: crate::agent_loop::ParadigmKind) {}
+    fn on_checkpoint(&self, _: usize) {}
+    fn on_complete(&self, _: &crate::agent_loop::AgentLoopResult) {}
+}
+
 #[async_trait]
 impl SubAgent for SubAgentWrapper {
-    /// Run the sub-agent on a task using tokio::spawn for independent async execution.
-    ///
-    /// The sub-agent runs on a separate tokio task, enabling parallel delegation:
-    /// the main agent can delegate multiple sub-tasks simultaneously, and each
-    /// sub-agent works independently without blocking the others.
-    ///
-    /// **Worktree Isolation**: If a project_path is configured and the sub-agent
-    /// kind modifies files (Code, Custom), a git worktree is created before the
-    /// sub-agent starts. The sub-agent operates in the worktree directory, and
-    /// after completion, changes are merged back to the main branch. This
-    /// prevents file conflicts when multiple Code sub-agents run in parallel.
-    ///
-    /// This addresses two gaps:
-    /// - "子Agent 未用 tokio::spawn" — sub-agents now run on independent tasks
-    /// - "无 git worktree 隔离" — Code sub-agents now operate in isolated worktrees
-    ///
-    /// **Note**: The `AgentLoop` must be `Clone` for this to work.
-    /// All fields are Arc/RwLock, so cloning is cheap (just pointer cloning).
+    /// Legacy entry point — runs silently and uncancellably (today's
+    /// contract). Delegates to [`Self::run_with_observer`] with no observer
+    /// and no cancel token.
     async fn run(&self, task: &str) -> Result<SubAgentSummary> {
+        self.run_with_observer(task, None, None).await
+    }
+
+    /// Run the sub-agent, optionally forwarding progress to a parent observer
+    /// (Opt 1) and/or propagating a parent interrupt (Opt 1).
+    ///
+    /// Runs **inline** — the outer `spawn_sub_agents_batch` already wraps each
+    /// delegation in its own `JoinSet` task, so an inner `tokio::spawn` here
+    /// was redundant (and blocked passing a borrowed observer through). A
+    /// sub-agent panic now surfaces via the outer `JoinSet`'s `Err(join)`.
+    ///
+    /// **Cancel propagation**: when `cancel` is `Some`, a fire-and-forget
+    /// watcher task awaits its cancellation and fires the sub-agent loop's
+    /// own `cancel_token()` — the loop already checks `cancelled()` at every
+    /// iteration boundary (and mid-`infer` via `tokio::select!`), so a parent
+    /// interrupt lands at the next boundary without touching `AgentLoop`
+    /// internals. The sub-agent's `AgentLoop` is a fresh per-delegation
+    /// instance, so its token is private to this run.
+    ///
+    /// **Fork-lite seed (Opt 4)**: when `seed_messages` is set on this
+    /// wrapper, the sub-agent conversation is pre-seeded with the parent's
+    /// recent turns (system messages already stripped) before the task,
+    /// starting from the parent's current reasoning. The seed is a
+    /// Copy-On-Write clone — the parent's durable log is never mutated.
+    async fn run_with_observer(
+        &self,
+        task: &str,
+        observer: Option<&dyn AgentLoopObserver>,
+        cancel: Option<CancellationToken>,
+    ) -> Result<SubAgentSummary> {
         // ─── Worktree isolation ──────────────────────────────────────────
         // If the sub-agent modifies files (Code, Custom), create a git worktree
         // for isolated execution. Read-only agents skip this step.
@@ -391,50 +500,73 @@ impl SubAgent for SubAgentWrapper {
             );
         }
 
+        // ─── Cancel watcher (Opt 1) ─────────────────────────────────────
+        // Parent interrupt → sub-agent loop's per-iteration cancellation
+        // check. Detached; dies with the sub-agent run.
+        let has_cancel = cancel.is_some();
+        let _cancel_watcher = cancel.map(|c| {
+            let inner = self.agent_loop.cancel_token();
+            let c = c.clone();
+            tokio::spawn(async move {
+                c.cancelled().await;
+                inner.cancel();
+            })
+        });
+
         // ─── Run the sub-agent ───────────────────────────────────────────
         let agent_loop = self.agent_loop.clone(); // Cheap Arc clone
         let kind = self.kind.clone();
         let task_owned = task.to_string();
         let is_isolated = worktree_handle.is_isolated;
-        let _wt_path = worktree_handle.worktree_path.clone();
-        let _wt_branch = worktree_handle.branch_name.clone();
         let project_path = worktree_handle.project_path.clone();
+        let seed = self.seed_messages.clone();
 
-        // Spawn the sub-agent as an independent tokio task
-        let handle = tokio::spawn(async move {
-            // TODO: In a full implementation, we would update the AgentLoop's
-            // working directory to point to the worktree path. This requires
-            // AgentLoop to support dynamic working directory changes.
-            // For now, the worktree path is available for tools that check it.
-            // The ShellTool's allowed_working_dirs and FileEditTool's base path
-            // should be updated to use wt_path when running in a worktree.
+        // Resolve the observer (None → silent).
+        let null = NullSubAgentObserver;
+        let obs: &dyn AgentLoopObserver = observer.unwrap_or(&null);
 
-            let result = agent_loop.run(&task_owned).await?;
+        tracing::info!(
+            sub_agent = %self.kind.name(),
+            seed = self.seed_messages.is_some(),
+            cancel = has_cancel,
+            "sub-agent run start"
+        );
+        let run_result = if let Some(msgs) = seed {
+            // Fork-lite: pre-seed conversation with the parent's recent turns.
+            let mut conv = Conversation::new();
+            for m in msgs {
+                conv.add_message(m);
+            }
+            agent_loop
+                .run_with_conversation(conv, &task_owned, obs)
+                .await
+        } else {
+            agent_loop.run_with_observer(&task_owned, obs).await
+        };
 
+        let summary = run_result.map(|result| {
             // Extract key findings from the conversation
             let key_findings = extract_key_findings(&result.final_answer);
 
             // Estimate token usage from the number of iterations
             let tokens_used = (result.iterations as u32) * 2000;
 
-            Ok(SubAgentSummary {
+            tracing::info!(
+                sub_agent = %self.kind.name(),
+                completed = result.completed,
+                iterations = result.iterations,
+                "sub-agent run end"
+            );
+
+            SubAgentSummary {
                 completed: result.completed,
                 summary: result.final_answer,
                 key_findings,
                 budget_exceeded: false,
                 agent_kind: kind,
                 tokens_used,
-            })
+            }
         });
-
-        // Wait for the sub-agent task to complete
-        let summary = handle.await.map_err(|e| {
-            oneai_core::error::OneAIError::Agent(format!(
-                "Sub-agent task '{}' panicked or was cancelled: {}",
-                self.kind.name(),
-                e
-            ))
-        })?;
 
         // ─── Merge worktree changes back ─────────────────────────────────
         if is_isolated && summary.is_ok() {
@@ -598,6 +730,21 @@ pub trait SubAgentFactory: Send + Sync {
     /// are provided, not the full tool set.
     async fn create(&self, kind: SubAgentKind, budget: TokenBudget) -> Result<Box<dyn SubAgent>>;
 
+    /// Create a sub-agent with per-delegation specialization (Opt 3 role
+    /// layering + Opt 4 Fork-lite). The default implementation ignores the
+    /// spec and delegates to [`Self::create`], so existing factories keep
+    /// working. `DefaultSubAgentFactory` overrides it to honor
+    /// `system_prompt` / `tools` / `seed_messages`.
+    async fn create_with_spec(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        spec: DelegationSpec,
+    ) -> Result<Box<dyn SubAgent>> {
+        let _ = spec;
+        self.create(kind, budget).await
+    }
+
     /// List the available sub-agent kinds.
     fn available_kinds(&self) -> Vec<SubAgentKind>;
 
@@ -655,6 +802,19 @@ pub struct DefaultSubAgentFactory {
     /// Defaults to WorktreeConfig::coding() for Code agents,
     /// WorktreeConfig::read_only() for read-only agents.
     worktree_config: Option<WorktreeConfig>,
+    /// Factory embedded in each sub-agent's `AgentLoop` for NESTED delegation
+    /// (Opt 2 depth control). Defaults to [`SubAgentFactoryNone`] (sub-agents
+    /// can't spawn further sub-agents — today's behavior). A
+    /// [`DepthLimitedSubAgentFactory`] chain is injected when `max_depth > 1`.
+    child_factory: Arc<dyn SubAgentFactory>,
+    /// Inherited permission pack (the PARENT's `MergedDomainPack`) threaded
+    /// into each built sub-agent via `AgentLoop::with_permission_pack`, so the
+    /// sub-agent inherits the parent's permission policy (e.g. CodingPack
+    /// auto-approves `web_search`/`web_fetch` → an Explore sub-agent's web
+    /// calls don't prompt). Permission ONLY — exposure/context/paradigm stay
+    /// None (tool defaults). `None` (no parent domain pack) → sub-agents fall
+    /// back to each tool's own `permission_level` (today's behavior).
+    permission_pack: Option<Arc<MergedDomainPack>>,
 }
 
 impl DefaultSubAgentFactory {
@@ -672,6 +832,8 @@ impl DefaultSubAgentFactory {
             tools,
             project_path: None,
             worktree_config: None,
+            child_factory: Arc::new(SubAgentFactoryNone),
+            permission_pack: None,
         }
     }
 
@@ -695,7 +857,29 @@ impl DefaultSubAgentFactory {
             tools,
             project_path: Some(project_path),
             worktree_config: Some(worktree_config),
+            child_factory: Arc::new(SubAgentFactoryNone),
+            permission_pack: None,
         }
+    }
+
+    /// Set the factory used for NESTED delegation inside built sub-agents
+    /// (Opt 2). Default is `SubAgentFactoryNone` (no nesting). Pass a
+    /// [`DepthLimitedSubAgentFactory`] chain to allow deeper delegation.
+    pub fn with_child_factory(mut self, child: Arc<dyn SubAgentFactory>) -> Self {
+        self.child_factory = child;
+        self
+    }
+
+    /// Inherit the parent's permission policy: thread the parent's
+    /// `MergedDomainPack` so each built sub-agent's `AgentLoop` consults its
+    /// `resolve_permission` for tool-approval decisions. This makes a
+    /// delegated sub-agent inherit the parent's auto-approve / require-
+    /// confirmation policy — e.g. the CodingPack auto-approves
+    /// `web_search`/`web_fetch`, so an Explore sub-agent's web calls don't
+    /// prompt. Permission ONLY (exposure/context/paradigm stay None).
+    pub fn with_permission_pack(mut self, pack: Arc<MergedDomainPack>) -> Self {
+        self.permission_pack = Some(pack);
+        self
     }
 
     /// Create a scoped tool registry containing only the specified tools.
@@ -740,39 +924,67 @@ impl DefaultSubAgentFactory {
 
         Arc::new(tokio::sync::RwLock::new(scoped))
     }
-}
 
-#[async_trait]
-impl SubAgentFactory for DefaultSubAgentFactory {
-    async fn create(&self, kind: SubAgentKind, budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
-        // Get the system prompt and available tools for this kind
-        let system_prompt = kind.default_system_prompt().to_string();
-        let available_tools_slice = kind.default_tools();
+    /// Build a sub-agent of `kind` honoring a [`DelegationSpec`] (Opt 3 role
+    /// layering + Opt 4 Fork-lite). Shared by [`Self::create`] (default spec)
+    /// and [`Self::create_with_spec`].
+    ///
+    /// - `spec.system_prompt` overrides the kind's default role prompt.
+    /// - `spec.tools` NARROWS the kind's default toolset (intersection —
+    ///   names outside the default set are dropped+warned, never widened).
+    /// - `spec.seed_messages` is stashed on the wrapper so
+    ///   [`SubAgentWrapper::run_with_observer`] seeds the sub-agent
+    ///   conversation with the parent's recent turns.
+    /// - The sub-agent's `AgentLoop` gets `self.child_factory` (default
+    ///   [`SubAgentFactoryNone`]; a [`DepthLimitedSubAgentFactory`] chain
+    ///   when `max_depth > 1`) for nested delegation (Opt 2).
+    async fn build(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        spec: DelegationSpec,
+    ) -> Result<Box<dyn SubAgent>> {
+        // Resolve the system prompt (Opt 3 role layering).
+        let system_prompt = spec
+            .system_prompt
+            .unwrap_or_else(|| kind.default_system_prompt().to_string());
 
-        // **Real scoped tool filtering** — this addresses the "子Agent scoped tools" gap.
-        // Previously, the factory passed the full tool set to the sub-agent, meaning
-        // a Plan sub-agent could see (and potentially call) edit_file and shell tools.
-        // Now, we actually filter the tool registry to only include the sub-agent's
-        // available_tools, following the principle of least privilege.
-        //
-        // This is similar to how Claude Code's Agent tool filters the tool set
-        // based on the sub-agent type.
-        //
-        // `Reflect` is strict: if its memory-tool whitelist isn't registered it
-        // gets an EMPTY toolset (no fallback) — the alternative (falling back to
-        // all tools) would hand a background reviewer `edit_file`/`shell`, breaking
-        // the memory-only guarantee. The AgentLoop's cadence check skips firing
-        // reflect when the memory tools are absent, so the empty case is rare.
+        // Resolve the effective tool set (Opt 3 least-privilege narrowing).
+        let default_tools: Vec<&str> = kind.default_tools().to_vec();
+        let effective_tools: Vec<String> = match &spec.tools {
+            Some(req) => {
+                // Intersect with the kind default — never widen. Out-of-set
+                // names are dropped with a warning so the model learns the
+                // privilege ceiling of the chosen kind.
+                let default_lookup: std::collections::HashSet<&str> =
+                    default_tools.iter().copied().collect();
+                req.iter()
+                    .filter(|t| {
+                        let ok = default_lookup.contains(t.as_str());
+                        if !ok {
+                            tracing::warn!(
+                                "Delegate tools override '{}' not in kind '{}' default set — dropped (never widened)",
+                                t,
+                                kind.name()
+                            );
+                        }
+                        ok
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => default_tools.iter().map(|s| s.to_string()).collect(),
+        };
+        let effective_slice: Vec<&str> = effective_tools.iter().map(|s| s.as_str()).collect();
+
+        // `Reflect` is strict (empty whitelist stays empty). Other kinds
+        // keep the fallback-to-all behavior when their preferred tools are
+        // unregistered (no DomainPack).
         let strict_whitelist = matches!(kind, SubAgentKind::Reflect);
         let scoped_tools = self
-            .create_scoped_tools(available_tools_slice, strict_whitelist)
+            .create_scoped_tools(&effective_slice, strict_whitelist)
             .await;
 
-        // Also set the ParadigmConfig for the sub-agent — this controls
-        // which tools are sent to the LLM as tool definitions.
-        // The scoped_tools registry already filters at the execution level,
-        // but ParadigmConfig further filters at the definition level
-        // (what the LLM sees), which is the correct double-layer filtering.
         let _paradigm_config = crate::agent_loop::ParadigmConfig::for_paradigm(match kind {
             SubAgentKind::Plan => crate::agent_loop::ParadigmKind::Plan,
             SubAgentKind::Explore => crate::agent_loop::ParadigmKind::Explore,
@@ -785,62 +997,53 @@ impl SubAgentFactory for DefaultSubAgentFactory {
 
         let config = AgentLoopConfig {
             system_prompt,
-            use_streaming: false,
-            temperature: Some(0.3), // Lower temperature for focused sub-agent tasks
+            // Sub-agents stream their inference. Two reasons (Opt 1 hardening):
+            // 1) the streaming path carries the 60s idle-timeout guard (a
+            //    stalled SSE → retryable error, not an indefinite hang) that the
+            //    non-streaming `infer` path lacks — a delegated Explore agent
+            //    whose provider stalls must not hang the parent's batch
+            //    (and thus the whole turn, since the directive pump holds the
+            //    session lock for `run_turn`).
+            // 2) `infer_stream`'s `tokio::select!` honors the loop's
+            //    `cancel_token`, so a parent interrupt actually breaks a
+            //    mid-flight sub-agent inference (the cancel watcher fires the
+            //    sub-agent's token; non-streaming `infer` has no such select).
+            // Stream chunks stay inside the sub-agent (ForwardingObserver
+            //    no-ops `on_stream_chunk`) — no parent/UI flooding.
+            use_streaming: true,
+            temperature: Some(0.3),
             top_p: None,
             max_tokens: Some(budget.total),
             thinking_budget: None,
             stop_sequences: Vec::new(),
-            // Reflect is a bounded background reviewer — 16 iterations cap
-            // keeps the cadence-fired sub-agent from running away (it should
-            // persist a few memory facts and stop). Other sub-agents keep the
-            // 50-iteration headroom for real exploration / coding work.
             hard_max_iterations: Some(if matches!(kind, SubAgentKind::Reflect) {
                 16
             } else {
                 50
             }),
-            // Sub-agent run-cost cap = the delegation budget. The loop
-            // terminates when the delegated token budget is exhausted,
-            // honoring the caller's `budget_tokens` cap (previously the
-            // budget was passed as max_tokens only, with no run-cost
-            // termination guardrail).
             token_budget: Some(budget.clone()),
-            inject_skills: false,  // Sub-agents don't need skill injection
-            usage_tracker: None,   // Sub-agents inherit usage tracker from parent loop
-            rate_limiter: None,    // Sub-agents inherit rate limiter from parent loop
-            circuit_breaker: None, // Sub-agents inherit circuit breaker from parent loop
-            token_counter: None,   // Sub-agents inherit token counter from parent loop
-            // Sub-agents are bounded by their delegation budget + iteration cap
-            // and use the durable-log ContextCompressor; the parent's
-            // model-aware ContextManager isn't threaded through the factory
-            // (would need a SubAgentFactory signature change). A future
-            // improvement can pass it down so sub-agents trim to their model
-            // window too.
+            inject_skills: false,
+            usage_tracker: None,
+            rate_limiter: None,
+            circuit_breaker: None,
+            token_counter: None,
             context_manager: None,
-            structured_output: None, // Sub-agents don't have structured output validation
+            structured_output: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
-            trace_context: None, // Sub-agents inherit trace from parent loop
-            // Sub-agents don't get their own metrics provider — they could
-            // share the parent's in a future improvement.
+            trace_context: None,
             #[cfg(feature = "otel")]
             metrics_provider: None,
-            plan_mode: false, // Sub-agents never run in plan mode
+            plan_mode: false,
             prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
-            // Sub-agents never cadence-fire their own reflect (and `Reflect`
-            // kinds don't nest via SubAgentFactoryNone anyway).
             reflection_cadence: None,
         };
 
-        // Create a basic context assembler (no domain sources for sub-agents)
         let context_assembler = crate::context_assembler::ContextAssembler::new();
         let stream_parser = crate::streaming::IncrementalStreamParser::new();
 
-        // Create the AgentLoop with SCOPED tools (not the full tool set!)
-        // This is the key fix — sub-agents can only use their designated tools.
         let agent_loop = AgentLoop::new(
             self.provider.clone(),
-            scoped_tools, // ← SCOPED, not self.tools.clone()
+            scoped_tools,
             self.parser.clone(),
             self.interaction_gate.clone(),
             Arc::new(oneai_skill::SkillSelector::new()),
@@ -849,25 +1052,19 @@ impl SubAgentFactory for DefaultSubAgentFactory {
                 oneai_core::budget::BudgetAllocation::default(),
                 Arc::new(oneai_core::budget::TruncationCompressor::default()),
             )),
-            Arc::new(SubAgentFactoryNone), // Sub-agents don't spawn further sub-agents
+            self.child_factory.clone(),
             context_assembler,
             stream_parser,
             config,
-        );
+        )
+        .with_optional_permission_pack(self.permission_pack.clone());
 
-        // ─── Worktree isolation ──────────────────────────────────────────
-        // If a project_path is configured, Code sub-agents create git worktrees
-        // for isolated file operations. This prevents conflicts when multiple
-        // Code sub-agents run in parallel (P1#13 gap).
-        //
-        // Read-only agents (Plan, Explore, Review) don't need isolation —
-        // they only read/search, they don't modify files.
         let worktree_config = self
             .worktree_config
             .clone()
             .unwrap_or_else(|| SubAgentWrapper::default_worktree_config_for_kind(&kind));
 
-        let wrapper = if let Some(project_path) = &self.project_path {
+        let mut wrapper = if let Some(project_path) = &self.project_path {
             SubAgentWrapper::with_worktree(
                 kind.clone(),
                 budget,
@@ -879,7 +1076,28 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             SubAgentWrapper::new(kind.clone(), budget, agent_loop)
         };
 
+        // Opt 4: stash seed messages for the run path (COW injection).
+        if let Some(msgs) = spec.seed_messages {
+            wrapper = wrapper.with_seed_messages(msgs);
+        }
+
         Ok(Box::new(wrapper))
+    }
+}
+
+#[async_trait]
+impl SubAgentFactory for DefaultSubAgentFactory {
+    async fn create(&self, kind: SubAgentKind, budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
+        self.build(kind, budget, DelegationSpec::default()).await
+    }
+
+    async fn create_with_spec(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        spec: DelegationSpec,
+    ) -> Result<Box<dyn SubAgent>> {
+        self.build(kind, budget, spec).await
     }
 
     fn available_kinds(&self) -> Vec<SubAgentKind> {
@@ -896,6 +1114,137 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             kind,
             SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Code | SubAgentKind::Review
         )
+    }
+}
+
+// ─── DepthLimitedSubAgentFactory ─────────────────────────────────────────────
+
+/// Configurable-depth gate installed as a sub-agent's *child* factory to
+/// control how deep nested delegation can go (Opt 2 resource bound). The gate
+/// represents the factory of a sub-agent at nesting `level` (parent's direct
+/// sub-agent = level 1; its grandchild = level 2; …). It allows creating a
+/// child iff `level <= max_depth`; otherwise it refuses, so a model that
+/// over-decomposes can't recurse without bound (the "递归风暴" gap).
+///
+/// The PARENT loop's own `sub_agent_factory` is **not** a gate — it's a plain
+/// `DefaultSubAgentFactory` whose `child_factory` is the level-2 gate, so the
+/// parent's direct sub-agents (level 1) are always creatable. That keeps
+/// today's behavior intact when `max_depth = 1`: the level-2 gate refuses
+/// (2 > 1), identical to the old hard-coded `SubAgentFactoryNone`. See
+/// [`DepthLimitedSubAgentFactory::build_parent_factory`].
+pub struct DepthLimitedSubAgentFactory {
+    inner: Arc<dyn SubAgentFactory>,
+    level: usize,
+    max_depth: usize,
+}
+
+impl DepthLimitedSubAgentFactory {
+    /// Wrap `inner` with a depth gate. `level` is the nesting level of the
+    /// sub-agent whose factory this is (parent's direct sub-agent = 1). A
+    /// `create` here proceeds iff `level <= max_depth`.
+    pub fn new(inner: Arc<dyn SubAgentFactory>, level: usize, max_depth: usize) -> Self {
+        Self {
+            inner,
+            level,
+            max_depth,
+        }
+    }
+
+    /// Build the factory to install as the PARENT loop's `sub_agent_factory`.
+    /// Returns a plain `DefaultSubAgentFactory` whose embedded `child_factory`
+    /// is the level-2 gate (so the parent's direct sub-agents — level 1 — are
+    /// always creatable, and their nested delegation is gated by `max_depth`).
+    ///
+    /// `max_depth = 1` ⇒ the level-2 gate refuses (2 > 1) ⇒ no nesting,
+    /// identical to today's `DefaultSubAgentFactory::new` (whose default
+    /// `child_factory` is `SubAgentFactoryNone`). Raise `max_depth` to unlock
+    /// deeper delegation.
+    pub fn build_parent_factory(
+        template: DefaultSubAgentFactory,
+        max_depth: usize,
+    ) -> Arc<dyn SubAgentFactory> {
+        // The child_factory for a sub-agent at nesting `level`:
+        //   - level > max_depth → refuse (SubAgentFactoryNone)
+        //   - else → a Gate at `level` wrapping a template whose child_factory
+        //     is the gate for `level + 1`.
+        fn child_for_level(
+            template: &DefaultSubAgentFactory,
+            level: usize,
+            max_depth: usize,
+        ) -> Arc<dyn SubAgentFactory> {
+            if level > max_depth {
+                return Arc::new(SubAgentFactoryNone);
+            }
+            let next = child_for_level(template, level + 1, max_depth);
+            let inner = template.clone().with_child_factory(next);
+            Arc::new(DepthLimitedSubAgentFactory::new(
+                Arc::new(inner),
+                level,
+                max_depth,
+            ))
+        }
+        // Parent's direct sub-agents are level 1 (always creatable); their
+        // child_factory gates level 2 upward.
+        let child = child_for_level(&template, 2, max_depth);
+        Arc::new(template.with_child_factory(child))
+    }
+}
+
+#[async_trait]
+impl SubAgentFactory for DepthLimitedSubAgentFactory {
+    async fn create(&self, kind: SubAgentKind, budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
+        if self.level > self.max_depth {
+            return Err(oneai_core::error::OneAIError::Agent(format!(
+                "Delegation depth limit (level {} > max {}) reached — sub-agent '{}' cannot spawn further sub-agents",
+                self.level,
+                self.max_depth,
+                kind.name()
+            )));
+        }
+        self.inner.create(kind, budget).await
+    }
+
+    async fn create_with_spec(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        spec: DelegationSpec,
+    ) -> Result<Box<dyn SubAgent>> {
+        if self.level > self.max_depth {
+            return Err(oneai_core::error::OneAIError::Agent(format!(
+                "Delegation depth limit (level {} > max {}) reached — sub-agent '{}' cannot spawn further sub-agents",
+                self.level,
+                self.max_depth,
+                kind.name()
+            )));
+        }
+        self.inner.create_with_spec(kind, budget, spec).await
+    }
+
+    fn available_kinds(&self) -> Vec<SubAgentKind> {
+        self.inner.available_kinds()
+    }
+
+    fn is_available(&self, kind: &SubAgentKind) -> bool {
+        self.inner.is_available(kind)
+    }
+}
+
+impl Clone for DefaultSubAgentFactory {
+    /// Cheap clone — all fields are Arc. Lets `chain` build layered factories
+    /// that share the provider/parser/tools/worktree wiring but differ in
+    /// their embedded `child_factory`.
+    fn clone(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            parser: self.parser.clone(),
+            interaction_gate: self.interaction_gate.clone(),
+            tools: self.tools.clone(),
+            project_path: self.project_path.clone(),
+            worktree_config: self.worktree_config.clone(),
+            child_factory: self.child_factory.clone(),
+            permission_pack: self.permission_pack.clone(),
+        }
     }
 }
 
@@ -932,7 +1281,7 @@ impl oneai_workflow::DelegateFactory for SubAgentDelegateFactory {
         let sub_agent = self.factory.create(kind, budget).await?;
 
         // Run the sub-agent silently (no observer — this is inside a StateGraph)
-        let result = sub_agent.run(task).await?;
+        let result = sub_agent.run_with_observer(task, None, None).await?;
         Ok(result.summary)
     }
 }

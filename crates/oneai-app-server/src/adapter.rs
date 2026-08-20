@@ -115,19 +115,54 @@ pub async fn serve_connection(
 /// outbound channel's receiver drops (connection closed).
 fn spawn_yield_forwarder(bus: Arc<InProcessBus>, out_tx: mpsc::Sender<String>) -> JoinHandle<()> {
     let mut rx = bus.subscribe_yields();
+    // Internal unbounded buffer that DECOUPLES the broadcast drain from the
+    // ws send. Without it, ws backpressure (a slow client — e.g. one busy
+    // rendering a large 15k-char sub-agent report) propagates: the bounded
+    // `out_tx.send().await` blocks → the broadcast receiver stops draining →
+    // `RecvError::Lagged` → the old `continue` SILENTLY DROPPED the lagged
+    // events. A dropped `turn_complete` left the web UI's `turnActive` stuck
+    // "in progress" forever (the orange status light kept blinking) even
+    // though the engine had finished the turn. The unbounded buffer absorbs
+    // the burst; the broadcast receiver is drained eagerly (never lags), so
+    // completion events (`turn_complete`/`delegate_complete`/`error`) always
+    // reach the buffer and are delivered when the client catches up. Memory
+    // is bounded by the (finite) event count of a turn.
+    let (buf_tx, mut buf_rx) = mpsc::unbounded_channel::<String>();
+    // Sender: buffer → ws. A slow ws makes the buffer grow; it never drops.
+    // Ends when buf_tx drops (drainer gone) or the ws closes (out_tx send err).
+    tokio::spawn(async move {
+        while let Some(line) = buf_rx.recv().await {
+            if out_tx.send(line).await.is_err() {
+                return; // connection closed
+            }
+        }
+    });
+    // Eager broadcast drainer → unbounded buffer. The unbounded send never
+    // blocks, so `rx` is always polled promptly and never lags the broadcast.
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(yield_) => {
                     if let Ok(n) = Notification::event(&yield_) {
                         if let Ok(line) = serde_json::to_string(&n) {
-                            if out_tx.send(line).await.is_err() {
-                                return; // connection closed
+                            // Unbounded send fails only if the sender task
+                            // (buffer consumer) ended — i.e. connection
+                            // closed. Stop draining then.
+                            if buf_tx.send(line).is_err() {
+                                return;
                             }
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Should be unreachable now (the buffer decouples backpressure),
+                    // but keep the safety net visible if it ever recurs.
+                    tracing::warn!(
+                        lagged = n,
+                        "yield broadcast lagged — missed events dropped (decouple should prevent this)"
+                    );
+                    continue;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
         }

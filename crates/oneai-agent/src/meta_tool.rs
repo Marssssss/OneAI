@@ -59,7 +59,14 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                 Subtasks with no `depends_on` run in parallel; a subtask that lists `depends_on` ids \
                 runs only after those subtasks finish, and its task description is automatically \
                 prefixed with their summaries — so a dependent subtask receives its upstream results \
-                without you re-stating them. Do not also call non-delegate tools in the same turn.".into(),
+                without you re-stating them. Do not also call non-delegate tools in the same turn.\n\n\
+                Specialization (role layering, all optional): set `agent_type`=\"Custom\" with \
+                `custom_role` to mint a specialized sub-agent that the fixed kinds don't cover; pass \
+                `system_prompt` to override the kind's default role prompt; pass `tools` to NARROW the \
+                sub-agent's toolset below the kind default (never widen — out-of-set names are dropped). \
+                Set `inherit_context`=true to seed the sub-agent with your last `inherit_last_n_messages` \
+                turns (defaults to 6 when true and 0) so it starts from your current reasoning instead \
+                of from scratch — use this only for \"continue from where I am\" subtasks.".into(),
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -69,8 +76,8 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                     },
                     "agent_type": {
                         "type": "string",
-                        "enum": ["Plan", "Explore", "Code", "Review"],
-                        "description": "The specialized sub-agent kind. Plan=decompose, Explore=search/understand, Code=implement/modify, Review=audit."
+                        "enum": ["Plan", "Explore", "Code", "Review", "Custom"],
+                        "description": "The specialized sub-agent kind. Plan=decompose, Explore=search/understand, Code=implement/modify, Review=audit, Custom=a specialized role you name via `custom_role`."
                     },
                     "budget_tokens": {
                         "type": "integer",
@@ -85,6 +92,29 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Ids of delegations in the same turn that must complete before this one starts. Their summaries are automatically prepended to this subtask. Omit (or leave empty) for subtasks that can run in parallel."
+                    },
+                    "custom_role": {
+                        "type": "string",
+                        "description": "Used only when `agent_type`=\"Custom\". Names the custom role (e.g. \"security-reviewer\", \"test-writer\"). Ignored for the fixed kinds."
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "Override the kind's default system prompt for this delegation. Use to specialize a role (e.g. a reviewer focused only on concurrency bugs). Optional."
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Narrow the sub-agent's toolset to this subset of the kind's default tools. Names outside the default set are dropped (never widened). Optional."
+                    },
+                    "inherit_context": {
+                        "type": "boolean",
+                        "description": "If true, seed the sub-agent with the parent loop's recent turns so it continues from the parent's current reasoning (Fork-style). Default false.",
+                        "default": false
+                    },
+                    "inherit_last_n_messages": {
+                        "type": "integer",
+                        "description": "When `inherit_context` is true, how many of the parent's trailing non-system messages to seed. 0 with inherit_context=true defaults to 6.",
+                        "default": 0
                     }
                 },
                 "required": ["task", "agent_type"]
@@ -160,7 +190,7 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert_eq!(
             schema["properties"]["agent_type"]["enum"],
-            serde_json::json!(["Plan", "Explore", "Code", "Review"])
+            serde_json::json!(["Plan", "Explore", "Code", "Review", "Custom"])
         );
         assert_eq!(
             schema["required"],
@@ -173,6 +203,17 @@ mod tests {
         assert_eq!(
             schema["properties"]["depends_on"]["items"]["type"],
             "string"
+        );
+        // Opt 3 specialization fields.
+        assert_eq!(schema["properties"]["custom_role"]["type"], "string");
+        assert_eq!(schema["properties"]["system_prompt"]["type"], "string");
+        assert_eq!(schema["properties"]["tools"]["type"], "array");
+        assert_eq!(schema["properties"]["tools"]["items"]["type"], "string");
+        // Opt 4 context-inheritance fields.
+        assert_eq!(schema["properties"]["inherit_context"]["type"], "boolean");
+        assert_eq!(
+            schema["properties"]["inherit_last_n_messages"]["type"],
+            "integer"
         );
 
         let switch = defs

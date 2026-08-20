@@ -1217,12 +1217,15 @@ impl AppSession {
                         self.session_id.clone(),
                     ),
                 ),
-                Arc::new(oneai_agent::DefaultSubAgentFactory::new(
-                    provider.clone(),
-                    self.app.parser.clone(),
-                    self.app.interaction_gate.clone(),
-                    self.app.tool_executor.tools_map(),
-                )),
+                Arc::new(
+                    oneai_agent::DefaultSubAgentFactory::new(
+                        provider.clone(),
+                        self.app.parser.clone(),
+                        self.app.interaction_gate.clone(),
+                        self.app.tool_executor.tools_map(),
+                    )
+                    .with_permission_pack(domain.clone()),
+                ),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
                 config,

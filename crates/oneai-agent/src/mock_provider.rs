@@ -61,13 +61,23 @@ pub struct ScriptedResponse {
 /// One entry of a `delegate_batch` — a single `delegate` tool call within a
 /// turn that fans out several sub-agents. Used by
 /// [`ScriptedResponse::delegate_batch`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DelegateSpec {
     pub task: String,
     pub agent_type: String,
     pub budget_tokens: u32,
     pub id: String,
     pub depends_on: Vec<String>,
+    /// Opt 3: custom_role (used when agent_type == "Custom").
+    pub custom_role: Option<String>,
+    /// Opt 3: override the kind's default system prompt.
+    pub system_prompt: Option<String>,
+    /// Opt 3: narrow the sub-agent's toolset.
+    pub tools: Option<Vec<String>>,
+    /// Opt 4: seed the sub-agent with the parent's recent turns.
+    pub inherit_context: bool,
+    /// Opt 4: how many trailing non-system messages to seed.
+    pub inherit_last_n: usize,
 }
 
 impl DelegateSpec {
@@ -83,6 +93,7 @@ impl DelegateSpec {
             budget_tokens: 5000,
             id: id.into(),
             depends_on: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -94,6 +105,31 @@ impl DelegateSpec {
 
     pub fn with_budget(mut self, budget: u32) -> Self {
         self.budget_tokens = budget;
+        self
+    }
+
+    /// Opt 3: set a custom_role (used when `agent_type == "Custom"`).
+    pub fn with_custom_role(mut self, role: impl Into<String>) -> Self {
+        self.custom_role = Some(role.into());
+        self
+    }
+
+    /// Opt 3: override the kind's default system prompt.
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Opt 3: narrow the sub-agent's toolset.
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Opt 4: seed the sub-agent with the parent's recent turns.
+    pub fn with_inherit_context(mut self, last_n: usize) -> Self {
+        self.inherit_context = true;
+        self.inherit_last_n = last_n;
         self
     }
 }
@@ -247,6 +283,19 @@ impl ScriptedResponse {
                 });
                 if !spec.depends_on.is_empty() {
                     args["depends_on"] = serde_json::json!(spec.depends_on);
+                }
+                if let Some(role) = spec.custom_role {
+                    args["custom_role"] = serde_json::json!(role);
+                }
+                if let Some(prompt) = spec.system_prompt {
+                    args["system_prompt"] = serde_json::json!(prompt);
+                }
+                if let Some(tools) = spec.tools {
+                    args["tools"] = serde_json::json!(tools);
+                }
+                if spec.inherit_context {
+                    args["inherit_context"] = serde_json::json!(true);
+                    args["inherit_last_n_messages"] = serde_json::json!(spec.inherit_last_n);
                 }
                 ContentBlock::ToolCall {
                     id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
