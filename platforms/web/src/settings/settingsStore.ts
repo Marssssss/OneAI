@@ -19,6 +19,8 @@ import type {
   SkillInfo,
   SkillOpParams,
   SkillOpResult,
+  ThinkingEffort,
+  ThinkingEffortSetParams,
 } from '../rpc/types'
 
 export interface SettingsSnapshot {
@@ -153,6 +155,40 @@ export class SettingsStore {
     } catch (e) {
       this.set({ lastError: errMsg(e, 'provider/set_active') })
       await this.refresh()
+      return false
+    }
+  }
+
+  /** Persist a new thinking-effort tier (web UI "思考程度" toggle). Hot-
+   *  swaps immediately — the next turn's main agent + new sub-agents read the
+   *  new value. Optimistically patches the snapshot's `thinking_effort` so the
+   *  control reacts instantly; the server's `{effort}` result confirms (and
+   *  re-syncs on failure). */
+  async setThinkingEffort(effort: ThinkingEffort): Promise<boolean> {
+    const prev = this.state.config?.thinking_effort
+    if (this.state.config) {
+      this.set({
+        config: { ...this.state.config, thinking_effort: effort },
+        lastError: null,
+      })
+    }
+    try {
+      const res = await this.rpc.call<ThinkingEffortSetParams, { effort: ThinkingEffort }>(
+        'thinking/set',
+        { effort },
+      )
+      if (this.state.config) {
+        this.set({ config: { ...this.state.config, thinking_effort: res.effort }, lastError: null })
+      }
+      return true
+    } catch (e) {
+      // Roll back the optimistic patch to the server's persisted value.
+      if (this.state.config) {
+        this.set({
+          config: { ...this.state.config, thinking_effort: prev },
+          lastError: errMsg(e, 'thinking/set'),
+        })
+      }
       return false
     }
   }

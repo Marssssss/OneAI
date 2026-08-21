@@ -650,6 +650,23 @@ async fn handle_request(
         method::SKILL_UNPIN => skill_op(&probe, &id, &params, OpKind::Unpin).await,
         method::SKILL_ARCHIVE => skill_op(&probe, &id, &params, OpKind::Archive).await,
         method::SKILL_RESTORE => skill_op(&probe, &id, &params, OpKind::Restore).await,
+        method::THINKING_GET => {
+            let effort = probe.thinking_effort().await;
+            Response::ok(id, json!({"effort": effort}))
+        }
+        method::THINKING_SET => {
+            // `effort` is a lowercase tier string ("off"/"low"/"medium"/
+            // "high"/"max") deserialized into the enum.
+            let effort = match field::<oneai_core::ThinkingEffort>(&params, "effort") {
+                Ok(e) => e,
+                Err(e) => return Response::err(id, e),
+            };
+            probe.set_thinking_effort(effort).await;
+            // Re-read so the client sees the persisted value (round-trips the
+            // store; surfaces a set failure as the unchanged prior value).
+            let after = probe.thinking_effort().await;
+            Response::ok(id, json!({"effort": after}))
+        }
 
         // Unknown method.
         _ => Response::err(id, RpcError::method_not_found(&req.method)),
@@ -824,6 +841,34 @@ mod tests {
         // NullAppProbe ⇒ all-Default snapshot (plan_mode is the one required
         // field; the rest are skip-if-none).
         assert_eq!(resp.result.unwrap()["plan_mode"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn thinking_get_returns_default_medium() {
+        // NullAppProbe ⇒ ThinkingEffort::default() = Medium. Verifies routing
+        // + the `{effort}` response shape (the probe's own persistence is
+        // covered by SqliteThinkingEffort's tests + the CLI AppProbeImpl).
+        let resp = probe_response("thinking/get", json!({})).await;
+        assert!(resp.error.is_none(), "thinking/get should not error");
+        assert_eq!(resp.result.unwrap()["effort"], json!("medium"));
+    }
+
+    #[tokio::test]
+    async fn thinking_set_routes_valid_tier() {
+        // A valid tier string deserializes into the enum and round-trips
+        // (NullAppProbe::set is a no-op, so get still returns medium — this
+        // asserts routing + param parsing, not persistence).
+        let resp = probe_response("thinking/set", json!({"effort": "high"})).await;
+        assert!(resp.error.is_none(), "valid tier should not error");
+        assert_eq!(resp.result.unwrap()["effort"], json!("medium"));
+    }
+
+    #[tokio::test]
+    async fn thinking_set_rejects_invalid_tier() {
+        // An unrecognized tier string is a -32602 invalid-params, not a
+        // silent default — so a stale client/typo is diagnosable.
+        let resp = probe_response("thinking/set", json!({"effort": "turbo"})).await;
+        assert!(resp.error.is_some(), "invalid tier should error");
     }
 
     #[tokio::test]

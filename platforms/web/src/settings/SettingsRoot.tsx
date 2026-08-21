@@ -18,7 +18,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Modal } from '../scenario/Modal'
 import { useLocale } from '../i18n'
-import type { HostListResult } from '../rpc/types'
+import type { HostListResult, ThinkingEffort } from '../rpc/types'
 import type { SettingsStore } from './settingsStore'
 import { useSettings } from './settingsStore'
 import styles from './SettingsRoot.module.css'
@@ -101,6 +101,8 @@ export function SettingsRoot({
               onToggleTheme={onToggleTheme}
               onToggleLocale={onToggleLocale}
               onTogglePlan={onTogglePlan}
+              store={store}
+              snap={snap}
             />
           )}
           {section === 'models' && <ModelsSection store={store} snap={snap} />}
@@ -131,6 +133,8 @@ function GeneralSection({
   onToggleTheme,
   onToggleLocale,
   onTogglePlan,
+  store,
+  snap,
 }: {
   theme: 'light' | 'dark'
   locale: 'zh' | 'en'
@@ -139,8 +143,23 @@ function GeneralSection({
   onToggleTheme: () => void
   onToggleLocale: () => void
   onTogglePlan: () => void
+  store: SettingsStore
+  snap: ReturnType<typeof useSettings>
 }): ReactNode {
   const { t } = useLocale()
+  // The persisted thinking-effort tier; defaults to "medium" when no store is
+  // wired (the snapshot omits the field) — matches the Rust default.
+  const effort: ThinkingEffort =
+    (snap.config?.thinking_effort as ThinkingEffort | undefined) ?? 'medium'
+  const tiers: ThinkingEffort[] = ['off', 'low', 'medium', 'high', 'max']
+  const tierLabel = (e: ThinkingEffort): string =>
+    ({
+      off: t('settings.thinkingOff'),
+      low: t('settings.thinkingLow'),
+      medium: t('settings.thinkingMedium'),
+      high: t('settings.thinkingHigh'),
+      max: t('settings.thinkingMax'),
+    })[e]
   return (
     <div className={styles.stack}>
       <Row label={t('settings.theme')}>
@@ -158,6 +177,20 @@ function GeneralSection({
           {planMode ? t('settings.on') : t('settings.off')}
         </button>
         <span className={styles.hint}>{t('settings.planModeHint')}</span>
+      </Row>
+      <Row label={t('settings.thinkingEffort')}>
+        <select
+          className={styles.toggle}
+          value={effort}
+          onChange={(e) => void store.setThinkingEffort(e.target.value as ThinkingEffort)}
+        >
+          {tiers.map((e) => (
+            <option key={e} value={e}>
+              {tierLabel(e)}
+            </option>
+          ))}
+        </select>
+        <span className={styles.hint}>{t('settings.thinkingEffortHint')}</span>
       </Row>
       <Row label={t('settings.connection')}>
         <span className={styles.value}>{t(`status.${connection}`)}</span>

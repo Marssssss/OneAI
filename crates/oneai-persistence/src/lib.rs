@@ -21,6 +21,7 @@ pub mod checkpoint;
 pub mod host_allowlist;
 pub mod sqlite_store;
 pub mod state;
+pub mod thinking_effort;
 pub mod usage_tracker;
 pub mod working_state_store;
 
@@ -28,5 +29,6 @@ pub use checkpoint::*;
 pub use host_allowlist::*;
 pub use sqlite_store::*;
 pub use state::*;
+pub use thinking_effort::*;
 pub use usage_tracker::*;
 pub use working_state_store::*;

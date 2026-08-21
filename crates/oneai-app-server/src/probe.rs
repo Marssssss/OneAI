@@ -52,6 +52,12 @@ pub struct AppConfigSnapshot {
     /// A short label for the active permission profile (e.g. "standard"), or null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
+    /// The persisted thinking-effort tier label (e.g. "off"/"low"/"medium"/
+    /// "high"/"max"), or null if no store is wired (legacy path). Set by
+    /// `AppProbe::config()` from the `ThinkingEffortStore`; the web settings
+    /// panel shows + edits it (writes go via `thinking/set`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<String>,
 }
 
 /// One configured provider entry.
@@ -198,6 +204,14 @@ pub trait AppProbe: Send + Sync {
     /// Read the raw config file (path + contents) for the "open config file"
     /// affordance.
     async fn config_read(&self) -> ConfigFileView;
+    /// The persisted thinking-effort tier (web UI "思考程度" toggle). The
+    /// production impl reads the shared `ThinkingEffortStore`; the returned
+    /// tier is what the main agent + sub-agents (capped per-kind) use on the
+    /// next turn. Defaults to `Medium` when no store is wired.
+    async fn thinking_effort(&self) -> oneai_core::ThinkingEffort;
+    /// Persist a new thinking-effort tier. Hot-swaps immediately — the next
+    /// turn's main agent + new sub-agents read the new value. Idempotent.
+    async fn set_thinking_effort(&self, effort: oneai_core::ThinkingEffort);
 }
 
 /// Shared, thread-safe handle threaded through `serve_all` → transports →
@@ -264,6 +278,10 @@ impl AppProbe for NullAppProbe {
             content: String::new(),
         }
     }
+    async fn thinking_effort(&self) -> oneai_core::ThinkingEffort {
+        oneai_core::ThinkingEffort::default()
+    }
+    async fn set_thinking_effort(&self, _effort: oneai_core::ThinkingEffort) {}
 }
 
 fn not_supported(what: &str) -> SkillOpResult {

@@ -304,6 +304,10 @@ struct AppResources {
     /// Sampling / generation params — propagated into the AgentLoopConfig
     /// of every agent run.
     generation_config: oneai_core::GenerationConfig,
+    /// Persisted thinking-effort selection (web UI "思考程度" toggle).
+    /// `run_agent` reads it each turn to override the main agent's
+    /// `thinking_budget`, and threads it into the sub-agent factory.
+    thinking_effort: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
     /// Layer-1 constrained-decoding policy — propagated into every AgentLoopConfig.
     constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
     /// Reflect sub-agent cadence (Phase 2.1 Stage A) — `None` = off.
@@ -401,6 +405,7 @@ impl AppSession {
                 model_context_resolver: app.model_context_resolver.clone(),
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
+                thinking_effort: app.thinking_effort.clone(),
                 constrained_output_policy: app.constrained_output_policy,
                 reflection_cadence: app.reflection_cadence,
                 working_state_store: app.working_state_store.clone(),
@@ -1257,6 +1262,17 @@ impl AppSession {
             // Apply user-configured generation params (temperature/top_p/
             // max_tokens/thinking_budget/stop_sequences) on top of the defaults.
             config.apply_generation_config(&self.app.generation_config);
+            // Override the thinking budget with the persisted user-selected
+            // thinking-effort tier (the web UI "思考程度" toggle). The main
+            // agent follows the tier directly (no kind cap — it has no
+            // run-cost cap by default, so even "Max" just ruminates slowly
+            // rather than dying). Sub-agents are capped per-kind (see
+            // sub_agent.rs). Done AFTER apply_generation_config so the tier
+            // wins over any static generation_config.thinking_budget.
+            if let Some(store) = &self.app.thinking_effort {
+                let effort = store.get().await;
+                config.thinking_budget = effort.as_thinking_budget();
+            }
             // Use the real ContextCompressor with the domain's CompressionTemplate,
             // so that compression preserves domain-critical information.
             // P3: also wire compression-coupled fact extraction — discarded
@@ -1303,7 +1319,8 @@ impl AppSession {
                         self.app.interaction_gate.clone(),
                         self.app.tool_executor.tools_map(),
                     )
-                    .with_permission_pack(domain.clone()),
+                    .with_permission_pack(domain.clone())
+                    .with_thinking_effort_store(self.app.thinking_effort.clone()),
                 ),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
@@ -1367,6 +1384,12 @@ impl AppSession {
             };
             // Apply user-configured generation params on top of the defaults.
             config.apply_generation_config(&self.app.generation_config);
+            // Override thinking budget with the persisted user effort tier
+            // (see the main build path above for rationale).
+            if let Some(store) = &self.app.thinking_effort {
+                let effort = store.get().await;
+                config.thinking_budget = effort.as_thinking_budget();
+            }
             // No domain pack — still use a real ContextCompressor with a
             // generic summarization prompt and default fact extraction (B3/C3),
             // so compression-coupled fact extraction and discarded archival
@@ -1410,12 +1433,15 @@ impl AppSession {
                         self.session_id.clone(),
                     ),
                 ),
-                Arc::new(oneai_agent::DefaultSubAgentFactory::new(
-                    provider.clone(),
-                    self.app.parser.clone(),
-                    self.app.interaction_gate.clone(),
-                    self.app.tool_executor.tools_map(),
-                )),
+                Arc::new(
+                    oneai_agent::DefaultSubAgentFactory::new(
+                        provider.clone(),
+                        self.app.parser.clone(),
+                        self.app.interaction_gate.clone(),
+                        self.app.tool_executor.tools_map(),
+                    )
+                    .with_thinking_effort_store(self.app.thinking_effort.clone()),
+                ),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
                 config,

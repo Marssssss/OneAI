@@ -240,6 +240,16 @@ pub struct AppBuilder {
     /// that drives every inference call. Each `Some` field overrides the
     /// agent-loop's scenario default; `None` fields inherit it.
     generation_config: oneai_core::GenerationConfig,
+    /// Persisted, user-configurable thinking-effort selection (the web UI
+    /// "思考程度" toggle). When set, `AppSession` reads it each turn (via
+    /// [`oneai_core::ThinkingEffortStore::get`]) and overrides
+    /// `generation_config.thinking_budget` for the MAIN agent, and threads it
+    /// into the `DefaultSubAgentFactory` so delegated sub-agents cap their
+    /// thinking at `min(user_effort, kind_engine_cap)`. `None` (legacy / no
+    /// store) → the engine falls back to the generation_config / sub-agent
+    /// defaults. The same `Arc<dyn ThinkingEffortStore>` is shared with the
+    /// app-server's `thinking/get`·`thinking/set` RPC for live hot-swap.
+    thinking_effort: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
     /// Policy for Layer-1 constrained decoding (tier-gated). Propagated into
     /// the `AgentLoopConfig`. Only takes effect when `structured_output` is
     /// also configured on the loop. Default `Auto`.
@@ -358,6 +368,7 @@ impl AppBuilder {
             model_context_resolver: None,
             probe_context_windows: true,
             generation_config: oneai_core::GenerationConfig::new(),
+            thinking_effort: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             reflection_cadence: None,
             working_state_root: None,
@@ -426,6 +437,18 @@ impl AppBuilder {
     /// `max_tokens`); other providers ignore it.
     pub fn thinking_budget(mut self, budget: Option<u32>) -> Self {
         self.generation_config.thinking_budget = budget;
+        self
+    }
+
+    /// Wire a persisted, user-configurable thinking-effort store (the web UI
+    /// "思考程度" toggle). The same `Arc<dyn ThinkingEffortStore>` should be
+    /// passed to the app-server's `serve_all` so `thinking/set` hot-swaps the
+    /// value the engine reads each turn. See [`App::thinking_effort`].
+    pub fn thinking_effort_store(
+        mut self,
+        store: Arc<dyn oneai_core::ThinkingEffortStore>,
+    ) -> Self {
+        self.thinking_effort = Some(store);
         self
     }
 
@@ -2664,6 +2687,7 @@ impl AppBuilder {
             model_context_resolver: resolved_resolver,
             probe_context_windows: self.probe_context_windows,
             generation_config: self.generation_config,
+            thinking_effort: self.thinking_effort,
             constrained_output_policy: self.constrained_output_policy,
             reflection_cadence: self.reflection_cadence,
             working_state_store,
@@ -2773,6 +2797,11 @@ pub struct App {
     /// of every agent run (main loop, workflow nodes, sub-agents inherit via
     /// the parent). See `AppBuilder::generation_config`.
     pub generation_config: oneai_core::GenerationConfig,
+    /// Persisted thinking-effort selection — the web UI "思考程度" toggle.
+    /// `AppSession` reads it each turn (main agent) and the
+    /// `DefaultSubAgentFactory` reads it per sub-agent (capped per kind).
+    /// `None` = no store wired (legacy path; engine falls back to defaults).
+    pub thinking_effort: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
     /// Layer-1 constrained-decoding policy — propagated into every `AgentLoopConfig`.
     /// See `AppBuilder::constrained_output_policy`.
     pub constrained_output_policy: oneai_core::ConstrainedOutputPolicy,

@@ -840,6 +840,14 @@ pub struct DefaultSubAgentFactory {
     /// None (tool defaults). `None` (no parent domain pack) → sub-agents fall
     /// back to each tool's own `permission_level` (today's behavior).
     permission_pack: Option<Arc<MergedDomainPack>>,
+    /// Persisted, user-configurable thinking-effort selection (the web UI
+    /// "思考程度" toggle). When set, `build()` reads the tier and caps each
+    /// sub-agent's `thinking_budget` at `min_effort_cap(user_effort,
+    /// kind_engine_cap)` — so a user picking "Max" can never make a
+    /// sub-agent think itself to death, while "Off"/"Low" throttle them down.
+    /// `None` (no store — e.g. tests) → fall back to `Medium` as the user
+    /// effort, still capped per-kind (matches the prior bounded default).
+    thinking_effort: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
 }
 
 impl DefaultSubAgentFactory {
@@ -859,6 +867,7 @@ impl DefaultSubAgentFactory {
             worktree_config: None,
             child_factory: Arc::new(SubAgentFactoryNone),
             permission_pack: None,
+            thinking_effort: None,
         }
     }
 
@@ -884,6 +893,7 @@ impl DefaultSubAgentFactory {
             worktree_config: Some(worktree_config),
             child_factory: Arc::new(SubAgentFactoryNone),
             permission_pack: None,
+            thinking_effort: None,
         }
     }
 
@@ -904,6 +914,19 @@ impl DefaultSubAgentFactory {
     /// prompt. Permission ONLY (exposure/context/paradigm stay None).
     pub fn with_permission_pack(mut self, pack: Arc<MergedDomainPack>) -> Self {
         self.permission_pack = Some(pack);
+        self
+    }
+
+    /// Wire the persisted thinking-effort store (the web UI "思考程度"
+    /// toggle). `build()` reads the user's tier each time and caps each
+    /// sub-agent's thinking at `min_effort_cap(user_effort, kind_engine_cap)`.
+    /// Accepts `Option` so callers without a store (tests) leave it `None`
+    /// (build then falls back to a `Medium` default, still kind-capped).
+    pub fn with_thinking_effort_store(
+        mut self,
+        store: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
+    ) -> Self {
+        self.thinking_effort = store;
         self
     }
 
@@ -1068,23 +1091,62 @@ impl DefaultSubAgentFactory {
             // inference is bounded by the provider's sane default (~4k), and
             // the 40k run budget buys ~10 iterations of actual work.
             max_tokens: None,
-            // Disable extended thinking for execute-style sub-agents (Code).
-            // Verified live against glm-5.2 via DashScope: with default
-            // reasoning effort "max", a single inference emits 100k–170k chars
-            // of `reasoning_content` (≈30–50k tokens) and burns the whole 40k
-            // run-cost budget in ONE iteration, producing no code. Bounding via
-            // `max_tokens` does NOT help — GLM spends the entire cap on
-            // reasoning and emits zero content (max_tokens=8192 → 25k chars
-            // thinking, 0 chars code). `enable_thinking: false` (mapped from
-            // `thinking_budget: Some(0)` in the OpenAI provider) fully
-            // suppresses reasoning: the model emits complete pure-code output
-            // in one shot (~8k tokens for a full gomoku module) — so 40k buys
-            // ~5 productive iterations. Reasoning-style sub-agents
-            // (Reflect/Review/Plan) keep thinking (None) — they must reason.
-            thinking_budget: if matches!(kind, SubAgentKind::Code) {
-                Some(0)
-            } else {
-                None
+            // Bound extended thinking for execute-style sub-agents (Code,
+            // Explore). Verified live against glm-5.2 via DashScope: with
+            // default reasoning effort "max", a single inference emits
+            // 100k–170k chars of `reasoning_content` (≈30–50k tokens) — either
+            // burning the whole run-cost budget in one iteration (thinking-to-
+            // death, no output) OR, on the final synthesis step, ruminating
+            // 11k–27k chars (≈3–7k tokens, 60–108 s) before writing a ≤300字
+            // summary. Bounding via `max_tokens` does NOT help — GLM spends the
+            // entire cap on reasoning and emits zero content. DashScope's
+            // `thinking_budget` (mapped from `thinking_budget: Some(N)` in the
+            // OpenAI provider) caps `reasoning_content` at N tokens AND the
+            // model still emits complete output: verified complex gomoku task
+            // with N=2048 → 1723 reasoning tokens + 4758 chars of full code.
+            // With the run-cost budget now completion-only (see
+            // `charge_completion_only`), bounded thinking is also SAFE — a
+            // 2048-reasoning inference can't single-handedly exhaust the
+            // budget. 2048 is enough to plan tool sequences (stops the
+            // no-thinking flailing of malformed paths/retries) and to
+            // synthesize a summary, while killing the runaway rumination.
+            // Reasoning-style sub-agents (Reflect/Review/Plan) keep thinking
+            // unbounded (None) — their purpose IS deep deliberation.
+            // Bound extended thinking for sub-agents using the USER-selected
+            // thinking-effort tier (web UI "思考程度"), capped per-kind so a
+            // "Max" user can never make a sub-agent think itself to death.
+            // Verified live against glm-5.2 via DashScope: default reasoning
+            // effort "max" emits 100k–170k chars of `reasoning_content`
+            // (≈30–50k tokens) per inference — burning the whole run-cost
+            // budget in one iteration (no output) OR ruminating 11k–27k chars
+            // (60–108 s) before a ≤300字 summary. `max_tokens` can't bound it
+            // (GLM spends the entire cap on reasoning, emits zero content).
+            // DashScope's `thinking_budget` (the OpenAI provider maps
+            // `thinking_budget: Some(N)` to `enable_thinking`+`thinking_budget`)
+            // caps `reasoning_content` at N AND still emits complete output
+            // (verified: complex gomoku + N=2048 → 1723 reasoning tok + 4758
+            // chars of full code). With the run-cost budget now
+            // completion-only, bounded thinking is also safe (a bounded
+            // inference can't single-handedly exhaust the budget).
+            //
+            // The user's tier is read from the persisted store; `None` store
+            // (tests) → default `Medium`. Per-kind engine caps prevent death
+            // even at "Max": Code/Explore=2048 (execution — 2048 proven
+            // enough to plan + synthesize), Reflect/Review/Plan=8192
+            // (reasoning — more room but still capped), other=4096.
+            // `min_effort_cap(user, cap)` picks the lower of the two.
+            thinking_budget: {
+                use oneai_core::{min_effort_cap, ThinkingEffort};
+                let user = match &self.thinking_effort {
+                    Some(store) => store.get().await,
+                    None => ThinkingEffort::Medium,
+                };
+                let kind_cap: Option<u32> = match kind {
+                    SubAgentKind::Code | SubAgentKind::Explore => Some(2048),
+                    SubAgentKind::Reflect | SubAgentKind::Review | SubAgentKind::Plan => Some(8192),
+                    _ => Some(4096),
+                };
+                min_effort_cap(user.as_thinking_budget(), kind_cap)
             },
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(if matches!(kind, SubAgentKind::Reflect) {
@@ -1315,6 +1377,7 @@ impl Clone for DefaultSubAgentFactory {
             worktree_config: self.worktree_config.clone(),
             child_factory: self.child_factory.clone(),
             permission_pack: self.permission_pack.clone(),
+            thinking_effort: self.thinking_effort.clone(),
         }
     }
 }

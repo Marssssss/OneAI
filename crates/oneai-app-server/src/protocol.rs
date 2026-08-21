@@ -128,6 +128,8 @@ pub mod method {
     pub const PROVIDER_DELETE: &str = "provider/delete";
     pub const PROVIDER_SET_ACTIVE: &str = "provider/set_active";
     pub const DOMAINPACK_LIST: &str = "domainpack/list";
+    pub const THINKING_GET: &str = "thinking/get";
+    pub const THINKING_SET: &str = "thinking/set";
     pub const SKILL_LIST: &str = "skill/list";
     pub const SKILL_PIN: &str = "skill/pin";
     pub const SKILL_UNPIN: &str = "skill/unpin";

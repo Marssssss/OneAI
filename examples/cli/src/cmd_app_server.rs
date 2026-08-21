@@ -549,6 +549,13 @@ impl AppProbe for AppProbeImpl {
             ),
             None => (None, None, None),
         };
+        // The persisted thinking-effort tier label (or null when no store is
+        // wired). Read here so the settings panel shows the current value in
+        // the same `config/get` round-trip; edits go via `thinking/set`.
+        let thinking_effort = match &self.app.thinking_effort {
+            Some(store) => Some(store.get().await.to_string()),
+            None => None,
+        };
         AppConfigSnapshot {
             domain_pack: self.domain_pack_name.clone(),
             provider_kind: kind,
@@ -556,6 +563,20 @@ impl AppProbe for AppProbeImpl {
             base_url,
             plan_mode: false,
             permission_profile,
+            thinking_effort,
+        }
+    }
+
+    async fn thinking_effort(&self) -> oneai_core::ThinkingEffort {
+        match &self.app.thinking_effort {
+            Some(store) => store.get().await,
+            None => oneai_core::ThinkingEffort::default(),
+        }
+    }
+
+    async fn set_thinking_effort(&self, effort: oneai_core::ThinkingEffort) {
+        if let Some(store) = &self.app.thinking_effort {
+            store.set(effort).await;
         }
     }
 
@@ -913,6 +934,21 @@ pub(crate) async fn build_engine_server(
         builder = builder.sqlite_persistence();
     }
     builder = builder.working_state("./.oneai");
+
+    // Persisted thinking-effort store (web UI "思考程度" toggle) — shares
+    // the SAME ~/.oneai/oneai.db (or ONEAI_DB_PATH) as the session store, so
+    // the `thinking/set` RPC hot-swap survives restart. Wired BEFORE build
+    // so the App holds it; the AppProbe (AppProbeImpl) reads it for
+    // `thinking/get`·`thinking/set` + `config/get`'s `thinking_effort` field.
+    let thinking_effort_db = match std::env::var("ONEAI_DB_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(path) => oneai_persistence::SqliteThinkingEffort::new(path),
+        None => oneai_persistence::SqliteThinkingEffort::with_defaults(),
+    };
+    let thinking_effort: Arc<dyn oneai_core::ThinkingEffortStore> = Arc::new(thinking_effort_db);
+    builder = builder.thinking_effort_store(thinking_effort);
 
     let domain_pack_name = domain.unwrap_or("coding");
     let domain_pack =

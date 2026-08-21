@@ -2170,7 +2170,13 @@ impl Tool for FileDeleteTool {
 pub struct WebFetchTool {
     /// HTTP client for making requests.
     client: reqwest::Client,
-    /// Maximum content size to return (in bytes, ~100KB).
+    /// Maximum content size to return (in bytes, ~16KB). Kept small because a
+    /// web_fetch result is re-sent in the conversation every subsequent
+    /// iteration: a 100KB page (≈25k tokens) re-sent across 5+ iterations
+    /// both bloats each inference's input and, with completion-only sub-agent
+    /// budgets, is never reclaimed by the run-cost cap. 16KB (≈4k tokens) is
+    /// a research-grade snippet — enough to write a summary; for deeper
+    /// reading, fetch a more specific URL/section.
     max_content_bytes: usize,
     /// Request timeout in seconds.
     timeout_secs: u64,
@@ -2181,7 +2187,7 @@ impl WebFetchTool {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
-            max_content_bytes: 100_000, // ~100KB max content
+            max_content_bytes: 16_000, // ~16KB — research-grade snippet, not whole pages
             timeout_secs: 30,
         }
     }
@@ -2221,7 +2227,7 @@ impl Tool for WebFetchTool {
         **Usage guidelines**:\n\
         - Use for: fetching documentation pages, API references, blog posts\n\
         - Content is converted from HTML to Markdown for easier reading\n\
-        - Large pages are truncated to ~100KB to prevent context overflow\n\
+        - Large pages are truncated to ~16KB to prevent context overflow\n\
         - Timeout: 30 seconds (adjustable)\n\
         - Requires http:// or https:// URL prefix\n\n\
         **Preferences**:\n\

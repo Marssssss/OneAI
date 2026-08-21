@@ -786,6 +786,25 @@ export interface AppConfigSnapshot {
   base_url?: string
   plan_mode: boolean
   permission_profile?: string
+  /** Persisted thinking-effort tier ("off"|"low"|"medium"|"high"|"max"), or
+   *  absent when no store is wired (legacy path). The settings panel shows +
+   *  edits it; writes go via `thinking/set`. */
+  thinking_effort?: string
+}
+
+/** A user-facing thinking-effort tier. Matches the Rust `ThinkingEffort` enum
+ *  (serde lowercase). `off` disables reasoning (pure output, fastest); `max`
+ *  is unbounded (slowest; sub-agents still cap per-kind). */
+export type ThinkingEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
+
+/** `thinking/get` result. */
+export interface ThinkingEffortResult {
+  effort: ThinkingEffort
+}
+
+/** `thinking/set` params. */
+export interface ThinkingEffortSetParams {
+  effort: ThinkingEffort
 }
 
 export interface ProviderInfo {
