@@ -559,7 +559,7 @@ mod tests {
         let line = format!("{{\"k\":\"{}\"}}", key);
         let (out, n) = redact_json_line(&line, false);
         assert_eq!(n, 1, "exactly one redaction, no cascade");
-        assert_eq!(out, format!("{{\"k\":\"[REDACTED:api_key]\"}}"));
+        assert_eq!(out, "{\"k\":\"[REDACTED:api_key]\"}");
     }
 
     #[test]
