@@ -331,3 +331,86 @@ describe('ProjectionStore background-task cancel', () => {
     )
   })
 })
+
+describe('ProjectionStore session metrics (#35)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  /** Drive one complete turn with a token_usage record so the metrics strip
+   *  has non-empty aggregates to assert against. */
+  function runTurn(store: ProjectionStore, turnId: string, prompt: number, completion: number) {
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: turnId, task: 'go' })
+    y({ kind: 'stream_chunk', turn_id: turnId, text: 'hi', speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    y({
+      kind: 'token_usage',
+      usage: {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        cache_read_tokens: Math.floor(prompt / 2),
+        cache_creation_tokens: 0,
+      },
+    })
+    y({ kind: 'turn_complete', turn_id: turnId, summary: null })
+  }
+
+  it('exposes the latest step prompt footprint as contextTokens', () => {
+    const store = new ProjectionStore(fakeRpc())
+    store.consume({ kind: 'session_created', id: 'A' })
+    runTurn(store, 't1', 1200, 50)
+    const m = store.getSnapshot().metrics
+    expect(m.turns).toBe(1)
+    // contextTokens = latest usage's prompt_tokens (the current context size).
+    expect(m.contextTokens).toBe(1200)
+    // cacheHit % is the same latest step's rate (cache_read / prompt).
+    expect(m.cacheHitPct).toBeCloseTo((600 / 1200) * 100, 5)
+    expect(m.totalPrompt).toBe(1200)
+    expect(m.totalCompletion).toBe(50)
+  })
+
+  it('restores cached metrics when switching away and back (issue #35)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+
+    // Session A: one turn with usage → metrics populated.
+    y({ kind: 'session_created', id: 'A' })
+    runTurn(store, 't1', 1200, 50)
+    expect(store.getSnapshot().metrics.turns).toBe(1)
+    expect(store.getSnapshot().metrics.contextTokens).toBe(1200)
+
+    // Switch to session B (loaded from history — no usage replayed). A's
+    // metrics are stashed; B has no cache yet → empty strip.
+    y({ kind: 'session_loaded', id: 'B', messages: [] })
+    const bMetrics = store.getSnapshot().metrics
+    expect(bMetrics.turns).toBe(0)
+    expect(bMetrics.contextTokens).toBe(null)
+
+    // Switch back to A — the cached baseline restores the strip instead of
+    // vanishing (the pre-fix bug). Cumulative + per-step fields all survive.
+    y({ kind: 'session_loaded', id: 'A', messages: [] })
+    const restored = store.getSnapshot().metrics
+    expect(restored.turns).toBe(1)
+    expect(restored.totalPrompt).toBe(1200)
+    expect(restored.totalCompletion).toBe(50)
+    expect(restored.contextTokens).toBe(1200)
+    expect(restored.cacheHitPct).toBeCloseTo(50, 5)
+  })
+
+  it('does not carry the cached cumulative into a /clear-ed session', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    runTurn(store, 't1', 800, 30)
+    expect(store.getSnapshot().metrics.turns).toBe(1)
+    // /clear wipes the backend conversation — the cache for A must drop so
+    // a subsequent turn doesn't double-count the cleared history.
+    y({ kind: 'session_cleared', id: 'A' })
+    expect(store.getSnapshot().metrics.turns).toBe(0)
+    expect(store.getSnapshot().metrics.totalPrompt).toBe(0)
+    runTurn(store, 't2', 100, 5)
+    const m = store.getSnapshot().metrics
+    expect(m.turns).toBe(1)
+    expect(m.totalPrompt).toBe(100)
+  })
+})

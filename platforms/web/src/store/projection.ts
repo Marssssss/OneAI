@@ -172,6 +172,12 @@ export interface SessionMetrics {
   cacheHitPct: number | null
   /** Sum of completed-turn wall durations (ms). */
   totalDurationMs: number
+  /** The most recent inference step's total input footprint (the latest
+   *  `token_usage` record's `prompt_tokens`) — i.e. the current context size
+   *  after the last turn. Surfaced in the metrics strip so the user can tell
+   *  whether to compact / start a fresh session (issue #35). null until the
+   *  first usage record arrives. */
+  contextTokens: number | null
 }
 
 interface WorkingState {
@@ -211,6 +217,15 @@ interface WorkingState {
    *  for the approval bar. Other variants (plan/network/elicitation) still
    *  surface — only tool execution is auto-allowed. */
   autoApprove: boolean
+  /** Metrics baseline restored from `metricsCache` on session switch-in. The
+   *  per-turn timing/usage maps (`turnStartPerf` etc.) only hold turns seen
+   *  *live since the last switch* — historical turns replayed on
+   *  `session_loaded` carry no usage, so without a baseline the metrics strip
+   *  would reset to empty every time you switch away and back (issue #35).
+   *  `emit()` merges this baseline with the live (post-switch) metrics:
+   *  cumulative fields sum, per-step fields (latency/cache/context) prefer the
+   *  live latest when one exists, else fall back to the baseline. */
+  metricsBaseline: SessionMetrics
 }
 
 const EMPTY_METRICS: SessionMetrics = {
@@ -221,6 +236,7 @@ const EMPTY_METRICS: SessionMetrics = {
   totalPrompt: 0,
   cacheHitPct: null,
   totalDurationMs: 0,
+  contextTokens: null,
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -292,10 +308,17 @@ export class ProjectionStore {
     turnUsage: new Map(),
     latestUsage: null,
     autoApprove: false,
+    metricsBaseline: { ...EMPTY_METRICS },
   }
   private snapshot: ProjectionSnapshot = EMPTY
   private listeners = new Set<() => void>()
   private coalescer: StreamCoalescer
+  /** Per-session cached metrics, keyed by sessionId. Stashed on switch-out
+   *  (capturing baseline+live merged) and restored on switch-in so the metrics
+   *  strip survives `session_loaded` round-trips (issue #35). Lives on the
+   *  store, not in `state`, since it's a registry across sessions, not
+   *  per-snapshot. */
+  private metricsCache = new Map<string, SessionMetrics>()
 
   constructor(rpc: OneAiRpcClient) {
     this.rpc = rpc
@@ -336,13 +359,11 @@ export class ProjectionStore {
     const sc = this.state.currentScenario
     const debriefAvailable =
       sc !== null && sc.debrief !== undefined && !this.state.debriefActive
-    const turnTimings = Array.from(this.state.turnStartPerf.keys()).map((turnId) => ({
-      turnId,
-      startedAt: this.state.turnStartPerf.get(turnId) ?? null,
-      endedAt: this.state.turnEndPerf.get(turnId) ?? null,
-      iterations: this.state.turnIterations.get(turnId) ?? 0,
-    }))
-    const metrics = this.computeMetrics(turnTimings)
+    const turnTimings = this.currentTurnTimings()
+    const metrics = this.mergeMetrics(
+      this.state.metricsBaseline,
+      this.computeMetrics(turnTimings),
+    )
     this.snapshot = {
       version: this.snapshot.version + 1,
       sessionId: this.state.sessionId,
@@ -406,9 +427,13 @@ export class ProjectionStore {
     // `prompt_tokens` alone; adding cache_read/cache_creation on top would
     // double-count them. Matches the engine's `cache_read / prompt_tokens`.
     let cacheHitPct: number | null = null
+    let contextTokens: number | null = null
     const latest = this.state.latestUsage
     if (latest !== null && latest.prompt_tokens > 0) {
       cacheHitPct = (latest.cache_read_tokens / latest.prompt_tokens) * 100
+      // The latest step's total input footprint = current context size after
+      // the last turn. Drives the "上下文" metric in the strip (issue #35).
+      contextTokens = latest.prompt_tokens
     }
     return {
       turns: turnTimings.length,
@@ -418,6 +443,27 @@ export class ProjectionStore {
       totalPrompt,
       cacheHitPct,
       totalDurationMs,
+      contextTokens,
+    }
+  }
+
+  /** Merge a restored baseline with the live (post-switch) metrics.
+   *  Cumulative fields (turns/steps/tokens/duration) SUM — the baseline
+   *  covers history + earlier live turns, the live portion covers turns seen
+   *  since the last switch. Per-step fields (first-token latency, cache hit,
+   *  context size) PREFER live when the latest usage is present this switch,
+   *  else fall back to the baseline's last-known value. */
+  private mergeMetrics(baseline: SessionMetrics, live: SessionMetrics): SessionMetrics {
+    const hasLiveUsage = live.cacheHitPct !== null || live.contextTokens !== null
+    return {
+      turns: baseline.turns + live.turns,
+      steps: baseline.steps + live.steps,
+      firstTokenMs: live.firstTokenMs ?? baseline.firstTokenMs,
+      totalCompletion: baseline.totalCompletion + live.totalCompletion,
+      totalPrompt: baseline.totalPrompt + live.totalPrompt,
+      cacheHitPct: hasLiveUsage ? live.cacheHitPct : baseline.cacheHitPct,
+      totalDurationMs: baseline.totalDurationMs + live.totalDurationMs,
+      contextTokens: hasLiveUsage ? live.contextTokens : baseline.contextTokens,
     }
   }
 
@@ -526,7 +572,9 @@ export class ProjectionStore {
     ]
   }
 
-  /** Reset the session-scoped ledgers (new session / scenario start). */
+  /** Reset the session-scoped ledgers (new session / scenario start). Does
+   *  NOT touch `metricsBaseline` — switch handlers manage that so a fresh
+   *  start zeroes it while a session switch restores the cached baseline. */
   private resetLedgers(): void {
     this.state.trajectory = []
     this.state.working = { ...EMPTY_WORKING }
@@ -539,6 +587,42 @@ export class ProjectionStore {
     this.state.firstTokenPerf.clear()
     this.state.turnUsage.clear()
     this.state.latestUsage = null
+  }
+
+  /** Build the per-turn timing array from the live perf maps (turns seen since
+   *  the last switch — historical turns replayed on `session_loaded` aren't
+   *  in these maps). Shared by `emit()` and `stashMetrics()`. */
+  private currentTurnTimings(): {
+    turnId: string
+    startedAt: number | null
+    endedAt: number | null
+    iterations: number
+  }[] {
+    return Array.from(this.state.turnStartPerf.keys()).map((turnId) => ({
+      turnId,
+      startedAt: this.state.turnStartPerf.get(turnId) ?? null,
+      endedAt: this.state.turnEndPerf.get(turnId) ?? null,
+      iterations: this.state.turnIterations.get(turnId) ?? 0,
+    }))
+  }
+
+  /** Snapshot the current session's merged metrics into the per-session cache,
+   *  so a later switch back restores them (issue #35). Call BEFORE resetting
+   *  ledgers / reassigning `sessionId` — the live perf maps must still hold
+   *  the outgoing session's turns. No-op when `id` is null (group chat / no
+   *  session bound). */
+  private stashMetrics(id: string | null): void {
+    if (id === null) return
+    const live = this.computeMetrics(this.currentTurnTimings())
+    this.metricsCache.set(id, this.mergeMetrics(this.state.metricsBaseline, live))
+  }
+
+  /** Restore (or clear) the metrics baseline for the session being switched
+   *  to. Called AFTER `resetLedgers()` so the live perf maps are empty and the
+   *  baseline is the sole source until live turns arrive. */
+  private restoreBaseline(id: string | null): void {
+    this.state.metricsBaseline =
+      id !== null ? (this.metricsCache.get(id) ?? { ...EMPTY_METRICS }) : { ...EMPTY_METRICS }
   }
 
   /** Flush now (bypass the coalescer) — for non-hot mutations. */
@@ -973,24 +1057,28 @@ export class ProjectionStore {
         // A fresh session = empty conversation. Clear any previously-loaded
         // history so the welcome/empty state shows (otherwise a session/create
         // after loading a historical session left the old messages on screen).
+        this.stashMetrics(this.state.sessionId)
         this.state.currentScenario = null
         this.state.debriefActive = false
         this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = []
         this.resetLedgers()
+        this.restoreBaseline(y.id)
         this.emitNow()
         break
       }
       case 'session_loaded': {
         // Loading a saved single-agent session leaves any active scenario —
         // a stale scenario would tag the next single-agent turn's bubbles.
+        this.stashMetrics(this.state.sessionId)
         this.state.currentScenario = null
         this.state.debriefActive = false
         this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
         this.resetLedgers()
+        this.restoreBaseline(y.id)
         // Reloaded messages replay without a turn_id (Message doesn't persist
         // it), so per-message feedback is not available on history — the UI
         // hides 👍/👎 on these nodes. New live turns in this loaded session
@@ -1000,11 +1088,15 @@ export class ProjectionStore {
       }
       case 'session_cleared': {
         // `/clear` — fresh backend conversation for the live session; the
-        // visible transcript empties.
+        // visible transcript empties. The backend conversation is wiped, so
+        // its cached metrics are stale — drop them and zero the baseline so
+        // the strip doesn't keep counting the cleared turns.
         this.state.sessionId = y.id
         this.state.nodes = []
         this.state.currentSpeaker = null
+        this.metricsCache.delete(y.id)
         this.resetLedgers()
+        this.restoreBaseline(y.id)
         this.emitNow()
         break
       }
@@ -1015,7 +1107,11 @@ export class ProjectionStore {
           this.state.sessionId = null
           this.state.nodes = []
           this.state.currentSpeaker = null
+          this.metricsCache.delete(y.id)
           this.resetLedgers()
+          this.restoreBaseline(null)
+        } else {
+          this.metricsCache.delete(y.id)
         }
         this.emitNow()
         break
@@ -1537,6 +1633,7 @@ export class ProjectionStore {
     values: Record<string, string>,
     locale: BusLocale,
   ): Promise<void> {
+    this.stashMetrics(this.state.sessionId)
     this.state.currentScenario = scenario
     this.state.debriefActive = false
     this.state.currentSpeaker = null
@@ -1546,6 +1643,7 @@ export class ProjectionStore {
     this.state.sessionId = null // group-chat conversation id is engine-side
     this.state.turnActive = true
     this.resetLedgers()
+    this.restoreBaseline(null)
     this.emitNow()
     const spec = compileGroupScenario(scenario, values, locale)
     try {

@@ -26,6 +26,10 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
   // the most recent token_usage record), not a session cumulative — token
   // counts below stay cumulative (total spend).
   const cacheHit = metrics.cacheHitPct
+  // Current context size = the latest inference step's total input footprint
+  // (prompt_tokens). Tells the user how full the context window is, so they
+  // can decide whether to /compact or start a fresh session (issue #35).
+  const contextTokens = metrics.contextTokens
 
   return (
     <div className={styles.strip} title={undefined}>
@@ -55,6 +59,11 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
       {cacheHit !== null && (
         <span className={styles.group}>
           缓存命中 <span className={styles.value}>{Math.round(cacheHit)}%</span>
+        </span>
+      )}
+      {contextTokens !== null && (
+        <span className={styles.group}>
+          上下文 <span className={styles.value}>{fmtK(contextTokens)}</span>
         </span>
       )}
       <span className={styles.group}>
