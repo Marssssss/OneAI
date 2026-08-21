@@ -16,10 +16,13 @@
   position: relative;
 }
 
-/* Push the provider/model switcher to the row's right edge. */
+/* Push the effort picker + provider/model switcher to the row's right edge. */
 .modelSlot {
   margin-left: auto;
   flex-shrink: 0;
+  display: flex;
+  gap: var(--oneai-gap);
+  align-items: center;
 }
 
 .chip {

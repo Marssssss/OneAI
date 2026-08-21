@@ -21,6 +21,7 @@ import type { SessionMetrics } from '../store/projection'
 import type { SettingsStore } from '../settings/settingsStore'
 import { useLocale } from '../i18n'
 import { ModelSelect } from './ModelSelect'
+import { EffortChip } from './EffortChip'
 import { MetricsBar } from './MetricsBar'
 import { WorkspaceDropdown } from '../workspace/WorkspaceDropdown'
 import { Tooltip } from '../components/Tooltip'
@@ -316,6 +317,7 @@ export function Composer({
         )}
         <MetricsBar metrics={metrics} />
         <div className={styles.modelSlot}>
+          <EffortChip store={settingsStore} />
           <ModelSelect store={settingsStore} />
         </div>
         <input
