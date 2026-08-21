@@ -16,13 +16,16 @@ import subStyles from '../details/SubagentTree.module.css'
 
 interface BackgroundTasksBarProps {
   tasks: BackgroundTaskNode[]
+  /** Cancel one in-flight background sub-agent by task_id. Omitted when the
+   *  host App doesn't wire it (the ✕ buttons hide). */
+  onCancel?: (taskId: string) => void
 }
 
 function kindLabel(k: BackgroundTaskNode['agentKind']): string {
   return typeof k === 'string' ? k : `Custom:${k.Custom}`
 }
 
-export function BackgroundTasksBar({ tasks }: BackgroundTasksBarProps): ReactNode | null {
+export function BackgroundTasksBar({ tasks, onCancel }: BackgroundTasksBarProps): ReactNode | null {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   if (tasks.length === 0) return null
@@ -30,6 +33,7 @@ export function BackgroundTasksBar({ tasks }: BackgroundTasksBarProps): ReactNod
   const active = tasks.filter((s) => s.status === 'active').length
   const done = tasks.filter((s) => s.status === 'done').length
   const failed = tasks.filter((s) => s.status === 'failed').length
+  const cancelled = tasks.filter((s) => s.status === 'cancelled').length
   // Auto-expand while work is in flight; collapse to the summary once all
   // settled (the user can still re-expand).
   const open = expanded || active > 0
@@ -38,6 +42,7 @@ export function BackgroundTasksBar({ tasks }: BackgroundTasksBarProps): ReactNod
     `${active} ${t('subagent.active')}`,
     done > 0 ? `${done} ${t('subagent.done')}` : null,
     failed > 0 ? `${failed} failed` : null,
+    cancelled > 0 ? `${cancelled} ${t('subagent.cancelled')}` : null,
   ]
     .filter(Boolean)
     .join(' · ')
@@ -68,7 +73,12 @@ export function BackgroundTasksBar({ tasks }: BackgroundTasksBarProps): ReactNod
       {open && (
         <ul className={subStyles.list}>
           {tasks.map((s) => {
-            const dot = s.status === 'active' ? subStyles.dot_active : subStyles.dot_done
+            const dot =
+              s.status === 'active'
+                ? subStyles.dot_active
+                : s.status === 'failed'
+                  ? subStyles.dot_done
+                  : subStyles.dot_done
             return (
               <li key={s.taskId} className={subStyles.item}>
                 <span className={`${subStyles.dot} ${dot}`} aria-hidden />
@@ -82,8 +92,21 @@ export function BackgroundTasksBar({ tasks }: BackgroundTasksBarProps): ReactNod
                           : t('subagent.active')
                         : s.status === 'done'
                           ? t('subagent.done')
-                          : 'failed'}
+                          : s.status === 'cancelled'
+                            ? t('subagent.cancelled')
+                            : 'failed'}
                     </span>
+                    {s.status === 'active' && onCancel && (
+                      <button
+                        type="button"
+                        className={subStyles.cancelBtn}
+                        aria-label={t('subagent.cancel')}
+                        title={t('subagent.cancel')}
+                        onClick={() => onCancel(s.taskId)}
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
                   <div className={subStyles.task} title={s.task}>
                     {s.task}

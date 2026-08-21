@@ -75,7 +75,7 @@ export interface BackgroundTaskNode {
   turnId: string
   task: string
   agentKind: BusSubAgentKind
-  status: 'active' | 'done' | 'failed'
+  status: 'active' | 'done' | 'failed' | 'cancelled'
   iteration?: number
   paradigm?: string
   lastTool?: string

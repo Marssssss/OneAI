@@ -172,6 +172,40 @@ pub struct ConfigFileView {
     pub content: String,
 }
 
+/// One background sub-agent task (for the `background/list` RPC + web
+/// `BackgroundTasksBar`). Decoupled from `oneai_agent::TaskInfo` /
+/// `SubAgentKind` so this crate depends on neither — the CLI impl converts.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackgroundTaskInfoDto {
+    /// The task id (the model's, or an assigned `bg_task_N`).
+    pub id: String,
+    /// The sub-agent kind serialized as a label ("code" / "explore" / …, or a
+    /// `Custom:<role>` string for custom kinds).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// The task spec text the parent delegated.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// "running" / "completed" / "failed" / "cancelled".
+    pub status: String,
+    /// On a failed task, the failure detail (empty otherwise).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+/// Result of a background-task cancel op. `ok:false` is a normal result (the
+/// UI surfaces the error), NOT a JSON-RPC error — e.g. an unknown task id.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackgroundTaskOpResult {
+    pub ok: bool,
+    /// For `cancel_all`, how many running tasks were cancelled; `None` for a
+    /// single `cancel` (which targets one id) or when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// The app-probe trait. Object-safe via `#[async_trait]`; the production impl
 /// (in `cmd_app_server`) wraps `Arc<oneai_app::App>`.
 #[async_trait]
@@ -212,6 +246,19 @@ pub trait AppProbe: Send + Sync {
     /// Persist a new thinking-effort tier. Hot-swaps immediately — the next
     /// turn's main agent + new sub-agents read the new value. Idempotent.
     async fn set_thinking_effort(&self, effort: oneai_core::ThinkingEffort);
+    /// List in-flight + settled background sub-agent tasks (for the web
+    /// `BackgroundTasksBar`). Reaches the app-level `BackgroundTaskRegistry`
+    /// — a task launched by an earlier turn (whose per-turn runner is gone)
+    /// still appears here. Empty when no engine bus / registry is wired.
+    async fn list_background_tasks(&self) -> Vec<BackgroundTaskInfoDto>;
+    /// Cancel one background sub-agent by `task_id` (graceful child-token
+    /// cancel + hard-abort backstop). Emits a `DelegateProgress { Cancelled }`
+    /// so the frontend flips the card immediately; does NOT inject a result
+    /// into the parent (the user asked to stop it). `ok:false` (with `error`)
+    /// when the task id isn't found or no registry is wired.
+    async fn cancel_background_task(&self, task_id: &str) -> BackgroundTaskOpResult;
+    /// Cancel all in-flight background sub-agents (e.g. a "stop all" button).
+    async fn cancel_all_background(&self) -> BackgroundTaskOpResult;
 }
 
 /// Shared, thread-safe handle threaded through `serve_all` → transports →
@@ -282,6 +329,23 @@ impl AppProbe for NullAppProbe {
         oneai_core::ThinkingEffort::default()
     }
     async fn set_thinking_effort(&self, _effort: oneai_core::ThinkingEffort) {}
+    async fn list_background_tasks(&self) -> Vec<BackgroundTaskInfoDto> {
+        Vec::new()
+    }
+    async fn cancel_background_task(&self, _task_id: &str) -> BackgroundTaskOpResult {
+        BackgroundTaskOpResult {
+            ok: false,
+            cancelled_count: None,
+            error: Some("background cancel not supported by this probe".to_string()),
+        }
+    }
+    async fn cancel_all_background(&self) -> BackgroundTaskOpResult {
+        BackgroundTaskOpResult {
+            ok: false,
+            cancelled_count: Some(0),
+            error: Some("background cancel not supported by this probe".to_string()),
+        }
+    }
 }
 
 fn not_supported(what: &str) -> SkillOpResult {

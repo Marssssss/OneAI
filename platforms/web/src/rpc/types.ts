@@ -807,6 +807,35 @@ export interface ThinkingEffortSetParams {
   effort: ThinkingEffort
 }
 
+/** One background sub-agent task (mirrors the Rust `BackgroundTaskInfoDto`).
+ *  `status` is "running" / "completed" / "failed" / "cancelled". */
+export interface BackgroundTaskInfoDto {
+  id: string
+  kind?: string
+  description?: string
+  status: string
+  error?: string
+}
+
+/** `background/cancel`·`background/cancel_all` result. `ok:false` is a normal
+ *  result (the UI surfaces `error`), NOT a JSON-RPC error — e.g. an unknown
+ *  task id. */
+export interface BackgroundTaskOpResult {
+  ok: boolean
+  cancelled_count?: number
+  error?: string
+}
+
+/** `background/cancel` params. */
+export interface BackgroundCancelParams {
+  task_id: string
+}
+
+/** `background/list` result. */
+export interface BackgroundListResult {
+  tasks: BackgroundTaskInfoDto[]
+}
+
 export interface ProviderInfo {
   kind: string
   model: string

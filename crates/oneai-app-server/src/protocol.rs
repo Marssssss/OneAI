@@ -137,6 +137,14 @@ pub mod method {
     pub const SKILL_RESTORE: &str = "skill/restore";
     pub const CONFIG_READ: &str = "config/read";
 
+    // Background sub-agent task control (Phase 2A gap-1). Handled directly
+    // against the shared AppProbe, no bus/Directive — the probe reaches the
+    // app-level `BackgroundTaskRegistry` so a cancel lands even after the
+    // delegating turn ended.
+    pub const BACKGROUND_LIST: &str = "background/list";
+    pub const BACKGROUND_CANCEL: &str = "background/cancel";
+    pub const BACKGROUND_CANCEL_ALL: &str = "background/cancel_all";
+
     // Engine.
     pub const SHUTDOWN: &str = "shutdown";
 }

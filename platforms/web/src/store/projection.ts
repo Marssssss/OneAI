@@ -3,6 +3,7 @@ import type { OneAiRpcClient } from '../rpc/client'
 import type {
   ApprovalRespondParams,
   Artifact,
+  BackgroundTaskOpResult,
   BusParadigmKind,
   BusScenario,
   BusScenarioMember,
@@ -1085,7 +1086,11 @@ export class ProjectionStore {
           } else if (ev.kind === 'token_usage') {
             next.usage = { prompt: ev.prompt, completion: ev.completion }
           } else if (ev.kind === 'cancelled') {
-            next.status = 'failed'
+            // The engine emitted this the instant a cancel landed (the
+            // registry's `cancel` fires `DelegateProgress { Cancelled }`).
+            // Distinguish a user-cancelled task from a genuine failure so the
+            // bar shows "cancelled" (grey) not "failed" (red).
+            next.status = 'cancelled'
           }
           return next
         })
@@ -1108,9 +1113,16 @@ export class ProjectionStore {
           completed: y.summary.completed,
         }
         if (y.task_id) {
+          // A cancel emits `DelegateProgress { Cancelled }` (→ 'cancelled') and
+          // THEN this `DelegateComplete` (the sink's notify re-activates the
+          // parent). Don't let the complete's `completed:false` downgrade an
+          // already-cancelled card back to 'failed' — a user-cancelled task
+          // stays 'cancelled' (grey), not 'failed' (red).
           this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
             t.taskId === y.task_id
-              ? { ...t, status: y.summary.completed ? 'done' : 'failed', summary }
+              ? t.status === 'cancelled'
+                ? { ...t, summary }
+                : { ...t, status: y.summary.completed ? 'done' : 'failed', summary }
               : t,
           )
         }
@@ -1315,6 +1327,83 @@ export class ProjectionStore {
       await this.rpc.call<{ host: string }, { ok: boolean }>('host/remove-denied', { host })
     } catch (e) {
       this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  // ── Background sub-agent task control (Phase 2A gap-1) ───────────────────
+
+  /** Cancel one in-flight background sub-agent by `task_id`. Optimistically
+   * flips the card to "cancelled" so the bar reacts instantly; the engine's
+   * `DelegateProgress { Cancelled }` confirms it (and is what flips it for a
+   * cross-turn task the UI never polled). On RPC failure roll back to the
+   * prior status + surface the error — the engine is the authority. */
+  async cancelBackgroundTask(taskId: string): Promise<boolean> {
+    const prev = this.state.backgroundTasks.find((t) => t.taskId === taskId)?.status
+    if (prev === undefined) return false
+    this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+      t.taskId === taskId ? { ...t, status: 'cancelled' } : t,
+    )
+    this.emitNow()
+    try {
+      const res = await this.rpc.call<{ task_id: string }, BackgroundTaskOpResult>(
+        'background/cancel',
+        { task_id: taskId },
+      )
+      // The server may report the task wasn't found (already finished, or a
+      // stale id) — roll back to the prior status so the bar reflects reality.
+      if (!res.ok) {
+        this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+          t.taskId === taskId ? { ...t, status: prev } : t,
+        )
+        this.state.lastError = res.error ?? 'background/cancel failed'
+        this.emitNow()
+        return false
+      }
+      return true
+    } catch (e) {
+      this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+        t.taskId === taskId ? { ...t, status: prev } : t,
+      )
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+      return false
+    }
+  }
+
+  /** Cancel all in-flight background sub-agents via `background/cancel_all`.
+   * Optimistically flips every active card to "cancelled". */
+  async cancelAllBackground(): Promise<boolean> {
+    const prevs = new Map(
+      this.state.backgroundTasks
+        .filter((t) => t.status === 'active')
+        .map((t) => [t.taskId, t.status] as const),
+    )
+    if (prevs.size === 0) return false
+    this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+      t.status === 'active' ? { ...t, status: 'cancelled' } : t,
+    )
+    this.emitNow()
+    try {
+      const res = await this.rpc.call<Record<string, never>, BackgroundTaskOpResult>(
+        'background/cancel_all',
+        {} as Record<string, never>,
+      )
+      if (!res.ok) {
+        this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+          prevs.has(t.taskId) ? { ...t, status: 'active' } : t,
+        )
+        this.state.lastError = res.error ?? 'background/cancel_all failed'
+        this.emitNow()
+        return false
+      }
+      return true
+    } catch (e) {
+      this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+        prevs.has(t.taskId) ? { ...t, status: 'active' } : t,
+      )
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+      return false
     }
   }
 

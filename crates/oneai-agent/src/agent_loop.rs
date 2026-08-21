@@ -1511,31 +1511,37 @@ impl AgentLoop {
 
     /// Enable non-blocking background sub-agent delegation (Phase 2A,
     /// fire-and-auto-notify). Constructs an [`AsyncTaskRunner`] wired to this
-    /// loop's `sub_agent_factory`, `delegation_policy`, `cancel_token`, and a
-    /// `sink` that injects each finished sub-agent's result back into the
-    /// parent conversation + re-triggers a parent turn. The
-    /// `delegate_background` meta-tool is advertised only while a runner is
-    /// present and the factory has available kinds.
+    /// loop's `sub_agent_factory`, `delegation_policy`, `cancel_token`, and
+    /// the registry's shared `sink` (which injects each finished sub-agent's
+    /// result back into the parent conversation + re-triggers a parent turn,
+    /// AND is what a cross-turn `cancel` uses to re-activate the parent with a
+    /// "[cancelled]" notice). The `delegate_background` meta-tool is
+    /// advertised only while a runner is present and the factory has available
+    /// kinds.
+    ///
+    /// `registry` is the **shared, session-scoped** task store (it carries the
+    /// `tasks` map, `next_id`, the completion sink, and the engine bus). Pass
+    /// the app's single registry so tasks survive across turns and a
+    /// cross-turn `cancel` (via the `background/*` RPC reaching the app-level
+    /// registry) reaches them + notifies the parent; tests pass a fresh one.
     ///
     /// Call after creating the AgentLoop, before running it:
     /// ```ignore
     /// let agent_loop = AgentLoop::new(...)
-    ///     .with_background_delegation(DelegationPolicy::default(), sink, turn_id, bus);
+    ///     .with_background_delegation(DelegationPolicy::default(), turn_id, registry);
     /// ```
     pub fn with_background_delegation(
         self,
         policy: DelegationPolicy,
-        sink: Arc<dyn crate::async_task_runner::BackgroundCompletionSink>,
         turn_id: String,
-        bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+        registry: Arc<crate::async_task_runner::BackgroundTaskRegistry>,
     ) -> Self {
         let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::new(
             self.sub_agent_factory.clone(),
             policy,
             self.cancel_token.clone(),
-            sink,
             turn_id,
-            bus,
+            registry,
         ));
         Self {
             async_task_runner: Some(runner),
@@ -1549,9 +1555,11 @@ impl AgentLoop {
     pub fn with_parallel_delegation(self) -> Self {
         self.with_background_delegation(
             DelegationPolicy::default(),
-            Arc::new(crate::async_task_runner::NoopCompletionSink),
             String::new(),
-            None,
+            Arc::new(crate::async_task_runner::BackgroundTaskRegistry::new(
+                None,
+                Arc::new(crate::async_task_runner::NoopCompletionSink),
+            )),
         )
     }
 
@@ -1566,9 +1574,11 @@ impl AgentLoop {
         };
         self.with_background_delegation(
             policy,
-            Arc::new(crate::async_task_runner::NoopCompletionSink),
             String::new(),
-            None,
+            Arc::new(crate::async_task_runner::BackgroundTaskRegistry::new(
+                None,
+                Arc::new(crate::async_task_runner::NoopCompletionSink),
+            )),
         )
     }
 

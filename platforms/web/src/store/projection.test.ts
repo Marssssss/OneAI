@@ -195,3 +195,139 @@ describe('ProjectionStore.consume', () => {
     ).not.toThrow()
   })
 })
+
+describe('ProjectionStore background-task cancel', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('flips a background task card to "cancelled" on a delegate_progress cancelled event', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({
+      kind: 'delegate',
+      turn_id: 't1',
+      task_id: 'bg1',
+      task: 'long research',
+      agent_kind: 'Explore',
+      speaker: null,
+    })
+    let snap = store.getSnapshot()
+    expect(snap.backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe('active')
+    y({
+      kind: 'delegate_progress',
+      turn_id: 't1',
+      task_id: 'bg1',
+      agent_kind: 'Explore',
+      event: { kind: 'cancelled' },
+    })
+    snap = store.getSnapshot()
+    // The engine emits this the instant a cancel lands — the card shows
+    // "cancelled" (grey), NOT "failed" (red). This is the gap-1 UX.
+    expect(snap.backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe('cancelled')
+  })
+
+  it('keeps a cancelled card "cancelled" when the cancel notify’s delegate_complete follows', () => {
+    // A cancel emits delegate_progress{cancelled} THEN delegate_complete (the
+    // sink's notify re-activates the parent). The complete carries
+    // completed:false; it must NOT downgrade the already-cancelled card to
+    // "failed".
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({
+      kind: 'delegate',
+      turn_id: 't1',
+      task_id: 'bg1',
+      task: 'long research',
+      agent_kind: 'Explore',
+      speaker: null,
+    })
+    y({
+      kind: 'delegate_progress',
+      turn_id: 't1',
+      task_id: 'bg1',
+      agent_kind: 'Explore',
+      event: { kind: 'cancelled' },
+    })
+    expect(store.getSnapshot().backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe(
+      'cancelled',
+    )
+    y({
+      kind: 'delegate_complete',
+      turn_id: 't1',
+      task_id: 'bg1',
+      summary: {
+        summary: '[cancelled by the user]',
+        key_findings: [],
+        budget_exceeded: false,
+        tokens_used: 0,
+        completed: false,
+        agent_kind: 'Explore',
+      },
+      speaker: null,
+    })
+    expect(store.getSnapshot().backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe(
+      'cancelled',
+    )
+  })
+
+  it('optimistically flips a card to "cancelled" and calls background/cancel', async () => {
+    const calls: Array<{ method: string; task_id?: string }> = []
+    const rpc = {
+      onEvent: () => () => {},
+      onStatus: () => () => {},
+      getStatus: () => 'closed' as const,
+      call: (method: string, params: unknown) => {
+        calls.push({ method, task_id: (params as { task_id?: string }).task_id })
+        return Promise.resolve({ ok: true } as never)
+      },
+    } as unknown as OneAiRpcClient
+    const store = new ProjectionStore(rpc)
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({
+      kind: 'delegate',
+      turn_id: 't1',
+      task_id: 'bg1',
+      task: 'long research',
+      agent_kind: 'Explore',
+      speaker: null,
+    })
+
+    const ok = await store.cancelBackgroundTask('bg1')
+    expect(ok).toBe(true)
+    expect(calls).toEqual([{ method: 'background/cancel', task_id: 'bg1' }])
+    expect(store.getSnapshot().backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe(
+      'cancelled',
+    )
+  })
+
+  it('rolls back to "active" when background/cancel reports the task not found', async () => {
+    const rpc = {
+      onEvent: () => () => {},
+      onStatus: () => () => {},
+      getStatus: () => 'closed' as const,
+      call: () => Promise.resolve({ ok: false, error: 'not found' } as never),
+    } as unknown as OneAiRpcClient
+    const store = new ProjectionStore(rpc)
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({
+      kind: 'delegate',
+      turn_id: 't1',
+      task_id: 'bg1',
+      task: 'long research',
+      agent_kind: 'Explore',
+      speaker: null,
+    })
+
+    const ok = await store.cancelBackgroundTask('bg1')
+    expect(ok).toBe(false)
+    // Rolled back — the server is the authority; a not-found means the task
+    // already finished (or a stale id), so the bar reflects reality.
+    expect(store.getSnapshot().backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe(
+      'active',
+    )
+  })
+})

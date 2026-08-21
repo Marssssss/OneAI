@@ -667,6 +667,22 @@ async fn handle_request(
             let after = probe.thinking_effort().await;
             Response::ok(id, json!({"effort": after}))
         }
+        method::BACKGROUND_LIST => {
+            let tasks = probe.list_background_tasks().await;
+            Response::ok(id, json!({"tasks": tasks}))
+        }
+        method::BACKGROUND_CANCEL => {
+            let task_id = match field::<String>(&params, "task_id") {
+                Ok(t) => t,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.cancel_background_task(&task_id).await;
+            Response::ok(id, json!(res))
+        }
+        method::BACKGROUND_CANCEL_ALL => {
+            let res = probe.cancel_all_background().await;
+            Response::ok(id, json!(res))
+        }
 
         // Unknown method.
         _ => Response::err(id, RpcError::method_not_found(&req.method)),
@@ -869,6 +885,47 @@ mod tests {
         // silent default — so a stale client/typo is diagnosable.
         let resp = probe_response("thinking/set", json!({"effort": "turbo"})).await;
         assert!(resp.error.is_some(), "invalid tier should error");
+    }
+
+    #[tokio::test]
+    async fn background_list_returns_tasks_array() {
+        // NullAppProbe ⇒ empty list. Verifies routing + the `{tasks}` shape
+        // (the registry's own behavior is covered by async_task_runner tests
+        // + the CLI AppProbeImpl).
+        let resp = probe_response("background/list", json!({})).await;
+        assert!(resp.error.is_none(), "background/list should not error");
+        assert!(resp.result.unwrap()["tasks"].is_array());
+    }
+
+    #[tokio::test]
+    async fn background_cancel_requires_task_id() {
+        // Missing task_id is a -32602 invalid-params, not a silent cancel —
+        // a stale client that drops the param is diagnosable.
+        let resp = probe_response("background/cancel", json!({})).await;
+        assert!(resp.error.is_some(), "missing task_id should error");
+    }
+
+    #[tokio::test]
+    async fn background_cancel_routes_task_id() {
+        // A well-formed request routes to the probe (NullAppProbe returns
+        // ok:false with an error string — this asserts routing + param
+        // parsing, not the registry's cancel behavior).
+        let resp = probe_response("background/cancel", json!({"task_id": "bg_task_1"})).await;
+        assert!(
+            resp.error.is_none(),
+            "well-formed cancel should not RPC-error"
+        );
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn background_cancel_all_routes() {
+        let resp = probe_response("background/cancel_all", json!({})).await;
+        assert!(resp.error.is_none(), "cancel_all should not RPC-error");
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
     }
 
     #[tokio::test]

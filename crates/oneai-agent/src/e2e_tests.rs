@@ -2227,9 +2227,11 @@ async fn e2e_scenario_9_parallel_sub_agent_delegation() {
         Arc::new(MockSubAgentFactory),
         DelegationPolicy::default(),
         CancellationToken::new(),
-        Arc::new(RecSink(notes.clone())),
         "test_turn".to_string(),
-        None,
+        Arc::new(crate::async_task_runner::BackgroundTaskRegistry::new(
+            None,
+            Arc::new(RecSink(notes.clone())),
+        )),
     ));
 
     fn bg_task(id: &str, task: &str) -> DelegateTask {
@@ -2343,9 +2345,11 @@ async fn e2e_scenario_9b_background_delegation_through_loop() {
         factory.clone(),
         DelegationPolicy::default(),
         tokio_util::sync::CancellationToken::new(),
-        Arc::new(RecSink(notes.clone())),
         "test_turn".to_string(),
-        None,
+        Arc::new(crate::async_task_runner::BackgroundTaskRegistry::new(
+            None,
+            Arc::new(RecSink(notes.clone())),
+        )),
     ));
     let result = build_delegating_loop_with_provider(
         Arc::new(provider) as Arc<dyn oneai_core::traits::LlmProvider>,
@@ -2353,9 +2357,11 @@ async fn e2e_scenario_9b_background_delegation_through_loop() {
     )
     .with_background_delegation(
         DelegationPolicy::default(),
-        Arc::new(crate::async_task_runner::NoopCompletionSink),
         "test_turn".to_string(),
-        None,
+        Arc::new(crate::async_task_runner::BackgroundTaskRegistry::new(
+            None,
+            Arc::new(crate::async_task_runner::NoopCompletionSink),
+        )),
     )
     .run_with_observer("explore reggae in the background", &observer)
     .await

@@ -83,12 +83,17 @@ pub struct TaskInfo {
     pub allocated_tokens: u32,
 }
 
-/// Internal record for a background task held by the runner.
+/// Internal record for a background task held by the registry.
 struct BackgroundTask {
     id: String,
     call_id: String,
     kind: SubAgentKind,
     description: String,
+    /// The delegating turn that launched this task. Captured at submit so a
+    /// cross-turn cancel can emit a `DelegateProgress { Cancelled }` carrying
+    /// the right `turn_id` (the frontend matches the sub-agent card by
+    /// `task_id`, but the trajectory push keys on `turn_id`).
+    turn_id: String,
     status: TaskStatus,
     join_handle: Option<JoinHandle<()>>,
     child_cancel: Option<CancellationToken>,
@@ -121,6 +126,221 @@ impl BackgroundTask {
 }
 
 type ProgressItem = (String, SubAgentKind, DelegateProgressEvent);
+
+// ─── BackgroundTaskRegistry ──────────────────────────────────────────────────
+
+/// A **shared, session-scoped** registry of background tasks. Held by the app
+/// (one per engine-bus-backed session); each per-turn [`AsyncTaskRunner`] is
+/// constructed with a clone of it and writes its tasks here, so a task
+/// survives the delegating turn's end (dropping the per-turn runner Arc does
+/// not abort the spawned tokio tasks — they hold their own clones of the
+/// registry's internals — and crucially the `tasks` map is NOT dropped).
+///
+/// This is what makes cross-turn cancel work: `cancel(task_id)` /
+/// `cancel_all()` operate on this shared map, reaching a task launched by an
+/// earlier turn whose own runner + parent cancel token are long gone. The
+/// per-turn runner's `parent_cancel` (a child of the loop's token) still
+/// governs a same-turn interrupt — cancelling a task the current turn
+/// spawned — but cross-turn cancellation is the registry's job, surfaced via
+/// the `background/*` JSON-RPC (see `AppProbe`).
+pub struct BackgroundTaskRegistry {
+    tasks: Arc<RwLock<HashMap<String, BackgroundTask>>>,
+    next_id: Arc<Mutex<u64>>,
+    /// Optional engine bus for emitting a `DelegateProgress { Cancelled }`
+    /// the instant a task is cancelled, so the web `BackgroundTasksBar` flips
+    /// the card to "cancelled" without waiting for the spawned task to wind
+    /// down. `None` for non-bus builds / tests.
+    bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+    /// The completion sink — the SAME one the per-turn runner uses for normal
+    /// completion (built once at app construction, shared via the registry so a
+    /// cancel can reach it without a per-turn runner in scope). When a task is
+    /// cancelled, the sink re-activates the parent with a "[cancelled]"
+    /// notice so the parent PERCEIVES the cancellation (otherwise the parent
+    /// turn — long ended by the time the user cancels — would never learn the
+    /// task it delegated is gone).
+    sink: Arc<dyn BackgroundCompletionSink>,
+}
+
+impl BackgroundTaskRegistry {
+    /// Create a fresh registry. `bus` is the engine bus (for cancel emits +
+    /// the sink's `DelegateComplete`), `sink` re-activates the parent on
+    /// completion AND on cancel. `None` bus for tests / non-bus builds
+    /// (pass a `NoopCompletionSink` there).
+    pub fn new(
+        bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+        sink: Arc<dyn BackgroundCompletionSink>,
+    ) -> Self {
+        Self {
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            next_id: Arc::new(Mutex::new(1)),
+            bus,
+            sink,
+        }
+    }
+
+    /// The engine bus, if any. The per-turn runner reads this to wire its
+    /// `ForwardingObserver` for direct progress emission.
+    pub fn bus(&self) -> Option<Arc<dyn oneai_bus::EngineBus>> {
+        self.bus.clone()
+    }
+
+    /// The shared completion sink. The per-turn runner reads this to notify on
+    /// normal sub-agent completion (instead of holding its own per-turn sink).
+    pub fn sink(&self) -> Arc<dyn BackgroundCompletionSink> {
+        self.sink.clone()
+    }
+
+    /// Cancel a background task gracefully (child cancel token — the sub-agent
+    /// stops at its next iteration boundary) + hard-abort its join handle as a
+    /// backstop. Only acts on `Running` tasks — a task that already settled
+    /// (Completed/Failed/Cancelled) is left as-is (its result was already
+    /// injected; re-cancelling would double-notify the parent).
+    ///
+    /// For a `Running` task: marks `Cancelled`, emits `DelegateProgress {
+    /// Cancelled }` (frontend flips the card), AND notifies the sink so the
+    /// parent is re-activated with a "[cancelled by the user]" notice — the
+    /// parent delegated the task expecting a result; telling it the result
+    /// isn't coming (and why) lets it decide the next step (do the work itself,
+    /// re-delegate, report to the user). Without the notify, the parent turn —
+    /// which ended when it delegated + answered — would never perceive the
+    /// cancellation.
+    pub async fn cancel(&self, task_id: &str) -> Result<()> {
+        let (kind, turn_id, was_running) = {
+            let mut tasks = self.tasks.write().await;
+            let t = match tasks.get_mut(task_id) {
+                Some(t) => t,
+                None => {
+                    return Err(oneai_core::error::OneAIError::Agent(format!(
+                        "Background task '{}' not found",
+                        task_id
+                    )))
+                }
+            };
+            let was_running = t.status == TaskStatus::Running;
+            if was_running {
+                if let Some(token) = &t.child_cancel {
+                    token.cancel();
+                }
+                if let Some(handle) = &t.join_handle {
+                    handle.abort(); // hard backstop if the loop doesn't observe the token
+                }
+                t.status = TaskStatus::Cancelled;
+            }
+            (t.kind.clone(), t.turn_id.clone(), was_running)
+        };
+        // A task that already settled is left alone — its result was already
+        // injected; re-cancelling would double-notify the parent.
+        if !was_running {
+            return Ok(());
+        }
+        if let Some(bus) = &self.bus {
+            use oneai_bus::{BusDelegateProgress, BusSubAgentKind, EngineYield};
+            let _ = bus.emit(EngineYield::DelegateProgress {
+                turn_id: turn_id.clone(),
+                task_id: task_id.to_string(),
+                agent_kind: BusSubAgentKind::from(&kind),
+                event: BusDelegateProgress::from(&DelegateProgressEvent::Cancelled),
+            });
+        }
+        // Re-activate the parent with a cancellation notice so it perceives the
+        // cancellation (the spawned task is aborted above, so it won't notify
+        // itself — this is the single notify for a cancel). The sink emits a
+        // `DelegateComplete` (card → done) + injects the notice as a
+        // `Directive::UserMessage`, waking the parent.
+        self.sink
+            .notify(
+                &turn_id,
+                task_id,
+                SubAgentSummary {
+                    completed: false,
+                    summary: "[cancelled by the user — result not available]".to_string(),
+                    key_findings: Vec::new(),
+                    budget_exceeded: false,
+                    agent_kind: kind,
+                    tokens_used: 0,
+                },
+            )
+            .await;
+        tracing::info!(
+            "BackgroundTaskRegistry: cancelled background task '{}' (notified parent turn '{}')",
+            task_id,
+            turn_id
+        );
+        Ok(())
+    }
+
+    /// Cancel all in-flight tasks (e.g. on app shutdown or a user "stop all").
+    pub async fn cancel_all(&self) {
+        let ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .iter()
+                .filter(|(_, t)| t.status == TaskStatus::Running)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in ids {
+            let _ = self.cancel(&id).await;
+        }
+    }
+
+    /// Check the current status of a task.
+    pub async fn status(&self, task_id: &str) -> TaskStatus {
+        let tasks = self.tasks.read().await;
+        tasks
+            .get(task_id)
+            .map(|t| t.status.clone())
+            .unwrap_or(TaskStatus::Failed("Task not found".to_string()))
+    }
+
+    /// Get full task info.
+    pub async fn task_info(&self, task_id: &str) -> Option<TaskInfo> {
+        let tasks = self.tasks.read().await;
+        tasks.get(task_id).map(|t| t.to_info())
+    }
+
+    /// List all tasks and their info (for the `background/list` RPC).
+    pub async fn all_tasks(&self) -> Vec<TaskInfo> {
+        let tasks = self.tasks.read().await;
+        tasks.values().map(|t| t.to_info()).collect()
+    }
+
+    /// Snapshot of (id, status) — for UI / the schema gate's liveness check.
+    pub async fn status_snapshot(&self) -> Vec<(String, TaskStatus)> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .map(|(id, t)| (id.clone(), t.status.clone()))
+            .collect()
+    }
+
+    /// Snapshot of (id, kind, description, status) — richer enough for the
+    /// parent's `[Background tasks]` context block (the model needs to see what
+    /// each in-flight task is, not just a bare id). Order is insertion order
+    /// (HashMap iteration is unspecified, so callers must not rely on it).
+    pub async fn snapshot_with_meta(&self) -> Vec<(String, SubAgentKind, String, TaskStatus)> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .values()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.kind.clone(),
+                    t.description.clone(),
+                    t.status.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Whether any task is still running.
+    pub async fn has_in_flight(&self) -> bool {
+        let tasks = self.tasks.read().await;
+        tasks
+            .values()
+            .any(|t| matches!(t.status, TaskStatus::Running))
+    }
+}
 
 // ─── BackgroundCompletionSink ────────────────────────────────────────────────
 
@@ -160,38 +380,36 @@ pub struct AsyncTaskRunner {
     sem: Arc<Semaphore>,
     pool: Option<Arc<AtomicU32>>,
     parent_cancel: CancellationToken,
-    sink: Arc<dyn BackgroundCompletionSink>,
     /// The parent turn that owns this runner (it's per-turn). Threaded into
     /// `notify` so the sink can emit a `DelegateComplete` yield that the
     /// frontend matches onto the right sub-agent card even after the
     /// delegating turn has ended.
     turn_id: String,
-    /// Optional engine bus for DIRECT progress emission. When present, the
-    /// spawned sub-agent's `ForwardingObserver` emits `DelegateProgress`
-    /// straight to the bus (sync) so live status keeps flowing to the
-    /// frontend EVEN AFTER the parent turn ends — without it, progress only
-    /// moves while the parent loop is iterating (`drain_progress`), and a
-    /// long-running background sub-agent looks frozen. `None` for non-bus
-    /// builds (foreground-style / tests).
-    bus: Option<Arc<dyn oneai_bus::EngineBus>>,
-    tasks: Arc<RwLock<HashMap<String, BackgroundTask>>>,
+    /// The shared, session-scoped task registry. Tasks survive this per-turn
+    /// runner (its Arc is dropped at turn end) because the registry — held by
+    /// the app — owns the `tasks` map + `next_id` + the completion sink +
+    /// the engine bus. This is what makes cross-turn `cancel`/`cancel_all`/
+    /// `list` reach tasks launched by an earlier turn, and lets a cancel
+    /// (which has no per-turn runner in scope) notify the parent via the
+    /// registry's sink.
+    registry: Arc<BackgroundTaskRegistry>,
     progress_rx: Mutex<mpsc::UnboundedReceiver<ProgressItem>>,
     progress_tx: mpsc::UnboundedSender<ProgressItem>,
-    next_id: Arc<Mutex<u64>>,
 }
 
 impl AsyncTaskRunner {
-    /// Create a runner. `sink` receives each finished sub-agent's summary and
-    /// is responsible for emitting a `DelegateComplete` yield + injecting the
-    /// result back into the parent conversation + re-triggering a parent turn.
-    /// `turn_id` is the parent turn launching the tasks.
+    /// Create a runner. `turn_id` is the parent turn launching the tasks.
+    /// `registry` is the shared, session-scoped task store (carries the
+    /// `tasks` map, `next_id`, the completion sink, and the engine bus) —
+    /// pass the app's single registry so tasks survive across turns and a
+    /// cross-turn `cancel` reaches them (and notifies the parent via the
+    /// registry's sink); tests/legacy pass a fresh one.
     pub fn new(
         factory: Arc<dyn SubAgentFactory>,
         policy: DelegationPolicy,
         parent_cancel: CancellationToken,
-        sink: Arc<dyn BackgroundCompletionSink>,
         turn_id: String,
-        bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+        registry: Arc<BackgroundTaskRegistry>,
     ) -> Self {
         let sem = Arc::new(Semaphore::new(policy.max_concurrent.max(1)));
         let pool = policy
@@ -204,13 +422,10 @@ impl AsyncTaskRunner {
             sem,
             pool,
             parent_cancel,
-            sink,
             turn_id,
-            bus,
-            tasks: Arc::new(RwLock::new(HashMap::new())),
+            registry,
             progress_rx: Mutex::new(progress_rx),
             progress_tx,
-            next_id: Arc::new(Mutex::new(1)),
         }
     }
 
@@ -255,7 +470,7 @@ impl AsyncTaskRunner {
         let child_cancel = self.parent_cancel.child_token();
 
         {
-            let mut tasks = self.tasks.write().await;
+            let mut tasks = self.registry.tasks.write().await;
             tasks.insert(
                 id.clone(),
                 BackgroundTask {
@@ -263,6 +478,7 @@ impl AsyncTaskRunner {
                     call_id: call_id.clone(),
                     kind: kind.clone(),
                     description: description.clone(),
+                    turn_id: self.turn_id.clone(),
                     status: TaskStatus::Running,
                     join_handle: None,
                     child_cancel: Some(child_cancel.clone()),
@@ -274,12 +490,12 @@ impl AsyncTaskRunner {
         let sem = self.sem.clone();
         let pool = self.pool.clone();
         let progress_tx = self.progress_tx.clone();
-        let tasks_arc = self.tasks.clone();
-        let sink = self.sink.clone();
+        let tasks_arc = self.registry.tasks.clone();
+        let sink = self.registry.sink();
         let id_clone = id.clone();
         let kind_clone = kind.clone();
         let turn_id = self.turn_id.clone();
-        let bus = self.bus.clone();
+        let bus = self.registry.bus();
 
         let handle = tokio::spawn(async move {
             use crate::agent_loop::ForwardingObserver;
@@ -327,7 +543,22 @@ impl AsyncTaskRunner {
                 }
                 .await;
 
-            // Record the terminal status (for UI / cancel / diagnostics).
+            // Record the terminal status (for UI / cancel / diagnostics),
+            // UNLESS the task was cancelled out from under us. A cancel sets
+            // `Cancelled`, emits its own `DelegateProgress { Cancelled }`, AND
+            // notifies the sink itself (the spawned task is aborted by the
+            // cancel, so it wouldn't reach this notify anyway — but if it
+            // raced and DID return, we must not double-notify the parent).
+            let was_cancelled = {
+                let tasks = tasks_arc.read().await;
+                tasks
+                    .get(&id_clone)
+                    .map(|t| t.status == TaskStatus::Cancelled)
+                    .unwrap_or(true)
+            };
+            if was_cancelled {
+                return;
+            }
             let summary_opt: Option<SubAgentSummary> = match &outcome {
                 Ok(s) => Some(s.clone()),
                 Err(_) => None,
@@ -335,6 +566,11 @@ impl AsyncTaskRunner {
             {
                 let mut tasks = tasks_arc.write().await;
                 if let Some(t) = tasks.get_mut(&id_clone) {
+                    // A late cancel may have landed between the read above and
+                    // this write — re-check to avoid clobbering `Cancelled`.
+                    if t.status == TaskStatus::Cancelled {
+                        return;
+                    }
                     t.status = match &outcome {
                         Ok(s) if s.completed => TaskStatus::Completed,
                         Ok(s) => TaskStatus::Failed(s.summary.clone()),
@@ -372,7 +608,7 @@ impl AsyncTaskRunner {
         });
 
         {
-            let mut tasks = self.tasks.write().await;
+            let mut tasks = self.registry.tasks.write().await;
             if let Some(t) = tasks.get_mut(&id) {
                 t.join_handle = Some(handle);
             }
@@ -390,14 +626,14 @@ impl AsyncTaskRunner {
     /// append `_2`, `_3`, … so re-submission doesn't overwrite a live task.
     async fn assign_id(&self, model_id: &str) -> String {
         let base = if model_id.is_empty() {
-            let mut counter = self.next_id.lock().await;
+            let mut counter = self.registry.next_id.lock().await;
             let id = format!("bg_task_{}", *counter);
             *counter += 1;
             return id;
         } else {
             model_id.to_string()
         };
-        let tasks = self.tasks.read().await;
+        let tasks = self.registry.tasks.read().await;
         if !tasks.contains_key(&base) {
             return base;
         }
@@ -411,61 +647,46 @@ impl AsyncTaskRunner {
         }
     }
 
+    // ─── Delegating accessors ────────────────────────────────────────────
+    // These read the shared `BackgroundTaskRegistry`, so a status query or
+    // cancel issued through the per-turn runner (the agent loop's
+    // `[Background tasks]` block via `inject_pinned_blocks`) OR through the
+    // registry directly (the `background/*` RPC reaching the app-level
+    // registry) both see the SAME cross-turn task set. That is the point of
+    // hoisting `tasks`/`next_id` off the per-turn runner onto a shared
+    // registry: a task launched by an earlier turn is still reachable here
+    // after that turn's runner Arc was dropped.
+
     /// Check the current status of a task.
     pub async fn status(&self, task_id: &str) -> TaskStatus {
-        let tasks = self.tasks.read().await;
-        tasks
-            .get(task_id)
-            .map(|t| t.status.clone())
-            .unwrap_or(TaskStatus::Failed("Task not found".to_string()))
+        self.registry.status(task_id).await
     }
 
     /// Get full task info.
     pub async fn task_info(&self, task_id: &str) -> Option<TaskInfo> {
-        let tasks = self.tasks.read().await;
-        tasks.get(task_id).map(|t| t.to_info())
+        self.registry.task_info(task_id).await
     }
 
     /// List all tasks and their info.
     pub async fn all_tasks(&self) -> Vec<TaskInfo> {
-        let tasks = self.tasks.read().await;
-        tasks.values().map(|t| t.to_info()).collect()
+        self.registry.all_tasks().await
     }
 
-    /// Snapshot of (id, status) — for UI / the schema gate's liveness check.
+    /// Snapshot of (id, status) — for the schema gate's liveness check.
     pub async fn status_snapshot(&self) -> Vec<(String, TaskStatus)> {
-        let tasks = self.tasks.read().await;
-        tasks
-            .iter()
-            .map(|(id, t)| (id.clone(), t.status.clone()))
-            .collect()
+        self.registry.status_snapshot().await
     }
 
-    /// Snapshot of (id, kind, description, status) — richer enough for the
-    /// parent's `[Background tasks]` context block (the model needs to see what
-    /// each in-flight task is, not just a bare id). Order is insertion order
-    /// (HashMap iteration is unspecified, so callers must not rely on it).
+    /// Snapshot of (id, kind, description, status) — for the parent's
+    /// `[Background tasks]` context block (the model needs to see what each
+    /// in-flight task is, not just a bare id).
     pub async fn snapshot_with_meta(&self) -> Vec<(String, SubAgentKind, String, TaskStatus)> {
-        let tasks = self.tasks.read().await;
-        tasks
-            .values()
-            .map(|t| {
-                (
-                    t.id.clone(),
-                    t.kind.clone(),
-                    t.description.clone(),
-                    t.status.clone(),
-                )
-            })
-            .collect()
+        self.registry.snapshot_with_meta().await
     }
 
     /// Whether any task is still running.
     pub async fn has_in_flight(&self) -> bool {
-        let tasks = self.tasks.read().await;
-        tasks
-            .values()
-            .any(|t| matches!(t.status, TaskStatus::Running))
+        self.registry.has_in_flight().await
     }
 
     /// Forward buffered sub-agent progress events onto the observer. Called by
@@ -478,42 +699,16 @@ impl AsyncTaskRunner {
         }
     }
 
-    /// Cancel a background task gracefully (child cancel token — the sub-agent
-    /// stops at its next iteration boundary). Marked `Cancelled`. The sink is
-    /// NOT notified (the parent asked to cancel; no result to inject).
+    /// Cancel a background task. Delegates to the shared registry so a
+    /// cross-turn cancel (via the app-level registry handle, e.g. the
+    /// `background/cancel` RPC) reaches tasks the current turn never spawned.
     pub async fn cancel(&self, task_id: &str) -> Result<()> {
-        let mut tasks = self.tasks.write().await;
-        if let Some(t) = tasks.get_mut(task_id) {
-            if let Some(token) = &t.child_cancel {
-                token.cancel();
-            }
-            if let Some(handle) = &t.join_handle {
-                handle.abort(); // hard backstop if the loop doesn't observe the token
-            }
-            t.status = TaskStatus::Cancelled;
-        } else {
-            return Err(oneai_core::error::OneAIError::Agent(format!(
-                "Background task '{}' not found",
-                task_id
-            )));
-        }
-        tracing::info!("AsyncTaskRunner: cancelled background task '{}'", task_id);
-        Ok(())
+        self.registry.cancel(task_id).await
     }
 
     /// Cancel all in-flight tasks (e.g. on app shutdown).
     pub async fn cancel_all(&self) {
-        let ids: Vec<String> = {
-            let tasks = self.tasks.read().await;
-            tasks
-                .iter()
-                .filter(|(_, t)| t.status == TaskStatus::Running)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in ids {
-            let _ = self.cancel(&id).await;
-        }
+        self.registry.cancel_all().await
     }
 }
 
@@ -622,9 +817,8 @@ mod tests {
             Arc::new(MockFactory),
             DelegationPolicy::default(),
             CancellationToken::new(),
-            sink,
             "test_turn".to_string(),
-            None,
+            Arc::new(BackgroundTaskRegistry::new(None, sink)),
         ))
     }
 
@@ -705,26 +899,45 @@ mod tests {
         assert!(id.starts_with("bg_task_"));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_cancel_no_notify() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_cancel_notifies_parent() {
+        // Cancel re-activates the parent (the user's gap-1 follow-up: the
+        // parent must PERCEIVE the cancellation). Uses the slow factory so the
+        // cancel lands while the task is still running (deterministic).
         let notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let runner = make_runner(Arc::new(RecordingSink {
+        let sink = Arc::new(RecordingSink {
             notifications: notifications.clone(),
-        }));
+        }) as Arc<dyn BackgroundCompletionSink>;
+        let registry = Arc::new(BackgroundTaskRegistry::new(None, sink));
+        let runner = runner_with(
+            Arc::new(SlowFactory) as Arc<dyn SubAgentFactory>,
+            registry.clone(),
+            "turn_A",
+        );
         let id = runner
             .submit_delegate(delegate_task("x", "task", SubAgentKind::Explore))
             .await
             .unwrap();
-        runner.cancel(&id).await.unwrap();
-        let status = runner.status(&id).await;
-        assert!(matches!(
-            status,
-            TaskStatus::Cancelled | TaskStatus::Completed
-        ));
-        // If it was cancelled before completing, no notify fired.
-        if status == TaskStatus::Cancelled {
-            assert!(notifications.lock().unwrap().is_empty());
+        for _ in 0..100 {
+            if registry.status(&id).await == TaskStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+        runner.cancel(&id).await.unwrap();
+        assert_eq!(registry.status(&id).await, TaskStatus::Cancelled);
+        // The cancel notified the sink exactly once — with the cancellation
+        // summary (not the sub-agent's own result; the spawned task was
+        // aborted before it could notify).
+        let notes = notifications.lock().unwrap();
+        assert_eq!(notes.len(), 1, "cancel must notify the parent exactly once");
+        assert_eq!(notes[0].1, "x");
+        assert!(!notes[0].2.completed);
+        assert!(
+            notes[0].2.summary.contains("cancelled"),
+            "cancel notify summary should say cancelled: {}",
+            notes[0].2.summary
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -768,5 +981,188 @@ mod tests {
         }
         runner.drain_progress(&obs).await;
         assert!(counter.load(Ordering::Relaxed) >= 1, "progress forwarded");
+    }
+
+    // ─── Slow sub-agent: parks until cancelled, for deterministic cross-turn
+    // cancel tests (the real sub-agent loop checks its cancel token between
+    // iterations; this mocks that cooperatively).
+
+    struct SlowSubAgent {
+        kind: SubAgentKind,
+    }
+    #[async_trait]
+    impl SubAgent for SlowSubAgent {
+        async fn run(&self, _task: &str) -> Result<SubAgentSummary> {
+            Ok(SubAgentSummary {
+                completed: true,
+                summary: "slow done".to_string(),
+                key_findings: vec![],
+                budget_exceeded: false,
+                agent_kind: self.kind.clone(),
+                tokens_used: 1,
+            })
+        }
+        async fn run_with_observer(
+            &self,
+            _task: &str,
+            _observer: Option<&dyn AgentLoopObserver>,
+            cancel: Option<CancellationToken>,
+        ) -> Result<SubAgentSummary> {
+            // Park until cancelled (or a long timeout — the cancel always wins
+            // in the tests below).
+            let cancelled = match cancel {
+                Some(tok) => {
+                    tokio::select! {
+                        _ = tok.cancelled() => true,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => false,
+                    }
+                }
+                None => false,
+            };
+            Ok(SubAgentSummary {
+                completed: !cancelled,
+                summary: if cancelled {
+                    "[cancelled]".to_string()
+                } else {
+                    "slow done".to_string()
+                },
+                key_findings: vec![],
+                budget_exceeded: false,
+                agent_kind: self.kind.clone(),
+                tokens_used: 0,
+            })
+        }
+        fn kind(&self) -> &SubAgentKind {
+            &self.kind
+        }
+        fn budget(&self) -> &TokenBudget {
+            static BUDGET: TokenBudget = TokenBudget {
+                total: 10000,
+                consumed: 0,
+                charge_prompt: true,
+            };
+            &BUDGET
+        }
+    }
+
+    struct SlowFactory;
+    #[async_trait]
+    impl SubAgentFactory for SlowFactory {
+        async fn create(
+            &self,
+            kind: SubAgentKind,
+            _budget: TokenBudget,
+        ) -> Result<Box<dyn SubAgent>> {
+            Ok(Box::new(SlowSubAgent { kind }))
+        }
+        fn available_kinds(&self) -> Vec<SubAgentKind> {
+            vec![SubAgentKind::Explore]
+        }
+        fn is_available(&self, _kind: &SubAgentKind) -> bool {
+            true
+        }
+    }
+
+    fn runner_with(
+        factory: Arc<dyn SubAgentFactory>,
+        registry: Arc<BackgroundTaskRegistry>,
+        turn_id: &str,
+    ) -> Arc<AsyncTaskRunner> {
+        Arc::new(AsyncTaskRunner::new(
+            factory,
+            DelegationPolicy::default(),
+            CancellationToken::new(),
+            turn_id.to_string(),
+            registry,
+        ))
+    }
+
+    /// A cross-turn cancel: runner A (turn "A") spawns a slow task, then its
+    /// Arc is dropped — simulating the delegating turn ending. A fresh runner
+    /// B (turn "B") sharing the SAME registry cancels the still-running task.
+    /// The registry (not the dropped runner) owns the `tasks` map + sink, so
+    /// the cancel reaches it AND re-activates the parent — the core gap-1 fix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_cross_turn_cancel_via_shared_registry() {
+        let notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::new(RecordingSink {
+            notifications: notifications.clone(),
+        }) as Arc<dyn BackgroundCompletionSink>;
+        let registry = Arc::new(BackgroundTaskRegistry::new(None, sink));
+
+        // Turn A: spawn a slow task.
+        let runner_a = runner_with(
+            Arc::new(SlowFactory) as Arc<dyn SubAgentFactory>,
+            registry.clone(),
+            "turn_A",
+        );
+        let id = runner_a
+            .submit_delegate(delegate_task("a", "long research", SubAgentKind::Explore))
+            .await
+            .unwrap();
+        // Wait until the slow sub-agent is actually running.
+        for _ in 0..100 {
+            if registry.status(&id).await == TaskStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(registry.status(&id).await, TaskStatus::Running);
+
+        // Turn A ends — drop the per-turn runner entirely. The spawned task
+        // survives (it holds clones of the registry's internals).
+        drop(runner_a);
+
+        // Turn B: a brand-new runner sharing the registry cancels the task
+        // launched by the now-gone turn A.
+        let runner_b = runner_with(
+            Arc::new(SlowFactory) as Arc<dyn SubAgentFactory>,
+            registry.clone(),
+            "turn_B",
+        );
+        runner_b.cancel(&id).await.unwrap();
+        assert_eq!(registry.status(&id).await, TaskStatus::Cancelled);
+        // The parent turn A is re-activated — it perceived the cancellation
+        // (stamped with the delegating turn "turn_A", not the cancelling turn).
+        let notes = notifications.lock().unwrap();
+        assert_eq!(notes.len(), 1, "cross-turn cancel must notify the parent");
+        assert_eq!(notes[0].0, "turn_A");
+        assert_eq!(notes[0].1, "a");
+        assert!(!notes[0].2.completed);
+    }
+
+    /// Cancelling via the registry directly (the path the `background/cancel`
+    /// RPC takes, reaching the app-level registry without any per-turn runner
+    /// in scope) also reaches the task AND notifies the parent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_registry_cancel_notifies_parent() {
+        let notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::new(RecordingSink {
+            notifications: notifications.clone(),
+        }) as Arc<dyn BackgroundCompletionSink>;
+        let registry = Arc::new(BackgroundTaskRegistry::new(None, sink));
+
+        let runner = runner_with(
+            Arc::new(SlowFactory) as Arc<dyn SubAgentFactory>,
+            registry.clone(),
+            "turn_A",
+        );
+        let id = runner
+            .submit_delegate(delegate_task("c", "long research", SubAgentKind::Explore))
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if registry.status(&id).await == TaskStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // Cancel directly through the registry (no runner in scope) — this is
+        // exactly the `background/cancel` RPC's reach path.
+        registry.cancel(&id).await.unwrap();
+        assert_eq!(registry.status(&id).await, TaskStatus::Cancelled);
+        let notes = notifications.lock().unwrap();
+        assert_eq!(notes.len(), 1, "registry cancel must notify the parent");
+        assert!(!notes[0].2.completed);
     }
 }

@@ -45,6 +45,11 @@ interface ConversationRootProps {
   onDenyAlways?: (host: string) => Promise<void>
   onPickScenario: (scenario: BusScenario) => void
   onDebrief: () => void
+  /** Cancel one in-flight background sub-agent by task_id (the ✕ button on
+   *  each active card in the `BackgroundTasksBar`). Reaches the app-level
+   *  `BackgroundTaskRegistry` so it works even after the delegating turn
+   *  ended (gap-1 fix). */
+  onCancelBackground?: (taskId: string) => void
   /** §W4 B4 — record a 👍/👎/note against one assistant message node. */
   onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
   /** Title of the currently-active session (client-overridden title wins),
@@ -83,6 +88,7 @@ export function ConversationRoot({
   onDenyAlways,
   onPickScenario,
   onDebrief,
+  onCancelBackground,
   onSubmitFeedback,
   sessionTitle,
   workspaceLabel,
@@ -165,7 +171,7 @@ export function ConversationRoot({
             {t('chat.error')}: {snapshot.lastError}
           </div>
         )}
-        <BackgroundTasksBar tasks={snapshot.backgroundTasks} />
+        <BackgroundTasksBar tasks={snapshot.backgroundTasks} onCancel={onCancelBackground} />
         {empty ? (
           <div className={styles.empty}>
             <div className={styles.emptyBrand}>

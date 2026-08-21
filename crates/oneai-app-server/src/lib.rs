@@ -64,8 +64,9 @@ pub use host_allowlist::{
 #[cfg(feature = "http")]
 pub use http::serve_web;
 pub use probe::{
-    AppConfigSnapshot, AppProbe, ConfigFileView, DomainPackInfo, DomainPackList, NullAppProbe,
-    ProviderEntryDto, ProviderInfo, ProviderOpResult, SharedAppProbe, SkillInfo, SkillOpResult,
+    AppConfigSnapshot, AppProbe, BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView,
+    DomainPackInfo, DomainPackList, NullAppProbe, ProviderEntryDto, ProviderInfo, ProviderOpResult,
+    SharedAppProbe, SkillInfo, SkillOpResult,
 };
 pub use protocol::{Notification, Request, Response, RpcError};
 pub use scenario::{

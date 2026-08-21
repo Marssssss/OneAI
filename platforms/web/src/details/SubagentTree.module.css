@@ -77,6 +77,28 @@
   color: var(--oneai-text-tertiary);
 }
 
+.cancelBtn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cancelBtn:hover {
+  background: var(--oneai-bg-hover, rgba(128, 128, 128, 0.15));
+  color: var(--oneai-text);
+}
+
 .task {
   font-size: 13px;
   color: var(--oneai-text-secondary);

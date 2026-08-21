@@ -151,13 +151,27 @@ use oneai_agent::{
 /// user switched sessions while a background task ran, the result lands on the
 /// wrong session — a known limitation (a session-targeted directive variant is
 /// the follow-up).
-struct BusBackgroundSink {
+pub(crate) struct BusBackgroundSink {
     bus: Arc<oneai_bus::InProcessBus>,
     /// The parent turn that launched the background tasks this sink serves.
     /// Captured at runner-construction time (the delegating turn) and stamped
     /// onto `DelegateComplete` so the frontend can close the right sub-agent
-    /// card even though the sub-agent finishes after the turn ended.
+    /// card even though the sub-agent finishes after the turn ended. The
+    /// shared app-level sink (the registry's) leaves this empty — `notify`
+    /// always carries the per-task delegating turn id, which wins (see
+    /// `notify`'s stamp fallback).
     turn_id: String,
+}
+
+impl BusBackgroundSink {
+    /// Build the shared, app-level sink (no per-turn id — `notify`'s param
+    /// provides it). Used by `AppBuilder` to construct the `BackgroundTaskRegistry`.
+    pub(crate) fn shared(bus: Arc<oneai_bus::InProcessBus>) -> Self {
+        BusBackgroundSink {
+            bus,
+            turn_id: String::new(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -266,6 +280,11 @@ struct AppResources {
     /// Engine bus (when `AppBuilder::engine_bus` was called). `None` for
     /// direct-drive apps.
     engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
+    /// Shared, session-scoped background-task registry (Phase 2A gap-1 fix).
+    /// `Some` whenever `engine_bus` is; the per-turn `AsyncTaskRunner`
+    /// borrows it so spawned tasks survive the delegating turn's end and a
+    /// cross-turn `cancel` via the `background/*` RPC reaches them.
+    background_registry: Option<Arc<oneai_agent::BackgroundTaskRegistry>>,
     memory_manager: Arc<MemoryManager>,
     rag_index: Option<Arc<DocumentIndex>>,
     #[allow(dead_code)]
@@ -386,6 +405,7 @@ impl AppSession {
                 tool_registry: app.tool_registry.clone(),
                 interaction_gate: app.interaction_gate.clone(),
                 engine_bus: app.engine_bus.clone(),
+                background_registry: app.background_registry.clone(),
                 memory_manager: app.memory_manager.clone(),
                 rag_index: app.rag_index.clone(),
                 persistence: app.persistence.clone(),
@@ -1454,27 +1474,25 @@ impl AppSession {
         };
 
         // ─── Phase 2A: fire-and-auto-notify background delegation ──────────
-        // Only enable it when an engine bus is configured — the runner's
-        // completion sink submits a `Directive::UserMessage` with the result,
+        // Only enable it when an engine bus is configured — the registry's
+        // shared sink submits a `Directive::UserMessage` with the result,
         // which the (long-running) directive pump routes to a new parent turn.
         // Without a bus there's no way to re-activate the parent, so the
         // `delegate_background` tool is not advertised (the schema gate hides
         // it when the runner is absent).
-        let agent_loop = if let Some(bus) = self.app.engine_bus.as_ref() {
-            let sink: Arc<dyn oneai_agent::BackgroundCompletionSink> =
-                Arc::new(BusBackgroundSink {
-                    bus: bus.clone(),
-                    turn_id: self.current_turn_id.clone().unwrap_or_default(),
-                });
+        let agent_loop = if let Some(_bus) = self.app.engine_bus.as_ref() {
+            // The shared, session-scoped registry (carries the `tasks` map +
+            // the shared sink + the bus) is passed in so spawned tasks survive
+            // this per-turn runner — a cross-turn `cancel` via the
+            // `background/*` RPC reaches tasks this turn (or an earlier turn)
+            // launched AND re-activates the parent via the registry's sink.
+            // `unwrap` is sound: `background_registry` is `Some` whenever
+            // `engine_bus` is (built together in `AppBuilder`).
+            let registry = self.app.background_registry.clone().unwrap();
             agent_loop.with_background_delegation(
                 oneai_agent::DelegationPolicy::default(),
-                sink,
                 self.current_turn_id.clone().unwrap_or_default(),
-                // The bus lets the sub-agent's ForwardingObserver emit
-                // DelegateProgress DIRECTLY (sync) so live status keeps flowing
-                // after this turn ends — otherwise the parent's drain_progress
-                // stops at turn-end and a long background sub-agent looks frozen.
-                Some(bus.clone() as Arc<dyn oneai_bus::EngineBus>),
+                registry,
             )
         } else {
             agent_loop
@@ -1492,13 +1510,14 @@ impl AppSession {
         // builds a fresh loop with a fresh token, so re-registering on the next
         // turn overwrites cleanly. Guarded — non-bus callers are unaffected.
         //
-        // NOTE: this cancels the CURRENT turn's inference + its background
-        // tasks. Cross-turn background tasks (spawned by an earlier turn whose
-        // token was dropped) are not reachable from here — fully stopping those
-        // needs a session-scoped runner (`cancel_all`); see the Phase 2A
-        // follow-up. In practice the submission-record fix above means the
-        // model no longer re-delegates across turns, so there's a single
-        // submitting turn whose tasks this does cancel.
+        // NOTE: this cancels the CURRENT turn's inference + the background
+        // tasks it spawned. Cross-turn background tasks (spawned by an earlier
+        // turn whose token was dropped) are NOT reachable via this interrupt
+        // slot — but they ARE reachable via the shared `app.background_registry`
+        // (the `background/cancel`·`background/cancel_all` RPCs cancel them by
+        // task id, regardless of which turn launched them). The registry is the
+        // gap-1 fix: the per-turn runner borrows it, so the `tasks` map
+        // survives the runner's drop.
         if let Some(bus) = self.app.engine_bus.as_ref() {
             use oneai_bus::EngineBus;
             bus.register_interrupt(agent_loop.cancel_token());

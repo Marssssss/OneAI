@@ -2641,12 +2641,28 @@ impl AppBuilder {
         let skill_metadata_store = Some(skill_metadata_store);
         let skill_curator = Some(skill_curator);
 
+        // Shared, session-scoped background-task registry (carries the tasks
+        // map + the completion sink + the bus for cancel/progress emission).
+        // Built alongside (and only when) `engine_bus` is set — background
+        // delegation is bus-gated. The shared sink re-activates the parent on
+        // normal completion AND on cancel (so the parent perceives a
+        // cancelled task).
+        let background_registry = self.engine_bus.as_ref().map(|b| {
+            let sink: Arc<dyn oneai_agent::BackgroundCompletionSink> =
+                Arc::new(crate::session::BusBackgroundSink::shared(b.clone()));
+            Arc::new(oneai_agent::BackgroundTaskRegistry::new(
+                Some(b.clone() as Arc<dyn oneai_bus::EngineBus>),
+                sink,
+            ))
+        });
+
         Ok(App {
             provider,
             tool_registry: self.tool_registry,
             tool_executor,
             interaction_gate,
             engine_bus: self.engine_bus,
+            background_registry,
             parser,
             memory_manager,
             rag_index: self.rag_index,
@@ -2719,6 +2735,13 @@ pub struct App {
     /// non-bus (direct-drive) apps; `Some` lets `AppSession::run_turn_via_bus`
     /// emit `EngineYield`s and means `interaction_gate` is a `BusInteractionGate`.
     pub engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
+    /// Shared, session-scoped background-task registry (Phase 2A gap-1 fix).
+    /// `Some` whenever `engine_bus` is `Some` (background delegation is
+    /// bus-gated); each per-turn `AsyncTaskRunner` borrows it so spawned
+    /// tasks survive the delegating turn's end and a cross-turn `cancel`
+    /// (via the `background/*` RPC reaching this registry) reaches them.
+    /// `None` for non-bus (direct-drive) apps.
+    pub background_registry: Option<Arc<oneai_agent::BackgroundTaskRegistry>>,
     /// Output parser.
     pub parser: Arc<dyn OutputParser>,
     /// Memory manager.

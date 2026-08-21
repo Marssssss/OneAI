@@ -474,6 +474,7 @@ export default function App(): React.ReactNode {
             onDenyAlways={handleDenyAlways}
             onPickScenario={handlePickScenario}
             onDebrief={handleDebrief}
+            onCancelBackground={(taskId) => void projection.cancelBackgroundTask(taskId)}
             onSubmitFeedback={(nodeId, kind, text) =>
               void projection.submitFeedback(nodeId, kind, text)
             }

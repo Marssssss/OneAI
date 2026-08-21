@@ -17,12 +17,13 @@ use std::sync::Arc;
 
 use oneai::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
 use oneai_agent::group_chat::{GroupChatSession, TurnPolicy};
-use oneai_agent::{AgentLoop, GroupChatBusObserver};
+use oneai_agent::{AgentLoop, GroupChatBusObserver, TaskInfo, TaskStatus};
 use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
-    default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError, ConfigFileView,
-    DomainPackInfo, DomainPackList, FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo,
-    ProviderOpResult, SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
+    default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError,
+    BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView, DomainPackInfo, DomainPackList,
+    FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo, ProviderOpResult,
+    SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
@@ -508,6 +509,37 @@ fn skill_state_str(s: SkillState) -> &'static str {
     }
 }
 
+/// Map a `TaskStatus` to its wire string ("running"/"completed"/"failed"/
+/// "cancelled"). `Failed`'s detail is surfaced separately on the DTO.
+fn task_status_str(s: &TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed(_) => "failed",
+        TaskStatus::Cancelled => "cancelled",
+        // `#[non_exhaustive]` — future variants surface as "unknown" rather
+        // than breaking the wire.
+        _ => "unknown",
+    }
+}
+
+/// Convert a `oneai_agent::TaskInfo` into the wire DTO this crate hands the
+/// web frontend (the app-server crate depends on neither `oneai-agent` nor
+/// its `SubAgentKind`/`TaskStatus` types — this is the decoupling seam).
+fn task_info_to_dto(t: TaskInfo) -> BackgroundTaskInfoDto {
+    let error = match &t.status {
+        TaskStatus::Failed(detail) => detail.clone(),
+        _ => String::new(),
+    };
+    BackgroundTaskInfoDto {
+        id: t.id,
+        kind: t.agent_kind.name().to_string(),
+        description: t.description,
+        status: task_status_str(&t.status).to_string(),
+        error,
+    }
+}
+
 fn skill_author_str(a: SkillAuthor) -> &'static str {
     match a {
         SkillAuthor::User => "user",
@@ -577,6 +609,66 @@ impl AppProbe for AppProbeImpl {
     async fn set_thinking_effort(&self, effort: oneai_core::ThinkingEffort) {
         if let Some(store) = &self.app.thinking_effort {
             store.set(effort).await;
+        }
+    }
+
+    async fn list_background_tasks(&self) -> Vec<BackgroundTaskInfoDto> {
+        // The shared app-level registry is `Some` whenever an engine bus is
+        // configured (built together in AppBuilder). Without a bus, there's
+        // no background delegation — return empty.
+        let Some(registry) = &self.app.background_registry else {
+            return Vec::new();
+        };
+        registry
+            .all_tasks()
+            .await
+            .into_iter()
+            .map(task_info_to_dto)
+            .collect()
+    }
+
+    async fn cancel_background_task(&self, task_id: &str) -> BackgroundTaskOpResult {
+        let Some(registry) = &self.app.background_registry else {
+            return BackgroundTaskOpResult {
+                ok: false,
+                cancelled_count: None,
+                error: Some("background delegation is not enabled".to_string()),
+            };
+        };
+        match registry.cancel(task_id).await {
+            Ok(()) => BackgroundTaskOpResult {
+                ok: true,
+                cancelled_count: None,
+                error: None,
+            },
+            Err(e) => BackgroundTaskOpResult {
+                ok: false,
+                cancelled_count: None,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
+    async fn cancel_all_background(&self) -> BackgroundTaskOpResult {
+        let Some(registry) = &self.app.background_registry else {
+            return BackgroundTaskOpResult {
+                ok: false,
+                cancelled_count: Some(0),
+                error: Some("background delegation is not enabled".to_string()),
+            };
+        };
+        // Count running tasks before cancelling (cancel_all returns ()).
+        let running = registry
+            .status_snapshot()
+            .await
+            .iter()
+            .filter(|(_, s)| *s == TaskStatus::Running)
+            .count() as u32;
+        registry.cancel_all().await;
+        BackgroundTaskOpResult {
+            ok: true,
+            cancelled_count: Some(running),
+            error: None,
         }
     }
 
