@@ -65,6 +65,7 @@ export type EngineYieldKind =
   | 'tool_result'
   | 'delegate'
   | 'delegate_complete'
+  | 'delegate_progress'
   | 'speaker_turn'
   | 'paradigm_switch'
   | 'approval_request'
@@ -166,6 +167,7 @@ export interface YieldIterationStart {
 export interface YieldDelegate {
   kind: 'delegate'
   turn_id: string
+  task_id: string
   task: string
   agent_kind: BusSubAgentKind
   speaker: string | null
@@ -173,8 +175,16 @@ export interface YieldDelegate {
 export interface YieldDelegateComplete {
   kind: 'delegate_complete'
   turn_id: string
+  task_id: string
   summary: BusSubAgent
   speaker: string | null
+}
+export interface YieldDelegateProgress {
+  kind: 'delegate_progress'
+  turn_id: string
+  task_id: string
+  agent_kind: BusSubAgentKind
+  event: BusDelegateProgress
 }
 export interface YieldWorkingState {
   kind: 'working_state'
@@ -235,6 +245,7 @@ export type EngineYield =
   | YieldIterationStart
   | YieldDelegate
   | YieldDelegateComplete
+  | YieldDelegateProgress
   | YieldWorkingState
   | YieldContextAccounting
   | YieldTokenUsage
@@ -271,6 +282,13 @@ export interface BusSubAgent {
   agent_kind: BusSubAgentKind
   tokens_used: number
 }
+
+/** Mirror of oneai-bus::BusDelegateProgress (tagged by `kind`). */
+export type BusDelegateProgress =
+  | { kind: 'iteration_start'; iteration: number; paradigm: BusParadigmKind }
+  | { kind: 'tool_result'; tool_name: string; snapshot: string }
+  | { kind: 'token_usage'; prompt: number; completion: number }
+  | { kind: 'cancelled' }
 
 // ─── Usage (oneai-bus::BusUsageRecord + oneai-core::ContextAccounting) ───────
 

@@ -87,7 +87,7 @@ impl AgentLoopObserver for GroupChatBusObserver {
     // `GroupChatCallbackObserver`'s minimal surface.)
 
     fn on_iteration_start(&self, _: usize, _: ParadigmKind) {}
-    fn on_delegate(&self, _: &str, _: &crate::sub_agent::SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &crate::sub_agent::SubAgentKind) {}
     fn on_paradigm_switch(&self, _: ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &AgentLoopResult) {}

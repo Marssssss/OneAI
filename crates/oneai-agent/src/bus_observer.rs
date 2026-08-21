@@ -10,11 +10,11 @@
 use std::sync::{Arc, Mutex};
 
 use oneai_bus::{
-    BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary, BusUsageRecord,
-    EngineBus, EngineYield,
+    BusDelegateProgress, BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall,
+    BusTurnSummary, BusUsageRecord, EngineBus, EngineYield,
 };
 
-use crate::agent_loop::{AgentLoopResult, ParadigmKind, ToolCallRequest};
+use crate::agent_loop::{AgentLoopResult, DelegateProgressEvent, ParadigmKind, ToolCallRequest};
 use crate::sub_agent::{SubAgentKind, SubAgentSummary};
 use crate::AgentLoopObserver;
 
@@ -66,6 +66,32 @@ impl From<&SubAgentSummary> for BusSubAgent {
             budget_exceeded: s.budget_exceeded,
             agent_kind: BusSubAgentKind::from(&s.agent_kind),
             tokens_used: s.tokens_used,
+        }
+    }
+}
+
+impl From<&DelegateProgressEvent> for BusDelegateProgress {
+    fn from(e: &DelegateProgressEvent) -> Self {
+        match e {
+            DelegateProgressEvent::IterationStart {
+                iteration,
+                paradigm,
+            } => Self::IterationStart {
+                iteration: *iteration,
+                paradigm: BusParadigmKind::from(*paradigm),
+            },
+            DelegateProgressEvent::ToolResult {
+                tool_name,
+                snapshot,
+            } => Self::ToolResult {
+                tool_name: tool_name.clone(),
+                snapshot: snapshot.clone(),
+            },
+            DelegateProgressEvent::TokenUsage { prompt, completion } => Self::TokenUsage {
+                prompt: *prompt,
+                completion: *completion,
+            },
+            DelegateProgressEvent::Cancelled => Self::Cancelled,
         }
     }
 }
@@ -155,20 +181,36 @@ impl AgentLoopObserver for BusObserver {
         });
     }
 
-    fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
+    fn on_delegate(&self, id: &str, task: &str, agent_type: &SubAgentKind) {
         self.emit(EngineYield::Delegate {
             turn_id: self.turn_id.clone(),
+            task_id: id.to_string(),
             task: task.to_string(),
             agent_kind: BusSubAgentKind::from(agent_type),
             speaker: None,
         });
     }
 
-    fn on_delegate_complete(&self, summary: &SubAgentSummary) {
+    fn on_delegate_complete(&self, id: &str, summary: &SubAgentSummary) {
         self.emit(EngineYield::DelegateComplete {
             turn_id: self.turn_id.clone(),
+            task_id: id.to_string(),
             summary: BusSubAgent::from(summary),
             speaker: None,
+        });
+    }
+
+    fn on_delegate_progress(
+        &self,
+        delegate_id: &str,
+        kind: &SubAgentKind,
+        event: &DelegateProgressEvent,
+    ) {
+        self.emit(EngineYield::DelegateProgress {
+            turn_id: self.turn_id.clone(),
+            task_id: delegate_id.to_string(),
+            agent_kind: BusSubAgentKind::from(kind),
+            event: BusDelegateProgress::from(event),
         });
     }
 

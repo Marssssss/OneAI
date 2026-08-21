@@ -587,13 +587,21 @@ impl Tool for ApplyPatchTool {
                         continue;
                     }
 
+                    // Resolve relative paths against the active session
+                    // workspace (active_cwd) — a background sub-agent inherits
+                    // the parent turn's workspace but, without this, the raw
+                    // tokio::fs call below would resolve `gomoku/main.js`
+                    // against the process cwd (the binary's launch dir) and
+                    // write outside the workspace the parent is operating in.
+                    let file_path = oneai_core::active_cwd::resolve(file_path);
+
                     // Check if this is a new file creation or file deletion
                     let is_new_file = file_hunk_list.iter().any(|h| h.old_file.is_empty());
                     let is_deletion = file_hunk_list.iter().any(|h| h.new_file.is_empty());
 
                     if is_deletion {
                         // Delete the file
-                        let delete_result = tokio::fs::remove_file(file_path).await;
+                        let delete_result = tokio::fs::remove_file(&file_path).await;
                         match delete_result {
                             Ok(_) => {
                                 results.push(format!("Deleted: {}", file_path));
@@ -610,7 +618,7 @@ impl Tool for ApplyPatchTool {
                     let content = if is_new_file {
                         String::new()
                     } else {
-                        match tokio::fs::read_to_string(file_path).await {
+                        match tokio::fs::read_to_string(&file_path).await {
                             Ok(text) => text,
                             Err(e) => {
                                 errors.push(format!("Failed to read {}: {}", file_path, e));
@@ -638,14 +646,14 @@ impl Tool for ApplyPatchTool {
                     // Write the new content
                     if is_new_file {
                         // Create parent directories if needed
-                        if let Some(parent) = std::path::Path::new(file_path).parent() {
+                        if let Some(parent) = std::path::Path::new(&file_path).parent() {
                             if !parent.as_os_str().is_empty() {
                                 let _ = tokio::fs::create_dir_all(parent).await;
                             }
                         }
                     }
 
-                    let write_result = tokio::fs::write(file_path, new_content).await;
+                    let write_result = tokio::fs::write(&file_path, new_content).await;
                     match write_result {
                         Ok(_) => {
                             let hunk_count = file_hunk_list.len();
@@ -654,10 +662,10 @@ impl Tool for ApplyPatchTool {
                             files_changed += 1;
                             // Deliverable surface — the patched file's path so a
                             // frontend can list turn-end outputs.
-                            let size = tokio::fs::metadata(file_path).await.map(|m| m.len()).ok();
+                            let size = tokio::fs::metadata(&file_path).await.map(|m| m.len()).ok();
                             artifacts.push(Artifact {
                                 path: file_path.clone(),
-                                mime_type: infer_mime(file_path).to_string(),
+                                mime_type: infer_mime(&file_path).to_string(),
                                 description: format!(
                                     "{} {} hunk(s)",
                                     if is_new_file { "created" } else { "patched" },

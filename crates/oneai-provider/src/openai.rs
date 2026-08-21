@@ -224,6 +224,30 @@ impl OpenAIProvider {
         if let Some(max_tokens) = req.max_tokens {
             body["max_tokens"] = Value::Number(max_tokens.into());
         }
+
+        // Reasoning control for OpenAI-compatible thinking models (Aliyun
+        // DashScope serving GLM/Qwen, DeepSeek, …). These endpoints expose a
+        // top-level `enable_thinking` switch and a `thinking_budget` cap that
+        // the native `reasoning_content` honors — unlike `max_tokens`, which
+        // GLM spends *entirely* on reasoning and then emits zero content
+        // (verified live: max_tokens=8192 → 25k chars thinking, 0 chars code).
+        // Map our `thinking_budget` field:
+        //   None      -> emit nothing (provider default; GLM default effort
+        //                is "max" → unbounded 100k+ char thinking blobs)
+        //   Some(0)   -> disable thinking entirely (pure code/output, zero
+        //                reasoning token cost — the path that lets delegated
+        //                Code sub-agents actually complete work within budget)
+        //   Some(n>0) -> enable thinking but cap at n reasoning tokens
+        // Non-reasoning / non-DashScope OpenAI backends ignore these unknown
+        // fields harmlessly.
+        if let Some(budget) = req.thinking_budget {
+            if budget == 0 {
+                body["enable_thinking"] = Value::Bool(false);
+            } else {
+                body["enable_thinking"] = Value::Bool(true);
+                body["thinking_budget"] = Value::Number(budget.into());
+            }
+        }
         if let Some(temperature) = req.temperature {
             body["temperature"] = Value::Number(
                 serde_json::Number::from_f64(temperature as f64)
@@ -1677,6 +1701,45 @@ mod constrained_tests {
             thinking_budget: None,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    /// Same as `request(None)` but with a configurable `thinking_budget`,
+    /// the field the OpenAI provider maps to DashScope's `enable_thinking` /
+    /// `thinking_budget` reasoning controls.
+    fn request_with_thinking(budget: Option<u32>) -> InferenceRequest {
+        let mut req = request(None);
+        req.thinking_budget = budget;
+        req
+    }
+
+    #[test]
+    fn to_openai_request_disables_thinking_when_budget_zero() {
+        // Some(0) → `enable_thinking: false`. This is the path delegated Code
+        // sub-agents take to stop glm-5.2 burning the whole run-cost budget on
+        // a single unbounded reasoning blob (verified live: emits pure code).
+        let body = provider_with_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
+            .to_openai_request(&request_with_thinking(Some(0)));
+        assert_eq!(body["enable_thinking"], serde_json::Value::Bool(false));
+        assert!(body.get("thinking_budget").is_none());
+    }
+
+    #[test]
+    fn to_openai_request_caps_thinking_when_budget_positive() {
+        // Some(n>0) → enable thinking but cap reasoning at n tokens.
+        let body = provider_with_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
+            .to_openai_request(&request_with_thinking(Some(2048)));
+        assert_eq!(body["enable_thinking"], serde_json::Value::Bool(true));
+        assert_eq!(body["thinking_budget"], 2048);
+    }
+
+    #[test]
+    fn to_openai_request_omits_thinking_controls_when_unset() {
+        // None → emit nothing (provider default; main agent keeps native
+        // behavior). Crucial so non-reasoning backends see no new fields.
+        let body = provider_with_url("https://api.openai.com/v1")
+            .to_openai_request(&request_with_thinking(None));
+        assert!(body.get("enable_thinking").is_none());
+        assert!(body.get("thinking_budget").is_none());
     }
 
     #[test]

@@ -460,7 +460,7 @@ impl AgentLoopObserver for GroupChatCallbackObserver {
         });
     }
 
-    fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
     fn on_paradigm_switch(&self, _: ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
 

@@ -205,7 +205,17 @@ impl PromptRegistry {
             "You are an intelligent AI agent that can plan, execute, and reflect on tasks.\n\
              When you need to use a tool, output a tool call.\n\
              When you have the final answer, respond with just text.\n\
-             When a task is complex, you can delegate it to a specialized sub-agent.",
+             When a task is complex, you can delegate it to a specialized sub-agent.\n\n\
+             BACKGROUND DELEGATION (non-blocking): for long, independent subtasks \
+             you don't need the result of right away, call `delegate` with `background=true` \
+             (instead of the default foreground `delegate`). It launches the sub-agent detached \
+             and returns immediately; you will be NOTIFIED automatically when it finishes (a new \
+             message with its result arrives and re-activates you). DO NOT poll, and DO NOT \
+             re-issue a background task that is already running. After launching background tasks, \
+             either continue with DIFFERENT non-overlapping work, or tell the user what you \
+             launched and END your response — the completion notification will resume you. \
+             Sequence dependent work across turns by waiting for each task's notification, not \
+             by `depends_on` (depends_on is foreground-only and ignored in background mode).",
             HashMap::new(),
         ));
 

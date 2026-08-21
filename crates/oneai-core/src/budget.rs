@@ -357,12 +357,29 @@ pub struct TokenBudget {
 
     /// Tokens consumed so far (prompt + completion + tool results).
     pub consumed: u32,
+
+    /// Whether `record_usage` charges the (re-sent) prompt tokens against the
+    /// budget. `true` (default) = cost-accurate cumulative accounting
+    /// (prompt + completion), used by the main agent where the user wants a
+    /// real-cost cap. `false` = charge **completion only** — the budget caps
+    /// *work output* (what the model generates), not the re-sent context.
+    /// Set via [`TokenBudget::charge_completion_only`] for delegated
+    /// sub-agents: their fixed base context (task spec + injected sources) is
+    /// re-sent every iteration, so a cost-accurate budget exhausted in 3–5
+    /// iterations purely from prompt re-charging regardless of real work
+    /// done. Completion-only makes `budget_tokens` mean "how much the
+    /// sub-agent may generate" — decoupled from base-context size.
+    pub charge_prompt: bool,
 }
 
 impl TokenBudget {
     /// Create a new budget with the given total.
     pub fn new(total: u32) -> Self {
-        Self { total, consumed: 0 }
+        Self {
+            total,
+            consumed: 0,
+            charge_prompt: true,
+        }
     }
 
     /// Create an unlimited budget (for testing or when no budget constraint is needed).
@@ -370,6 +387,7 @@ impl TokenBudget {
         Self {
             total: u32::MAX,
             consumed: 0,
+            charge_prompt: true,
         }
     }
 
@@ -379,7 +397,16 @@ impl TokenBudget {
         Self {
             total: (context_window_size as f32 * 0.8) as u32,
             consumed: 0,
+            charge_prompt: true,
         }
+    }
+
+    /// Charge only completion (model-generated) tokens, not the re-sent
+    /// prompt. Intended for delegated sub-agent run-cost budgets — see
+    /// [`TokenBudget::charge_prompt`].
+    pub fn charge_completion_only(mut self) -> Self {
+        self.charge_prompt = false;
+        self
     }
 
     /// Get the remaining tokens.
@@ -389,7 +416,11 @@ impl TokenBudget {
 
     /// Record token consumption from an inference response.
     pub fn record_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
-        self.consumed += prompt_tokens + completion_tokens;
+        if self.charge_prompt {
+            self.consumed += prompt_tokens + completion_tokens;
+        } else {
+            self.consumed += completion_tokens;
+        }
     }
 
     /// Check if the budget can support one more iteration with the estimated cost.
@@ -817,6 +848,33 @@ mod tests {
             }
             _ => panic!("expected ToolResult"),
         }
+    }
+
+    #[test]
+    fn token_budget_charges_prompt_and_completion_by_default() {
+        // Main-agent semantics: cost-accurate cumulative accounting.
+        let mut b = TokenBudget::new(1000);
+        b.record_usage(300, 50);
+        assert_eq!(b.consumed, 350);
+        assert_eq!(b.remaining(), 650);
+    }
+
+    #[test]
+    fn token_budget_completion_only_ignores_resent_prompt() {
+        // Sub-agent semantics: a 10k-token base context re-sent every
+        // iteration must NOT exhaust a 20k budget in 2 iterations — only the
+        // model-generated completion counts. This is the fix for delegated
+        // sub-agents dying after 3–5 iterations purely from prompt
+        // re-charging (see /tmp/oneai-web.log 03:37 explore sub-agents).
+        let mut b = TokenBudget::new(20000).charge_completion_only();
+        // Iteration 1: 10k prompt (re-sent base context) + 500 completion.
+        b.record_usage(10_000, 500);
+        // Iteration 2: same 10k prompt re-sent + 600 completion.
+        b.record_usage(10_000, 600);
+        // Only completion charged: 500 + 600 = 1100, well within 20000 — the
+        // sub-agent keeps running instead of being cut off at iter 2.
+        assert_eq!(b.consumed, 1100);
+        assert!(b.remaining() > 18000);
     }
 
     #[test]

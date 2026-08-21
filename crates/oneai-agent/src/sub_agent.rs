@@ -172,7 +172,14 @@ impl SubAgentKind {
                 "web_search",
                 "web_fetch",
             ],
-            Self::Code => &["read_file", "edit_file", "shell", "grep", "glob"],
+            Self::Code => &[
+                "read_file",
+                "edit_file",
+                "shell",
+                "grep",
+                "glob",
+                "list_directory",
+            ],
             Self::Plan => &["read_file", "grep", "glob"],
             Self::Review => &["read_file", "grep", "glob"],
             // Reflect: memory-only whitelist — it persists durable learnings,
@@ -188,6 +195,24 @@ impl SubAgentKind {
                 "skill_manage",
             ],
             Self::Custom(_) => &["read_file", "grep", "glob", "edit_file", "shell"],
+        }
+    }
+
+    /// Minimum token-budget floor for this kind — a safety guardrail against
+    /// the parent under-budgeting a delegation. The parent's `budget_tokens`
+    /// arg defaults to 5000 and the model often under-specifies for expensive
+    /// kinds (code-gen with extended thinking burns ~8–10k tokens/iteration;
+    /// a 15–18k budget exhausts in 2–4 iterations and the sub-agent dies
+    /// mid-task — see /tmp/oneai-web.log 12:45+). Only kinds with a known
+    /// high cost carry a floor; 0 = honor the parent's budget verbatim.
+    pub fn min_budget_tokens(&self) -> u32 {
+        match self {
+            Self::Code => 40_000,
+            // Explore does web research (multi-step fetch + synthesis) —
+            // also expensive, but its failures are cheaper (no half-written
+            // files), so a smaller floor.
+            Self::Explore => 20_000,
+            _ => 0,
         }
     }
 }
@@ -432,7 +457,7 @@ impl AgentLoopObserver for NullSubAgentObserver {
     fn on_direct_answer(&self, _: &str) {}
     fn on_tool_calls(&self, _: &[crate::agent_loop::ToolCallRequest]) {}
     fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-    fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
     fn on_paradigm_switch(&self, _: crate::agent_loop::ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &crate::agent_loop::AgentLoopResult) {}
@@ -944,6 +969,24 @@ impl DefaultSubAgentFactory {
         budget: TokenBudget,
         spec: DelegationSpec,
     ) -> Result<Box<dyn SubAgent>> {
+        // Per-kind budget floor: the parent's `budget_tokens` is advisory;
+        // expensive kinds (code-gen + thinking) get a minimum so a
+        // well-intentioned-but-too-small budget doesn't starve the sub-agent
+        // to death mid-task. Higher budgets pass through unchanged.
+        let budget = {
+            let floor = kind.min_budget_tokens();
+            if budget.total < floor {
+                tracing::info!(
+                    kind = kind.name(),
+                    requested = budget.total,
+                    floor,
+                    "sub-agent budget below kind floor; raising to the floor"
+                );
+                TokenBudget::new(floor)
+            } else {
+                budget
+            }
+        };
         // Resolve the system prompt (Opt 3 role layering).
         let system_prompt = spec
             .system_prompt
@@ -1013,15 +1056,43 @@ impl DefaultSubAgentFactory {
             use_streaming: true,
             temperature: Some(0.3),
             top_p: None,
-            max_tokens: Some(budget.total),
-            thinking_budget: None,
+            // Defer max_tokens to the provider (it knows its own model ceiling),
+            // like the main agent — NOT `Some(budget.total)`. Coupling the
+            // per-inference cap to the run budget let a single inference burn
+            // the ENTIRE budget on extended thinking (glm-5.2 generates huge
+            // thinking blobs): with `max_tokens = budget.total = 40000`, one
+            // inference produced ~40k tokens of reasoning over ~7–8 min and
+            // the run-cost budget (also 40k) was exhausted after 1–2
+            // iterations — the sub-agent thought itself to death, doing no
+            // real work (see /tmp/oneai-web.log 15:52→16:12). With None, each
+            // inference is bounded by the provider's sane default (~4k), and
+            // the 40k run budget buys ~10 iterations of actual work.
+            max_tokens: None,
+            // Disable extended thinking for execute-style sub-agents (Code).
+            // Verified live against glm-5.2 via DashScope: with default
+            // reasoning effort "max", a single inference emits 100k–170k chars
+            // of `reasoning_content` (≈30–50k tokens) and burns the whole 40k
+            // run-cost budget in ONE iteration, producing no code. Bounding via
+            // `max_tokens` does NOT help — GLM spends the entire cap on
+            // reasoning and emits zero content (max_tokens=8192 → 25k chars
+            // thinking, 0 chars code). `enable_thinking: false` (mapped from
+            // `thinking_budget: Some(0)` in the OpenAI provider) fully
+            // suppresses reasoning: the model emits complete pure-code output
+            // in one shot (~8k tokens for a full gomoku module) — so 40k buys
+            // ~5 productive iterations. Reasoning-style sub-agents
+            // (Reflect/Review/Plan) keep thinking (None) — they must reason.
+            thinking_budget: if matches!(kind, SubAgentKind::Code) {
+                Some(0)
+            } else {
+                None
+            },
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(if matches!(kind, SubAgentKind::Reflect) {
                 16
             } else {
                 50
             }),
-            token_budget: Some(budget.clone()),
+            token_budget: Some(budget.clone().charge_completion_only()),
             inject_skills: false,
             usage_tracker: None,
             rate_limiter: None,

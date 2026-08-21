@@ -29,6 +29,7 @@ import type {
 import { StreamCoalescer } from '../stream/coalescer'
 import { compileGroupScenario, firstUserMessage } from '../scenario/compile'
 import type {
+  BackgroundTaskNode,
   SubagentNode,
   TrajectoryEntry,
   UsageSnapshot,
@@ -131,6 +132,10 @@ export interface ProjectionSnapshot {
   working: WorkingProjection
   /** Sub-agents the model delegated to (active + completed). */
   subagents: SubagentNode[]
+  /** Background delegated sub-agents tracked ACROSS turns (a background task
+   *  launched in turn A completes in turn B). Matched by `task_id`; NOT
+   *  cleared at turn boundaries — only on session/scenario reset. */
+  backgroundTasks: BackgroundTaskNode[]
   /** Latest usage snapshot (token usage + context accounting). */
   usage: UsageSnapshot
   /** Performance.now() marks per turn, for timing-overview rendering. */
@@ -184,6 +189,7 @@ interface WorkingState {
   trajectory: TrajectoryEntry[]
   working: WorkingProjection
   subagents: SubagentNode[]
+  backgroundTasks: BackgroundTaskNode[]
   usage: UsageSnapshot
   /** per-turn performance.now() start marks (for elapsed-ms timing). */
   turnStartPerf: Map<string, number>
@@ -233,6 +239,7 @@ const EMPTY: ProjectionSnapshot = {
   trajectory: [],
   working: EMPTY_WORKING,
   subagents: [],
+  backgroundTasks: [],
   usage: { usage: null, context: null },
   turnTimings: [],
   metrics: EMPTY_METRICS,
@@ -242,6 +249,18 @@ let nodeSeq = 0
 function nextNodeId(): string {
   nodeSeq += 1
   return `n${nodeSeq}`
+}
+
+/** Insert-or-update a background task by `taskId` (cross-turn lifecycle). */
+function upsertBackgroundTask(
+  list: BackgroundTaskNode[],
+  task: BackgroundTaskNode,
+): BackgroundTaskNode[] {
+  const i = list.findIndex((t) => t.taskId === task.taskId)
+  if (i < 0) return [...list, task]
+  const copy = [...list]
+  copy[i] = { ...list[i], ...task }
+  return copy
 }
 
 let approvalSeq = 0
@@ -263,6 +282,7 @@ export class ProjectionStore {
     trajectory: [],
     working: { ...EMPTY_WORKING },
     subagents: [],
+    backgroundTasks: [],
     usage: { usage: null, context: null },
     turnStartPerf: new Map(),
     turnEndPerf: new Map(),
@@ -342,6 +362,7 @@ export class ProjectionStore {
       trajectory: [...this.state.trajectory],
       working: this.state.working,
       subagents: [...this.state.subagents],
+      backgroundTasks: [...this.state.backgroundTasks],
       usage: this.state.usage,
       turnTimings,
       metrics,
@@ -509,6 +530,7 @@ export class ProjectionStore {
     this.state.trajectory = []
     this.state.working = { ...EMPTY_WORKING }
     this.state.subagents = []
+    this.state.backgroundTasks = []
     this.state.usage = { usage: null, context: null }
     this.state.turnStartPerf.clear()
     this.state.turnEndPerf.clear()
@@ -586,6 +608,22 @@ export class ProjectionStore {
   private finalizeStreamingText(turnId: string): void {
     this.state.nodes = this.state.nodes.map((n) =>
       n.turnId === turnId && n.kind === 'text' && n.state === 'streaming'
+        ? { ...n, state: 'done' as NodeState }
+        : n,
+    )
+  }
+
+  /** Mark any streaming thinking node for a turn done. A turn runs multiple
+   *  iterations, each may emit its own `thinking` fragment; without this, the
+   *  2nd iteration's thinking would APPEND to the 1st's still-streaming node
+   *  and the whole turn's reasoning would collapse into one giant "stuck"
+   *  block. Finalizing at each iteration boundary (iteration_start /
+   *  tool_calls / direct_answer) makes each iteration's reasoning its own
+   *  block — so the user sees distinct per-iteration thinking, not one
+   *  ever-growing blob. */
+  private finalizeStreamingThinking(turnId: string): void {
+    this.state.nodes = this.state.nodes.map((n) =>
+      n.turnId === turnId && n.kind === 'thinking' && n.state === 'streaming'
         ? { ...n, state: 'done' as NodeState }
         : n,
     )
@@ -688,6 +726,9 @@ export class ProjectionStore {
         break
       }
       case 'direct_answer': {
+        // The final iteration's thinking fragment closes here so the answer
+        // renders as its own block, not appended to a streaming reasoning node.
+        this.finalizeStreamingThinking(y.turn_id)
         const node = this.streamingNodeFor(y.turn_id, y.speaker)
         if (node !== null) {
           this.replaceNode(node.id, { text: y.text, state: 'done' })
@@ -702,10 +743,11 @@ export class ProjectionStore {
         break
       }
       case 'tool_calls': {
-        // Finalize any streaming text node for this turn so tool cards
-        // interleave between finalized text blocks (the next stream_chunk
-        // seeds a fresh text node after the cards).
+        // Finalize any streaming text + thinking node for this turn so tool
+        // cards interleave between finalized blocks (the next stream_chunk /
+        // thinking seeds a fresh node after the cards).
         this.finalizeStreamingText(y.turn_id)
+        this.finalizeStreamingThinking(y.turn_id)
         for (const c of y.calls) {
           // Dedupe by call id within the turn: the engine's streaming path
           // (`on_tool_calls` per `ToolCallComplete`) and the decision path
@@ -981,6 +1023,10 @@ export class ProjectionStore {
       //     These feed the trajectory ledger + the capability panel (goal bar,
       //     subagent tree, context/usage overview). All pure consumers. ──
       case 'iteration_start': {
+        // Close the previous iteration's thinking fragment so this
+        // iteration's thinking seeds a fresh block (per-iteration reasoning,
+        // not one merged blob for the whole turn).
+        this.finalizeStreamingThinking(y.turn_id)
         const prev = this.state.turnIterations.get(y.turn_id) ?? 0
         this.state.turnIterations.set(y.turn_id, prev + 1)
         this.pushTrajectory(y.turn_id, 'iteration_start', `iteration ${y.iteration} · ${y.paradigm}`, {
@@ -1004,16 +1050,70 @@ export class ProjectionStore {
             status: 'active',
           },
         ]
+        // Also track in the cross-turn background slice (matched by task_id)
+        // so a background sub-agent launched here stays visible + updatable
+        // across the turn boundary where it completes.
+        if (y.task_id) {
+          this.state.backgroundTasks = upsertBackgroundTask(this.state.backgroundTasks, {
+            taskId: y.task_id,
+            turnId: y.turn_id,
+            task: y.task,
+            agentKind: y.agent_kind,
+            status: 'active',
+          })
+        }
         this.pushTrajectory(y.turn_id, 'delegate', `delegate → ${kindLabel}`, {
           detail: { subagentId: id, task: y.task },
         })
         this.emitNow()
         break
       }
+      case 'delegate_progress': {
+        // Mid-run progress from a (background) sub-agent — fan onto the
+        // matching background-task card by task_id. iteration/tool/usage keep
+        // the status strip live while the parent is also running.
+        const ev = y.event
+        this.state.backgroundTasks = this.state.backgroundTasks.map((t) => {
+          if (t.taskId !== y.task_id) return t
+          const next: BackgroundTaskNode = { ...t }
+          if (ev.kind === 'iteration_start') {
+            next.iteration = ev.iteration
+            next.paradigm = typeof ev.paradigm === 'string' ? ev.paradigm : JSON.stringify(ev.paradigm)
+          } else if (ev.kind === 'tool_result') {
+            next.lastTool = ev.tool_name
+            next.lastToolSnapshot = ev.snapshot
+          } else if (ev.kind === 'token_usage') {
+            next.usage = { prompt: ev.prompt, completion: ev.completion }
+          } else if (ev.kind === 'cancelled') {
+            next.status = 'failed'
+          }
+          return next
+        })
+        this.pushTrajectory(y.turn_id, 'delegate_progress', `bg progress: ${ev.kind}`, {
+          detail: { taskId: y.task_id, event: ev },
+        })
+        this.emitNow()
+        break
+      }
       case 'delegate_complete': {
-        // Mark the last active subagent for this turn done + attach summary.
-        // (delegate carries no call id; the matching is by recency within the
-        // turn — the most recent still-active delegate completes first.)
+        // Mark the matching sub-agent done. Prefer task_id (carried by both
+        // foreground + background delegate); fall back to the legacy
+        // "most-recent still-active in this turn" heuristic when the server
+        // omits task_id (older engine).
+        const summary = {
+          summary: y.summary.summary,
+          keyFindings: y.summary.key_findings,
+          budgetExceeded: y.summary.budget_exceeded,
+          tokensUsed: y.summary.tokens_used,
+          completed: y.summary.completed,
+        }
+        if (y.task_id) {
+          this.state.backgroundTasks = this.state.backgroundTasks.map((t) =>
+            t.taskId === y.task_id
+              ? { ...t, status: y.summary.completed ? 'done' : 'failed', summary }
+              : t,
+          )
+        }
         const idx = [...this.state.subagents]
           .reverse()
           .findIndex((s) => s.turnId === y.turn_id && s.status === 'active')
@@ -1021,19 +1121,7 @@ export class ProjectionStore {
           const realIdx = this.state.subagents.length - 1 - idx
           const n = this.state.subagents[realIdx]
           this.state.subagents = this.state.subagents.map((s) =>
-            s.id === n.id
-              ? {
-                  ...s,
-                  status: 'done',
-                  summary: {
-                    summary: y.summary.summary,
-                    keyFindings: y.summary.key_findings,
-                    budgetExceeded: y.summary.budget_exceeded,
-                    tokensUsed: y.summary.tokens_used,
-                    completed: y.summary.completed,
-                  },
-                }
-              : s,
+            s.id === n.id ? { ...s, status: 'done', summary } : s,
           )
         }
         this.pushTrajectory(y.turn_id, 'delegate_complete', 'delegate complete', {

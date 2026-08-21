@@ -142,6 +142,74 @@ use oneai_agent::{
     ToolCallRequest,
 };
 
+/// Phase 2A fire-and-auto-notify sink: when a background sub-agent finishes,
+/// submit its result as a synthetic `Directive::UserMessage` so the directive
+/// pump re-runs the parent with the result in context. The parent never polls;
+/// it is woken here. See `AsyncTaskRunner` / `BackgroundCompletionSink`.
+///
+/// Routes to the *active* session of the pump (single app-level bus). If the
+/// user switched sessions while a background task ran, the result lands on the
+/// wrong session — a known limitation (a session-targeted directive variant is
+/// the follow-up).
+struct BusBackgroundSink {
+    bus: Arc<oneai_bus::InProcessBus>,
+    /// The parent turn that launched the background tasks this sink serves.
+    /// Captured at runner-construction time (the delegating turn) and stamped
+    /// onto `DelegateComplete` so the frontend can close the right sub-agent
+    /// card even though the sub-agent finishes after the turn ended.
+    turn_id: String,
+}
+
+#[async_trait::async_trait]
+impl oneai_agent::BackgroundCompletionSink for BusBackgroundSink {
+    async fn notify(&self, turn_id: &str, task_id: &str, summary: oneai_agent::SubAgentSummary) {
+        use oneai_bus::{Directive, EngineBus, EngineYield};
+        use oneai_core::ContentBlock;
+        // Prefer the runner-passed turn_id (the delegating turn); fall back to
+        // the one captured at sink construction (non-run_turn_via_bus paths
+        // pass "" here but may have captured a real id at construction).
+        let stamp = if !turn_id.is_empty() {
+            turn_id
+        } else {
+            &self.turn_id
+        };
+        // Mark the sub-agent card done (frontend matches by task_id).
+        let _ = self.bus.emit(EngineYield::DelegateComplete {
+            turn_id: stamp.to_string(),
+            task_id: task_id.to_string(),
+            summary: oneai_bus::BusSubAgent::from(&summary),
+            speaker: None,
+        });
+        let text = if summary.completed {
+            let findings = if summary.key_findings.is_empty() {
+                String::new()
+            } else {
+                format!("\nKey findings: {}", summary.key_findings.join("; "))
+            };
+            format!(
+                "[Background sub-agent result — task '{}' completed]\n{}{}\n\
+                 (This is the result of a background task you launched earlier. \
+                 Continue your original goal using it.)",
+                task_id, summary.summary, findings
+            )
+        } else {
+            format!(
+                "[Background sub-agent result — task '{}' finished (did not complete)]\n{}",
+                task_id, summary.summary
+            )
+        };
+        let directive = Directive::UserMessage {
+            content: vec![ContentBlock::Text { text }],
+        };
+        if let Err(e) = self.bus.submit(directive).await {
+            tracing::warn!(
+                "BusBackgroundSink: failed to submit background result for '{}': {e}",
+                task_id
+            );
+        }
+    }
+}
+
 /// A running agent session with conversation context and memory.
 ///
 /// Created from an App, each session has its own conversation
@@ -160,6 +228,16 @@ pub struct AppSession {
     /// Plan mode flag — when true, the agent loop blocks tool execution and
     /// only produces a plan. Set by the TUI before `run_agent`.
     plan_mode: bool,
+    /// The id of the turn currently driving `run_agent` (set by
+    /// `run_turn_via_bus` before it calls `run_agent`, cleared after). Read
+    /// once when `run_agent` builds the per-turn `AsyncTaskRunner` so the
+    /// runner can stamp background-task completion notifications with the
+    /// delegating turn's id — a background sub-agent finishes (and its sink
+    /// fires) long after the delegating turn ended, so the id must be captured
+    /// at delegation time, not read at completion. `None` for non-bus callers
+    /// (supervisor / studio / uniffi direct), which stamp an empty id; the
+    /// frontend then matches by `task_id`.
+    current_turn_id: Option<String>,
     /// §12.3: cumulative importance of facts archived since the last mid-
     /// session reflection (a proxy for "how much memory-worthy content has
     /// accumulated"). Drives the Generative-Agents-style importance-sum
@@ -337,6 +415,7 @@ impl AppSession {
             trace_context,
             workflow_history: Vec::new(),
             plan_mode: false,
+            current_turn_id: None,
             accumulated_importance: 0.0,
             turns_since_last_reflection: 0,
             unfinished_work_surfaced: false,
@@ -1238,6 +1317,15 @@ impl AppSession {
             // message. Read-only tools retry; non-idempotent tools are gated
             // (see AgentLoop recovery handler).
             .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
+            // Phase 2A: enable non-blocking background delegation. The three
+            // `delegate_background` / `task_status` / `collect_results`
+            // meta-tools are advertised to the model only while a runner is
+            // present AND the sub-agent factory has available kinds (the
+            // schema gate in `build_tool_definitions`), so no-domain /
+            // group-chat builds are unaffected.
+            // (background delegation is wired after the if/else — see below —
+            // gated on an engine bus being available, since fire-and-auto-notify
+            // needs a bus to inject results + re-trigger turns.)
         } else {
             let mut config = AgentLoopConfig {
                 system_prompt: if memory_tools_on {
@@ -1334,6 +1422,36 @@ impl AppSession {
             )
             .with_skill_registry(self.app.skill_registry.clone(), active_skill.clone())
             .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
+            // Phase 2A background delegation is wired after the if/else —
+            // gated on an engine bus being available (fire-and-auto-notify
+            // needs a bus to inject results + re-trigger turns).
+        };
+
+        // ─── Phase 2A: fire-and-auto-notify background delegation ──────────
+        // Only enable it when an engine bus is configured — the runner's
+        // completion sink submits a `Directive::UserMessage` with the result,
+        // which the (long-running) directive pump routes to a new parent turn.
+        // Without a bus there's no way to re-activate the parent, so the
+        // `delegate_background` tool is not advertised (the schema gate hides
+        // it when the runner is absent).
+        let agent_loop = if let Some(bus) = self.app.engine_bus.as_ref() {
+            let sink: Arc<dyn oneai_agent::BackgroundCompletionSink> =
+                Arc::new(BusBackgroundSink {
+                    bus: bus.clone(),
+                    turn_id: self.current_turn_id.clone().unwrap_or_default(),
+                });
+            agent_loop.with_background_delegation(
+                oneai_agent::DelegationPolicy::default(),
+                sink,
+                self.current_turn_id.clone().unwrap_or_default(),
+                // The bus lets the sub-agent's ForwardingObserver emit
+                // DelegateProgress DIRECTLY (sync) so live status keeps flowing
+                // after this turn ends — otherwise the parent's drain_progress
+                // stops at turn-end and a long background sub-agent looks frozen.
+                Some(bus.clone() as Arc<dyn oneai_bus::EngineBus>),
+            )
+        } else {
+            agent_loop
         };
 
         // Register the running AgentLoop so the TUI can request an interrupt
@@ -1343,9 +1461,18 @@ impl AppSession {
 
         // Bus interrupt wiring (P2): when an engine bus is configured, register
         // this turn's cancel token so an incoming `Directive::Interrupt` fires
-        // the in-flight inference/stream. Each turn builds a fresh loop with a
-        // fresh token, so re-registering on the next turn overwrites cleanly.
-        // Guarded — non-bus callers (engine_bus None) are unaffected.
+        // the in-flight inference/stream AND the background sub-agents spawned
+        // this turn (they're child tokens of this loop's token). Each turn
+        // builds a fresh loop with a fresh token, so re-registering on the next
+        // turn overwrites cleanly. Guarded — non-bus callers are unaffected.
+        //
+        // NOTE: this cancels the CURRENT turn's inference + its background
+        // tasks. Cross-turn background tasks (spawned by an earlier turn whose
+        // token was dropped) are not reachable from here — fully stopping those
+        // needs a session-scoped runner (`cancel_all`); see the Phase 2A
+        // follow-up. In practice the submission-record fix above means the
+        // model no longer re-delegates across turns, so there's a single
+        // submitting turn whose tasks this does cancel.
         if let Some(bus) = self.app.engine_bus.as_ref() {
             use oneai_bus::EngineBus;
             bus.register_interrupt(agent_loop.cancel_token());
@@ -1530,7 +1657,7 @@ impl AppSession {
             fn on_direct_answer(&self, _: &str) {}
             fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
             fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-            fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+            fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
             fn on_paradigm_switch(&self, _: ParadigmKind) {}
             fn on_checkpoint(&self, _: usize) {}
             fn on_complete(&self, _: &AgentLoopResult) {}
@@ -1578,7 +1705,14 @@ impl AppSession {
         // TurnComplete via on_complete) during the turn; TurnStart is emitted
         // here because no observer callback brackets the whole turn.
         let observer = BusObserver::new(engine_bus, turn_id.clone());
-        let result = self.run_agent(task, &observer, interrupt_slot).await?;
+        // Stamp the current turn id so `run_agent` can capture it into the
+        // per-turn AsyncTaskRunner (background sub-agents outlive this turn;
+        // their completion sink needs the *delegating* turn's id). Cleared
+        // after the turn so a stale value never leaks into a later turn.
+        self.current_turn_id = Some(turn_id.clone());
+        let result = self.run_agent(task, &observer, interrupt_slot).await;
+        self.current_turn_id = None;
+        let result = result?;
 
         Ok((&result).into())
     }

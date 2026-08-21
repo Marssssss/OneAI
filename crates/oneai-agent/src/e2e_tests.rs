@@ -148,13 +148,13 @@ impl AgentLoopObserver for TestObserver {
             output.clone(),
         ));
     }
-    fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
+    fn on_delegate(&self, _id: &str, task: &str, agent_type: &SubAgentKind) {
         self.events
             .lock()
             .unwrap()
             .push(TestEvent::Delegate(task.to_string(), agent_type.clone()));
     }
-    fn on_delegate_complete(&self, summary: &SubAgentSummary) {
+    fn on_delegate_complete(&self, _id: &str, summary: &SubAgentSummary) {
         self.events
             .lock()
             .unwrap()
@@ -1107,6 +1107,7 @@ impl crate::sub_agent::SubAgent for RecordingSubAgent {
         static BUDGET: TokenBudget = TokenBudget {
             total: 5000,
             consumed: 0,
+            charge_prompt: true,
         };
         &BUDGET
     }
@@ -2203,40 +2204,212 @@ async fn e2e_structured_output_max_retries_exhausted() {
     );
 }
 
-// ─── Scenario 9: Parallel sub-agent delegation with AsyncTaskRunner ──────────────
+// ─── Scenario 9: Non-blocking background delegation with AsyncTaskRunner ──────
 
 #[tokio::test]
 async fn e2e_scenario_9_parallel_sub_agent_delegation() {
-    use crate::async_task_runner::AsyncTaskRunner;
+    use crate::agent_loop::DelegateTask;
+    use crate::async_task_runner::{AsyncTaskRunner, BackgroundCompletionSink};
+    use tokio_util::sync::CancellationToken;
 
-    // Create the AsyncTaskRunner with MockSubAgentFactory
-    let runner = AsyncTaskRunner::new(Arc::new(MockSubAgentFactory));
+    /// Recording sink — captures every fire-and-auto-notify `notify`.
+    struct RecSink(Arc<Mutex<Vec<(String, SubAgentSummary)>>>);
+    #[async_trait::async_trait]
+    impl BackgroundCompletionSink for RecSink {
+        async fn notify(&self, _turn_id: &str, task_id: &str, summary: SubAgentSummary) {
+            self.0.lock().unwrap().push((task_id.to_string(), summary));
+        }
+    }
 
-    // Submit two tasks in parallel
+    let notes = Arc::new(Mutex::new(Vec::new()));
+    // Phase 2A fire-and-notify runner with a recording sink.
+    let runner = Arc::new(AsyncTaskRunner::new(
+        Arc::new(MockSubAgentFactory),
+        DelegationPolicy::default(),
+        CancellationToken::new(),
+        Arc::new(RecSink(notes.clone())),
+        "test_turn".to_string(),
+        None,
+    ));
+
+    fn bg_task(id: &str, task: &str) -> DelegateTask {
+        DelegateTask {
+            id: id.to_string(),
+            task: task.to_string(),
+            agent_type: SubAgentKind::Explore,
+            budget: TokenBudget::new(5000),
+            depends_on: Vec::new(),
+            call_id: format!("call_{}", id),
+            custom_role: None,
+            system_prompt_override: None,
+            tools_override: None,
+            inherit_context: false,
+            inherit_last_n: 0,
+            seed_messages: None,
+        }
+    }
+
+    // Submit two independent background tasks — submit_delegate returns the
+    // id immediately (non-blocking); the sub-agents run detached.
     let id1 = runner
-        .submit("Find authentication code", SubAgentKind::Explore)
+        .submit_delegate(bg_task("a", "Find authentication code"))
         .await
         .unwrap();
     let id2 = runner
-        .submit("Find database queries", SubAgentKind::Explore)
+        .submit_delegate(bg_task("b", "Find database queries"))
         .await
         .unwrap();
+    assert_eq!(id1, "a");
+    assert_eq!(id2, "b");
 
-    // Wait for both to complete
-    let r1 = runner.wait_for(&id1).await.unwrap();
-    let r2 = runner.wait_for(&id2).await.unwrap();
+    // Wait for both to complete (the parent loop does NOT block — it just
+    // keeps working / ends its turn; here we wait for the test's sake).
+    for _ in 0..200 {
+        if runner.status(&id1).await == crate::async_task_runner::TaskStatus::Completed
+            && runner.status(&id2).await == crate::async_task_runner::TaskStatus::Completed
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runner.status(&id1).await,
+        crate::async_task_runner::TaskStatus::Completed
+    );
+    assert_eq!(
+        runner.status(&id2).await,
+        crate::async_task_runner::TaskStatus::Completed
+    );
 
-    // Both should have completed
+    // Fire-and-auto-notify: the sink was notified once per completed task,
+    // each with the sub-agent's summary — the parent would be re-activated
+    // by these in production (via the bus).
+    let notes = notes.lock().unwrap();
+    assert_eq!(notes.len(), 2, "sink auto-notified once per task");
+    let r1 = notes.iter().find(|(id, _)| id == "a").unwrap().1.clone();
+    let r2 = notes.iter().find(|(id, _)| id == "b").unwrap().1.clone();
     assert!(r1.completed);
     assert!(r2.completed);
     assert!(r1.summary.contains("Explored and found"));
     assert!(r2.summary.contains("Explored and found"));
-    assert_eq!(r1.key_findings.len(), 2); // file1.rs, file2.rs
+    assert_eq!(r1.key_findings.len(), 2);
     assert_eq!(r2.key_findings.len(), 2);
+}
 
-    // Collect all completed results
-    let completed = runner.collect_completed().await;
-    assert_eq!(completed.len(), 2);
+// ─── Scenario 9b: Background delegation through the AgentLoop (fire-and-notify) ─
+//
+// The model emits `delegate` with `background=true` then a `direct_answer`. The
+// loop must NOT block on the background sub-agent, must surface a `delegate`
+// tool_result ("launched, you'll be notified, end your response"), and the
+// runner's sink must be auto-notified with the sub-agent's summary when it
+// finishes (the production sink re-triggers a parent turn; here a recording
+// sink captures it). No `task_status` / `collect_results` — the host owns the
+// rendezvous.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_scenario_9b_background_delegation_through_loop() {
+    use crate::async_task_runner::{AsyncTaskRunner, BackgroundCompletionSink};
+
+    struct RecSink(Arc<Mutex<Vec<(String, SubAgentSummary)>>>);
+    #[async_trait::async_trait]
+    impl BackgroundCompletionSink for RecSink {
+        async fn notify(&self, _turn_id: &str, task_id: &str, summary: SubAgentSummary) {
+            self.0.lock().unwrap().push((task_id.to_string(), summary));
+        }
+    }
+    let notes = Arc::new(Mutex::new(Vec::new()));
+
+    // Script: launch a background task (unified `delegate` with background=true),
+    // then end the response.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "delegate",
+            serde_json::json!({
+                "task": "explore reggae music",
+                "agent_type": "Explore",
+                "id": "bg1",
+                "budget_tokens": 5000,
+                "background": true,
+            }),
+        ),
+        ScriptedResponse::direct_answer("launched the reggae exploration in the background"),
+    ]);
+
+    let factory = Arc::new(MockSubAgentFactory);
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let runner = Arc::new(AsyncTaskRunner::new(
+        factory.clone(),
+        DelegationPolicy::default(),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(RecSink(notes.clone())),
+        "test_turn".to_string(),
+        None,
+    ));
+    let result = build_delegating_loop_with_provider(
+        Arc::new(provider) as Arc<dyn oneai_core::traits::LlmProvider>,
+        factory,
+    )
+    .with_background_delegation(
+        DelegationPolicy::default(),
+        Arc::new(crate::async_task_runner::NoopCompletionSink),
+        "test_turn".to_string(),
+        None,
+    )
+    .run_with_observer("explore reggae in the background", &observer)
+    .await
+    .unwrap();
+
+    // The loop built its OWN runner (NoopCompletionSink) — so to verify the
+    // fire-and-notify path, we drive the recording runner directly too.
+    runner
+        .submit_delegate(crate::agent_loop::DelegateTask {
+            id: "bg1".to_string(),
+            task: "explore reggae music".to_string(),
+            agent_type: SubAgentKind::Explore,
+            budget: TokenBudget::new(5000),
+            depends_on: Vec::new(),
+            call_id: "call_bg1".to_string(),
+            custom_role: None,
+            system_prompt_override: None,
+            tools_override: None,
+            inherit_context: false,
+            inherit_last_n: 0,
+            seed_messages: None,
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if runner.status("bg1").await == crate::async_task_runner::TaskStatus::Completed {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let _ = result; // loop completed (it ended with direct_answer, non-blocking)
+    let events = observer.events.lock().unwrap();
+    let names: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            TestEvent::ToolResult(_, name, _) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        names.contains(&"delegate".to_string()),
+        "delegate (background=true) should feed back a tool_result, got {:?}",
+        names
+    );
+    // No polling tools are advertised.
+    assert!(!names.contains(&"task_status".to_string()));
+    assert!(!names.contains(&"collect_results".to_string()));
+
+    // Fire-and-auto-notify: the recording sink got the completed summary.
+    let notes = notes.lock().unwrap();
+    assert_eq!(notes.len(), 1, "sink auto-notified once");
+    assert!(notes[0].1.completed);
+    assert!(notes[0].1.summary.contains("Explored and found"));
 }
 
 // ─── Scenario 10: Sub-agent with structured output validation ──────────────────────

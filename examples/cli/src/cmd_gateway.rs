@@ -440,7 +440,7 @@ impl oneai_agent::AgentLoopObserver for StreamingRelayObserver {
     fn on_direct_answer(&self, _: &str) {}
     fn on_tool_calls(&self, _: &[oneai_agent::ToolCallRequest]) {}
     fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-    fn on_delegate(&self, _: &str, _: &oneai_agent::SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &oneai_agent::SubAgentKind) {}
     fn on_paradigm_switch(&self, _: oneai_agent::ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &oneai_agent::AgentLoopResult) {}

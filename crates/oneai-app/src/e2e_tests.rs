@@ -26,7 +26,7 @@ impl AgentLoopObserver for SessionTestObserver {
     fn on_direct_answer(&self, _: &str) {}
     fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
     fn on_tool_result(&self, _: &str, _: &str, _: &ToolOutput) {}
-    fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
     fn on_paradigm_switch(&self, _: ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &AgentLoopResult) {}

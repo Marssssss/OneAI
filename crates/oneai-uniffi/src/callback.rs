@@ -85,7 +85,7 @@ impl AgentLoopObserver for CallbackObserver {
         });
     }
 
-    fn on_delegate(&self, _task: &str, _agent_type: &SubAgentKind) {
+    fn on_delegate(&self, _id: &str, _task: &str, _agent_type: &SubAgentKind) {
         // Dropped — no ChatEventView variant for delegation yet.
     }
 

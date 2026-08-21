@@ -36,3 +36,22 @@ pub fn set_active_cwd(path: Option<PathBuf>) {
 pub fn active_cwd() -> Option<PathBuf> {
     ACTIVE_CWD.read().ok().and_then(|g| g.clone())
 }
+
+/// Resolve a path the way file tools should open it. Absolute paths pass
+/// through unchanged. Relative paths resolve against the active session
+/// workspace when one is bound, NOT the process cwd — otherwise a background
+/// sub-agent (which never sets `active_cwd` itself but inherits the parent
+/// turn's) writes its files to the binary's launch dir instead of the
+/// user-picked workspace, diverging from the parent. When no workspace is
+/// bound (legacy in-process run), the path is returned as-is so the caller's
+/// own `std::env::current_dir()`-relative behavior is preserved.
+pub fn resolve(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return path.to_string();
+    }
+    match active_cwd() {
+        Some(w) => w.join(p).to_string_lossy().into_owned(),
+        None => path.to_string(),
+    }
+}

@@ -15,6 +15,7 @@ import type { BusScenario, ContentBlock, FeedbackKind } from '../rpc/types'
 import type { ScenarioEntry } from '../scenario/scenarioStore'
 import type { InteractionResponse } from '../rpc/types'
 import { ChatView } from './ChatView'
+import { BackgroundTasksBar } from './BackgroundTasksBar'
 import { Composer, type SlashCommand, type InteractionMode } from './Composer'
 import { ApprovalPanel } from './ApprovalPanel'
 import { GoalBar } from './GoalBar'
@@ -164,6 +165,7 @@ export function ConversationRoot({
             {t('chat.error')}: {snapshot.lastError}
           </div>
         )}
+        <BackgroundTasksBar tasks={snapshot.backgroundTasks} />
         {empty ? (
           <div className={styles.empty}>
             <div className={styles.emptyBrand}>

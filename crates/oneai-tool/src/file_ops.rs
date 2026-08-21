@@ -585,6 +585,17 @@ impl SandboxedFileOps {
             )))
         }
     }
+
+    /// Resolve a path the inner backend will actually open. Relative paths
+    /// resolve against the session's active workspace (`active_cwd`) when one
+    /// is bound, NOT the process cwd — otherwise a background sub-agent (which
+    /// never sets `active_cwd` itself but inherits the parent turn's) writes
+    /// its files to the binary's launch dir instead of the user-picked
+    /// workspace, diverging from the parent. Delegates to the shared
+    /// [`oneai_core::active_cwd::resolve`] so file tools stay consistent.
+    fn resolve(&self, path: &str) -> String {
+        oneai_core::active_cwd::resolve(path)
+    }
 }
 
 #[async_trait]
@@ -594,35 +605,40 @@ impl FileOperations for SandboxedFileOps {
     }
 
     async fn read(&self, path: &str) -> Result<FileReadResult> {
-        self.check(path)?;
-        self.inner.read(path).await
+        let path = self.resolve(path);
+        self.check(&path)?;
+        self.inner.read(&path).await
     }
 
     async fn write(&self, path: &str, content: &str, append: bool) -> Result<()> {
-        self.check(path)?;
-        self.inner.write(path, content, append).await
+        let path = self.resolve(path);
+        self.check(&path)?;
+        self.inner.write(&path, content, append).await
     }
 
     async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
-        self.check(path)?;
-        self.inner.list_dir(path).await
+        let path = self.resolve(path);
+        self.check(&path)?;
+        self.inner.list_dir(&path).await
     }
 
     async fn exists(&self, path: &str) -> bool {
         // exists() returns bool (no Result); a sandbox violation is reported
         // as "does not exist" — the safe answer for a path the agent may not
         // even see.
-        if self.check(path).is_err() {
+        let path = self.resolve(path);
+        if self.check(&path).is_err() {
             return false;
         }
-        self.inner.exists(path).await
+        self.inner.exists(&path).await
     }
 
     async fn metadata_size(&self, path: &str) -> Option<u64> {
-        if self.check(path).is_err() {
+        let path = self.resolve(path);
+        if self.check(&path).is_err() {
             return None;
         }
-        self.inner.metadata_size(path).await
+        self.inner.metadata_size(&path).await
     }
 }
 

@@ -711,7 +711,7 @@ impl AgentLoopObserver for SilentGroupObserver {
     fn on_direct_answer(&self, _: &str) {}
     fn on_tool_calls(&self, _: &[crate::agent_loop::ToolCallRequest]) {}
     fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-    fn on_delegate(&self, _: &str, _: &crate::sub_agent::SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &crate::sub_agent::SubAgentKind) {}
     fn on_paradigm_switch(&self, _: crate::agent_loop::ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &AgentLoopResult) {}
@@ -828,7 +828,7 @@ mod tests {
         fn on_direct_answer(&self, _: &str) {}
         fn on_tool_calls(&self, _: &[crate::agent_loop::ToolCallRequest]) {}
         fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-        fn on_delegate(&self, _: &str, _: &crate::sub_agent::SubAgentKind) {}
+        fn on_delegate(&self, _: &str, _: &str, _: &crate::sub_agent::SubAgentKind) {}
         fn on_paradigm_switch(&self, _: crate::agent_loop::ParadigmKind) {}
         fn on_checkpoint(&self, _: usize) {}
         fn on_complete(&self, _: &AgentLoopResult) {}

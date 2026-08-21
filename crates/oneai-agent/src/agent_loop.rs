@@ -67,13 +67,16 @@ pub trait AgentLoopObserver: Send + Sync {
     fn on_tool_result(&self, call_id: &str, tool_name: &str, output: &ToolOutput);
 
     /// Called when the model delegates to a sub-agent.
-    fn on_delegate(&self, task: &str, agent_type: &SubAgentKind);
+    fn on_delegate(&self, id: &str, task: &str, agent_type: &SubAgentKind);
 
     /// Called when a delegated sub-agent finishes and its summary is fed back
     /// into the parent conversation. Pairs with `on_delegate` so the UI can
     /// show the full sub-agent lifecycle (start → completion) instead of only
-    /// the start. Default empty to keep existing implementations compiling.
-    fn on_delegate_complete(&self, _summary: &crate::sub_agent::SubAgentSummary) {}
+    /// the start. `id` matches the `on_delegate` call so a frontend can fan
+    /// the completion onto the right sub-agent card (incl. across turns for
+    /// background delegations). Default empty to keep existing implementations
+    /// compiling.
+    fn on_delegate_complete(&self, _id: &str, _summary: &crate::sub_agent::SubAgentSummary) {}
 
     /// Called with mid-run progress from a delegated sub-agent (Opt 1
     /// Op-channel-lite). Sub-agent iteration/tool-result/usage events are
@@ -198,7 +201,7 @@ pub enum DelegateProgressEvent {
 /// or was interrupted, so a dependent task in the same batch can still proceed
 /// (prefixed with this note) instead of tripping the cycle guard. Used by
 /// [`AgentLoop::spawn_sub_agents_batch`] for partial-failure handling (Opt 1).
-fn failure_summary(
+pub(crate) fn failure_summary(
     kind: crate::sub_agent::SubAgentKind,
     note: &str,
 ) -> crate::sub_agent::SubAgentSummary {
@@ -215,14 +218,17 @@ fn failure_summary(
 // ─── DelegationPolicy ────────────────────────────────────────────────────────
 
 /// Resource bounds for delegated sub-agents (Opt 2 resource guardrail).
-/// Defaults preserve today's behavior: `max_concurrent=4` (a wave's live LLM
-/// sessions are capped — previously unbounded), `max_depth=1` (sub-agents
-/// can't nest — identical to the old hard-coded `SubAgentFactoryNone`),
-/// `budget_pool=None` (no global sub-agent budget accounting).
+/// Defaults: `max_concurrent=2` (background sub-agents share the parent's
+/// provider — too many concurrent streams starve each other and every
+/// inference crawls; 2 keeps the parent responsive while still parallelizing),
+/// `max_depth=1` (sub-agents can't nest), `budget_pool=None`.
 #[derive(Clone)]
 pub struct DelegationPolicy {
     /// Max sub-agents running LLM inference concurrently within a single
-    /// delegate batch wave. A semaphore gates `spawn_sub_agents_batch`.
+    /// delegate batch wave. A semaphore gates `spawn_sub_agents_batch` /
+    /// `AsyncTaskRunner`. The parent turn also hits the same provider, so the
+    /// effective concurrent-stream ceiling is `max_concurrent + 1` — keep this
+    /// low to avoid provider starvation (each stream slow + contended).
     pub max_concurrent: usize,
     /// Max delegation depth. `1` = sub-agents can't spawn further
     /// sub-agents (today's behavior). `>1` unlocks nested delegation; the
@@ -237,7 +243,7 @@ pub struct DelegationPolicy {
 impl Default for DelegationPolicy {
     fn default() -> Self {
         Self {
-            max_concurrent: 4,
+            max_concurrent: 2,
             max_depth: 1,
             budget_pool: None,
         }
@@ -247,35 +253,82 @@ impl Default for DelegationPolicy {
 // ─── ForwardingObserver ──────────────────────────────────────────────────────
 
 /// Owned, `'static` observer that a spawned sub-agent task uses to forward
-/// its high-signal progress events back to the parent loop's (borrowed)
-/// observer via an mpsc channel. The parent drains the channel from outside
-/// the `'static` spawn and calls `on_delegate_progress` on its borrowed
-/// observer — bridging the lifetime gap (a borrowed `&dyn` can't move into a
-/// `'static` `tokio::spawn`).
+/// its high-signal progress events back to the parent. Two transport modes:
+///
+/// - **Background (`bus` = Some):** emit `EngineYield::DelegateProgress`
+///   DIRECTLY to the engine bus (sync `emit`) — so progress keeps flowing to
+///   the frontend EVEN AFTER the parent turn has ended (the parent loop's
+///   `drain_progress` only runs during the parent's own iterations; once the
+///   parent yields with a `DirectAnswer`, draining stops and a long-running
+///   background sub-agent would otherwise appear "stuck" with no live
+///   status). The bus is `Arc`-cloned into the spawned task, so it outlives
+///   the per-turn runner.
+/// - **Foreground batch (`bus` = None):** send to an mpsc channel the parent
+///   drains while it `await`s the batch (the parent is blocked on the wave,
+///   so per-iteration draining suffices).
 ///
 /// Only `on_iteration_start` / `on_tool_result` / `on_token_usage_full` are
 /// forwarded — the high-signal events a parent UI cares about. Per-token
 /// streams stay inside the sub-agent to avoid flooding.
-struct ForwardingObserver {
-    delegate_id: String,
-    kind: crate::sub_agent::SubAgentKind,
-    tx: tokio::sync::mpsc::UnboundedSender<(
+pub(crate) struct ForwardingObserver {
+    pub(crate) delegate_id: String,
+    pub(crate) kind: crate::sub_agent::SubAgentKind,
+    pub(crate) turn_id: String,
+    pub(crate) bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+    pub(crate) tx: tokio::sync::mpsc::UnboundedSender<(
         String,
         crate::sub_agent::SubAgentKind,
         DelegateProgressEvent,
     )>,
 }
 
+impl ForwardingObserver {
+    pub(crate) fn new(
+        delegate_id: String,
+        kind: crate::sub_agent::SubAgentKind,
+        tx: tokio::sync::mpsc::UnboundedSender<(
+            String,
+            crate::sub_agent::SubAgentKind,
+            DelegateProgressEvent,
+        )>,
+        turn_id: String,
+        bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+    ) -> Self {
+        Self {
+            delegate_id,
+            kind,
+            turn_id,
+            bus,
+            tx,
+        }
+    }
+
+    /// Forward a progress event: direct bus emit (background mode) or channel
+    /// send (foreground batch). Direct emit keeps progress live after the
+    /// parent turn ends; the channel is left unused in background mode so
+    /// there's no double-delivery.
+    fn forward(&self, event: DelegateProgressEvent) {
+        if let Some(bus) = &self.bus {
+            let _ = bus.emit(oneai_bus::EngineYield::DelegateProgress {
+                turn_id: self.turn_id.clone(),
+                task_id: self.delegate_id.clone(),
+                agent_kind: oneai_bus::BusSubAgentKind::from(&self.kind),
+                event: oneai_bus::BusDelegateProgress::from(&event),
+            });
+        } else {
+            let _ = self
+                .tx
+                .send((self.delegate_id.clone(), self.kind.clone(), event));
+        }
+    }
+}
+
 impl AgentLoopObserver for ForwardingObserver {
     fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
-        let _ = self.tx.send((
-            self.delegate_id.clone(),
-            self.kind.clone(),
-            DelegateProgressEvent::IterationStart {
-                iteration,
-                paradigm,
-            },
-        ));
+        self.forward(DelegateProgressEvent::IterationStart {
+            iteration,
+            paradigm,
+        });
     }
 
     fn on_direct_answer(&self, _: &str) {}
@@ -284,14 +337,10 @@ impl AgentLoopObserver for ForwardingObserver {
         // Forward just the tool name + an empty snapshot to avoid pulling the
         // full ToolOutput shape across the channel; the parent UI only needs
         // "the sub-agent ran tool X" as a liveness signal.
-        let _ = self.tx.send((
-            self.delegate_id.clone(),
-            self.kind.clone(),
-            DelegateProgressEvent::ToolResult {
-                tool_name: tool_name.to_string(),
-                snapshot: String::new(),
-            },
-        ));
+        self.forward(DelegateProgressEvent::ToolResult {
+            tool_name: tool_name.to_string(),
+            snapshot: String::new(),
+        });
     }
 
     fn on_token_usage_full(
@@ -301,17 +350,13 @@ impl AgentLoopObserver for ForwardingObserver {
         _cache_read_tokens: u32,
         _cache_creation_tokens: u32,
     ) {
-        let _ = self.tx.send((
-            self.delegate_id.clone(),
-            self.kind.clone(),
-            DelegateProgressEvent::TokenUsage {
-                prompt: prompt_tokens,
-                completion: completion_tokens,
-            },
-        ));
+        self.forward(DelegateProgressEvent::TokenUsage {
+            prompt: prompt_tokens,
+            completion: completion_tokens,
+        });
     }
 
-    fn on_delegate(&self, _: &str, _: &crate::sub_agent::SubAgentKind) {}
+    fn on_delegate(&self, _: &str, _: &str, _: &crate::sub_agent::SubAgentKind) {}
     fn on_paradigm_switch(&self, _: ParadigmKind) {}
     fn on_checkpoint(&self, _: usize) {}
     fn on_complete(&self, _: &AgentLoopResult) {}
@@ -385,6 +430,15 @@ pub enum AgentDecision {
     /// batch; the scheduler runs independent tasks in parallel and honors
     /// `depends_on` ordering (see [`DelegateTask`]).
     Delegate { tasks: Vec<DelegateTask> },
+
+    /// The model wants to delegate one or more subtasks to **background**
+    /// sub-agents (Phase 2A `delegate_background`). Unlike [`Delegate`], the
+    /// loop does not wait — each task is submitted to the `AsyncTaskRunner`
+    /// and the loop continues immediately. When a background sub-agent
+    /// finishes, its result is injected back into the parent conversation and
+    /// a new parent turn is triggered (fire-and-auto-notify — see
+    /// [`crate::async_task_runner::AsyncTaskRunner`]).
+    DelegateBackground { tasks: Vec<DelegateTask> },
 
     /// The model wants to switch to a different paradigm.
     SwitchParadigm { paradigm: ParadigmKind },
@@ -1455,23 +1509,33 @@ impl AgentLoop {
         }
     }
 
-    /// Enable parallel sub-agent delegation with the AsyncTaskRunner.
+    /// Enable non-blocking background sub-agent delegation (Phase 2A,
+    /// fire-and-auto-notify). Constructs an [`AsyncTaskRunner`] wired to this
+    /// loop's `sub_agent_factory`, `delegation_policy`, `cancel_token`, and a
+    /// `sink` that injects each finished sub-agent's result back into the
+    /// parent conversation + re-triggers a parent turn. The
+    /// `delegate_background` meta-tool is advertised only while a runner is
+    /// present and the factory has available kinds.
     ///
-    /// When enabled, the AgentLoop can submit sub-agent tasks to the
-    /// runner for background execution. The main loop continues working
-    /// while sub-agents run independently, and results are collected
-    /// when the sub-agents complete.
-    ///
-    /// The runner uses the same SubAgentFactory as serial delegation,
-    /// ensuring consistent sub-agent creation across both modes.
-    ///
-    /// **Usage**: Call this after creating the AgentLoop, before running it.
+    /// Call after creating the AgentLoop, before running it:
     /// ```ignore
-    /// let agent_loop = AgentLoop::new(...).with_parallel_delegation();
+    /// let agent_loop = AgentLoop::new(...)
+    ///     .with_background_delegation(DelegationPolicy::default(), sink, turn_id, bus);
     /// ```
-    pub fn with_parallel_delegation(self) -> Self {
+    pub fn with_background_delegation(
+        self,
+        policy: DelegationPolicy,
+        sink: Arc<dyn crate::async_task_runner::BackgroundCompletionSink>,
+        turn_id: String,
+        bus: Option<Arc<dyn oneai_bus::EngineBus>>,
+    ) -> Self {
         let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::new(
             self.sub_agent_factory.clone(),
+            policy,
+            self.cancel_token.clone(),
+            sink,
+            turn_id,
+            bus,
         ));
         Self {
             async_task_runner: Some(runner),
@@ -1479,21 +1543,33 @@ impl AgentLoop {
         }
     }
 
-    /// Enable parallel sub-agent delegation with a custom budget.
-    ///
-    /// The custom budget applies to all background sub-agent tasks.
+    /// Legacy entry point — enables background delegation with the default
+    /// `DelegationPolicy` and a no-op sink (results are discarded; use
+    /// [`Self::with_background_delegation`] for fire-and-notify delivery).
+    pub fn with_parallel_delegation(self) -> Self {
+        self.with_background_delegation(
+            DelegationPolicy::default(),
+            Arc::new(crate::async_task_runner::NoopCompletionSink),
+            String::new(),
+            None,
+        )
+    }
+
+    /// Legacy entry point — background delegation with a shared budget pool.
     pub fn with_parallel_delegation_and_budget(
         self,
         budget: oneai_core::budget::TokenBudget,
     ) -> Self {
-        let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::with_budget(
-            self.sub_agent_factory.clone(),
-            budget,
-        ));
-        Self {
-            async_task_runner: Some(runner),
-            ..self
-        }
+        let policy = DelegationPolicy {
+            budget_pool: Some(budget),
+            ..DelegationPolicy::default()
+        };
+        self.with_background_delegation(
+            policy,
+            Arc::new(crate::async_task_runner::NoopCompletionSink),
+            String::new(),
+            None,
+        )
     }
 
     /// Set the RecoveryManager for error recovery during the loop.
@@ -1788,6 +1864,16 @@ impl AgentLoop {
             {
                 let mut ca = self.context_assembler.write().await;
                 ca.refresh_sources().await?;
+            }
+
+            // ─── Phase 2A: drain background-task progress each iteration ──
+            // Forward buffered sub-agent events onto the observer so the UI
+            // isn't blind during a background delegation. The parent does NOT
+            // block on in-flight tasks (fire-and-auto-notify: results arrive
+            // via the sink → a new turn when they're ready); it just keeps
+            // working. Safe to skip when no runner is configured.
+            if let Some(runner) = self.async_task_runner.as_ref() {
+                runner.drain_progress(observer).await;
             }
 
             // Build the full request conversation: durable log clone + cached
@@ -2326,6 +2412,9 @@ impl AgentLoop {
                     AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
                     AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
                     AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
+                    AgentDecision::DelegateBackground { tasks } => {
+                        format!("DelegateBackground({} tasks)", tasks.len())
+                    }
                     AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
                     AgentDecision::SwitchProject { dir, .. } => {
                         format!("SwitchProject({})", dir.display())
@@ -2446,8 +2535,15 @@ impl AgentLoop {
                     empty_retry_count,
                     match &decision {
                         AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
-                        AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
-                        AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
+                        AgentDecision::ToolCalls { calls } => {
+                            format!("ToolCalls({} calls)", calls.len())
+                        }
+                        AgentDecision::Delegate { tasks } => {
+                            format!("Delegate({} tasks)", tasks.len())
+                        }
+                        AgentDecision::DelegateBackground { tasks } => {
+                            format!("DelegateBackground({} tasks)", tasks.len())
+                        }
                         AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
                         AgentDecision::SwitchProject { dir, .. } => {
                             format!("SwitchProject({})", dir.display())
@@ -3388,7 +3484,7 @@ impl AgentLoop {
                     // lifecycle (start → completion) even when several are
                     // delegated in the same turn.
                     for task in &tasks {
-                        observer.on_delegate(&task.task, &task.agent_type);
+                        observer.on_delegate(&task.id, &task.task, &task.agent_type);
                     }
 
                     // ─── Trace: log delegation batch event ──────────────
@@ -3473,10 +3569,14 @@ impl AgentLoop {
                     // forever). `summaries` come back in input order, so the
                     // zip lines each summary up with its call id.
                     let call_ids: Vec<String> = tasks.iter().map(|t| t.call_id.clone()).collect();
+                    let delegate_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
                     let summaries = self.spawn_sub_agents_batch(tasks, observer).await?;
-                    for (summary, call_id) in summaries.iter().zip(call_ids.iter()) {
+                    for i in 0..summaries.len() {
+                        let summary = &summaries[i];
+                        let call_id = &call_ids[i];
+                        let delegate_id = &delegate_ids[i];
                         state.feed_sub_agent_result(summary.clone());
-                        observer.on_delegate_complete(summary);
+                        observer.on_delegate_complete(delegate_id, summary);
                         // Synthetic tool_result so the frontend's `delegate`
                         // tool-call card resolves to "done" with the
                         // sub-agent's summary as its output (mirrors how
@@ -3490,6 +3590,119 @@ impl AgentLoop {
                         };
                         observer.on_tool_result(call_id, "delegate", &tool_output);
                     }
+                }
+                AgentDecision::DelegateBackground { tasks } => {
+                    // Phase 2A non-blocking background delegation. Mirrors the
+                    // Delegate arm's prep (on_delegate lifecycle + text-content
+                    // assistant message + inherit_context seed snapshot) but
+                    // submits each task to the AsyncTaskRunner and returns
+                    // immediately — the loop does NOT wait for the sub-agents.
+                    for task in &tasks {
+                        observer.on_delegate(&task.id, &task.task, &task.agent_type);
+                    }
+                    if let Some(ctx) = &self.config.trace_context {
+                        ctx.log_event(
+                            EventKind::WorkflowStepStart,
+                            "agent.delegate_background",
+                            HashMap::from([(
+                                "agent.delegate_background_count".to_string(),
+                                serde_json::json!(tasks.len()),
+                            )]),
+                        );
+                    }
+                    let text_content = response.message.text_content();
+                    if !text_content.is_empty() {
+                        state
+                            .conversation
+                            .add_message(Message::assistant(&text_content));
+                    }
+                    // Opt 4 Fork-lite seed snapshot (same as the Delegate arm).
+                    let mut tasks = tasks;
+                    for task in &mut tasks {
+                        if task.inherit_context {
+                            let n = if task.inherit_last_n == 0 {
+                                6
+                            } else {
+                                task.inherit_last_n
+                            };
+                            let seed: Vec<oneai_core::Message> = {
+                                let all_non_sys: Vec<oneai_core::Message> = state
+                                    .conversation
+                                    .messages
+                                    .iter()
+                                    .filter(|m| m.role != Role::System)
+                                    .cloned()
+                                    .collect();
+                                let len = all_non_sys.len();
+                                if len > n {
+                                    all_non_sys[len - n..].to_vec()
+                                } else {
+                                    all_non_sys
+                                }
+                            };
+                            if !seed.is_empty() {
+                                task.seed_messages = Some(seed);
+                            }
+                        }
+                    }
+                    let runner = match self.async_task_runner.as_ref() {
+                        Some(r) => r,
+                        None => {
+                            for task in &tasks {
+                                let tool_output = oneai_core::ToolOutput {
+                                    success: false,
+                                    content: String::new(),
+                                    error: Some(
+                                        "Background delegation runner not configured".to_string(),
+                                    ),
+                                    ..Default::default()
+                                };
+                                observer.on_tool_result(&task.call_id, "delegate", &tool_output);
+                            }
+                            continue;
+                        }
+                    };
+                    let mut submitted_ids: Vec<String> = Vec::new();
+                    for task in tasks {
+                        let call_id = task.call_id.clone();
+                        let id = runner.submit_delegate(task).await?;
+                        submitted_ids.push(id.clone());
+                        // Synthetic tool_result so the frontend's
+                        // `delegate_background` tool-call card resolves to
+                        // "done" immediately (the sub-agent runs detached).
+                        let tool_output = oneai_core::ToolOutput {
+                            success: true,
+                            content: format!(
+                                "Launched background task '{id}'. It runs detached; you will be \
+                                 notified automatically when it finishes (a new message with its \
+                                 result will arrive). DO NOT poll, call task_status, or duplicate \
+                                 this task's work. Either work on a DIFFERENT non-overlapping \
+                                 task, or briefly tell the user what you launched and END your \
+                                 response now."
+                            ),
+                            error: None,
+                            ..Default::default()
+                        };
+                        observer.on_tool_result(&call_id, "delegate", &tool_output);
+                    }
+                    // ─── In-conversation submission record ───────────────────
+                    // The tool_result above is an observer callback (UI only);
+                    // it does NOT reach the model's context. Without this
+                    // durable record the model re-infers seeing only its own
+                    // plan text + no confirmation that tasks are running, and
+                    // re-delegates the same work in a loop. This assistant
+                    // message is the in-context signal that the tasks are
+                    // launched and that the model should end its turn.
+                    state.conversation.add_message(Message::assistant(format!(
+                        "[Launched background sub-agents: {}. They are running detached; you WILL \
+                         be notified automatically when each finishes (a new message carrying its \
+                         result will arrive and resume you). Do NOT re-delegate this work or poll \
+                         for status — either work on a DIFFERENT non-overlapping task, or end your \
+                         response now and wait for the completion notifications.]",
+                        submitted_ids.join(", ")
+                    )));
+                    // Forward any progress that already arrived this iteration.
+                    runner.drain_progress(observer).await;
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
                     observer.on_paradigm_switch(paradigm);
@@ -3686,7 +3899,7 @@ impl AgentLoop {
             fn on_direct_answer(&self, _: &str) {}
             fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
             fn on_tool_result(&self, _: &str, _: &str, _: &ToolOutput) {}
-            fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+            fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
             fn on_paradigm_switch(&self, _: ParadigmKind) {}
             fn on_checkpoint(&self, _: usize) {}
             fn on_complete(&self, _: &AgentLoopResult) {}
@@ -3937,6 +4150,10 @@ impl AgentLoop {
         // into an `AgentDecision::Delegate` *after* the loop, once every id is
         // known (so `depends_on` references can be validated against the full set).
         let mut delegate_tasks: Vec<DelegateTask> = Vec::new();
+        // Phase 2A: `delegate_background` calls are accumulated separately so
+        // they don't mix with blocking `delegate` in one decision. Resolved
+        // into an `AgentDecision::DelegateBackground` after the loop.
+        let mut bg_tasks: Vec<DelegateTask> = Vec::new();
 
         for block in &response.message.content {
             match block {
@@ -4015,7 +4232,16 @@ impl AgentLoop {
                                 ),
                                 other => crate::sub_agent::SubAgentKind::from_str(other),
                             };
-                            delegate_tasks.push(DelegateTask {
+                            // Phase 2A: `background=true` routes to fire-and-
+                            // auto-notify (DelegateBackground); default false
+                            // is the blocking batch (Delegate). depends_on only
+                            // applies to foreground — strip it in background
+                            // mode (the model sequences across turn notifications).
+                            let background = args_value
+                                .get("background")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let task_entry = DelegateTask {
                                 id: task_id,
                                 task: task.to_string(),
                                 agent_type,
@@ -4028,7 +4254,22 @@ impl AgentLoop {
                                 inherit_last_n,
                                 seed_messages: None,
                                 call_id: id.clone(),
-                            });
+                            };
+                            if background {
+                                let mut bg = task_entry;
+                                if !bg.depends_on.is_empty() {
+                                    tracing::info!(
+                                        "delegate '{}' background=true with depends_on {:?} — \
+                                         ignored (background mode sequences via turn notifications)",
+                                        bg.id,
+                                        bg.depends_on
+                                    );
+                                    bg.depends_on.clear();
+                                }
+                                bg_tasks.push(bg);
+                            } else {
+                                delegate_tasks.push(task_entry);
+                            }
                         }
                         // A `delegate` block is never dispatched to the
                         // ToolExecutor — it is intercepted here. Continue scanning
@@ -4078,6 +4319,25 @@ impl AgentLoop {
                 }
                 _ => {}
             }
+        }
+
+        if !bg_tasks.is_empty() {
+            // `depends_on` is accepted on `DelegateTask` (shared with blocking
+            // `delegate`) but ignored in background mode — fire-and-auto-notify
+            // sequences across turns (the model delegates, the result arrives
+            // in a new turn, then it delegates the dependent with that context).
+            // Strip any depends_on so it doesn't mislead the runner.
+            for task in &mut bg_tasks {
+                if !task.depends_on.is_empty() {
+                    tracing::info!(
+                        "delegate_background '{}' has depends_on {:?} — ignored in background mode (sequence via turn notifications instead)",
+                        task.id,
+                        task.depends_on
+                    );
+                    task.depends_on.clear();
+                }
+            }
+            return Ok(AgentDecision::DelegateBackground { tasks: bg_tasks });
         }
 
         if !delegate_tasks.is_empty() {
@@ -5085,6 +5345,8 @@ impl AgentLoop {
                             delegate_id: task_id.clone(),
                             kind: kind.clone(),
                             tx: tx2,
+                            turn_id: String::new(),
+                            bus: None,
                         };
                         let sub_agent = factory
                             .create_with_spec(agent_type.clone(), budget, spec)
@@ -6092,7 +6354,8 @@ impl AgentLoop {
         // ToolExecutor. In plan mode the model should focus on planning, so we
         // only expose them outside plan mode.
         if !self.plan_mode() {
-            let mut meta = crate::meta_tool::meta_tool_definitions();
+            let mut meta =
+                crate::meta_tool::meta_tool_definitions(self.async_task_runner.is_some());
             // Don't advertise `delegate` when the sub-agent factory can't fulfill
             // it (e.g. group-chat persona members use `SubAgentFactoryNone`).
             // Otherwise the model decides to delegate a subtask, the loop emits
@@ -6101,6 +6364,16 @@ impl AgentLoop {
             // `switch_paradigm` is independent of the factory, so it stays.
             if self.sub_agent_factory.available_kinds().is_empty() {
                 meta.retain(|d| d.name != crate::meta_tool::TOOL_DELEGATE);
+                // No factory ⇒ no background delegation either.
+                meta.retain(|d| !crate::meta_tool::is_loop_only_meta_tool(&d.name));
+            }
+            // Phase 2A: the three background-delegation tools
+            // (`delegate_background` / `task_status` / `collect_results`)
+            // are advertised only while the AsyncTaskRunner is configured.
+            // A loop without background delegation must not offer the model
+            // tools it can't honor.
+            if self.async_task_runner.is_none() {
+                meta.retain(|d| !crate::meta_tool::is_loop_only_meta_tool(&d.name));
             }
             // `switch_project` only makes sense when at least one context
             // source is path-bound (a DomainPack is active). On a no-domain
@@ -6109,6 +6382,15 @@ impl AgentLoop {
             if !self.context_assembler.read().await.has_path_bound_sources() {
                 meta.retain(|d| d.name != crate::meta_tool::TOOL_SWITCH_PROJECT);
             }
+            // Phase 2A diagnostic: log which meta-tools are advertised so a
+            // missing-from-schema report can be distinguished from the model
+            // merely failing to enumerate them in chat.
+            tracing::debug!(
+                meta_tools = ?meta.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
+                runner_present = self.async_task_runner.is_some(),
+                factory_kinds = self.sub_agent_factory.available_kinds().len(),
+                "meta-tools advertised this iteration"
+            );
             all.append(&mut meta);
         }
         all
@@ -6231,6 +6513,45 @@ impl AgentLoop {
                      {list}\n\n\
                      Review their definitions above; use one if it helps complete \
                      the task. There is no obligation to call them."
+                )));
+            }
+        }
+        // ── Phase 2A: live background-task status ───────────────────────
+        // The model delegated subtasks to detached background sub-agents
+        // (fire-and-auto-notify). Without a live status block it can't tell
+        // which are still running and re-delegates the same work in a loop
+        // (see /tmp/oneai-web.log: iter2 saw only its own "Launched" text and
+        // re-issued `gomoku_board_2`, `_review`, …). Injecting the runner's
+        // task snapshot each iteration gives the model the visibility it needs
+        // to either continue with DIFFERENT non-overlapping work (preserving
+        // the parallel main+sub execution) or, if idle, end its response and
+        // be auto-resumed when results arrive. Ephemeral — not written to the
+        // durable log (same as the new-tools note above).
+        if let Some(runner) = &self.async_task_runner {
+            let snapshot = runner.snapshot_with_meta().await;
+            if !snapshot.is_empty() {
+                let body = snapshot
+                    .iter()
+                    .map(|(id, kind, desc, st)| {
+                        // Char-boundary-safe trim so CJK task descriptions stay valid.
+                        let trimmed: String = if desc.chars().count() > 80 {
+                            let taken: String = desc.chars().take(77).collect();
+                            format!("{taken}…")
+                        } else {
+                            desc.clone()
+                        };
+                        format!("- `{id}` ({}, {}): {}", kind.name(), st.label(), trimmed)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                conv.add_message(Message::system(format!(
+                    "[Background tasks] (live)\n{body}\n\
+                     These sub-agents are running detached in PARALLEL with you. You WILL be \
+                     auto-resumed (a new turn) when each finishes — its result will arrive as a \
+                     new message. DO NOT re-delegate any task listed above as `Running` or \
+                     `Completed`; that is wasted duplicate work. Instead, continue with \
+                     DIFFERENT non-overlapping work now (you have all tools), or if you have \
+                     nothing else to do, end your response and the results will wake you."
                 )));
             }
         }
@@ -6951,8 +7272,16 @@ impl AgentLoopGraphActionExecutor {
         // SwitchProject`, which the graph executor (oneai-core `GraphDecision`)
         // doesn't model. Filter it so a StateGraph LlmInfer node doesn't
         // advertise a meta-tool it can't honor.
-        let mut meta = crate::meta_tool::meta_tool_definitions();
-        meta.retain(|d| d.name != crate::meta_tool::TOOL_SWITCH_PROJECT);
+        // `switch_project` and the three Phase 2A background-delegation tools
+        // are loop-only: they rely on `AgentDecision::SwitchProject` /
+        // `DelegateBackground` / `TaskStatus` / `CollectResults`, which the
+        // graph executor (oneai-core `GraphDecision`) doesn't model. Filter
+        // them so a StateGraph LlmInfer node doesn't advertise meta-tools it
+        // can't honor.
+        // The graph executor has no AsyncTaskRunner, so it advertises `delegate`
+        // foreground-only (background mode omitted via meta_tool_definitions(false)).
+        let mut meta = crate::meta_tool::meta_tool_definitions(false);
+        meta.retain(|d| !crate::meta_tool::is_loop_only_meta_tool(&d.name));
         defs.append(&mut meta);
         defs
     }
@@ -7298,7 +7627,7 @@ mod dynamic_tool_prompt_tests {
         fn on_direct_answer(&self, _: &str) {}
         fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
         fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
-        fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+        fn on_delegate(&self, _: &str, _: &str, _: &SubAgentKind) {}
         fn on_paradigm_switch(&self, _: ParadigmKind) {}
         fn on_checkpoint(&self, _: usize) {}
         fn on_complete(&self, _: &AgentLoopResult) {}

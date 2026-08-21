@@ -66,6 +66,24 @@ export interface BusSubAgentNode {
   completed: boolean
 }
 
+/** A background (or foreground) delegated sub-agent tracked across turns.
+ *  Unlike `SubagentNode` (turn-scoped, cleared at turn boundaries), this slice
+ *  persists across turns so a background sub-agent's lifecycle — launched in
+ *  turn A, completes in turn B — stays visible. Matched by `task_id`. */
+export interface BackgroundTaskNode {
+  taskId: string
+  turnId: string
+  task: string
+  agentKind: BusSubAgentKind
+  status: 'active' | 'done' | 'failed'
+  iteration?: number
+  paradigm?: string
+  lastTool?: string
+  lastToolSnapshot?: string
+  usage?: { prompt: number; completion: number }
+  summary?: BusSubAgentNode
+}
+
 /** A working-state step, normalized for the goal bar. */
 export interface GoalStep {
   id: string

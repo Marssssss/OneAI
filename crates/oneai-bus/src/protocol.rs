@@ -65,6 +65,28 @@ pub struct BusSubAgent {
     pub tokens_used: u32,
 }
 
+/// Serializable mirror of `oneai_agent::DelegateProgressEvent` — coarse mid-run
+/// progress from a delegated (incl. background) sub-agent. Only the high-signal
+/// events a parent/UI cares about; full per-token streams stay inside the
+/// sub-agent. ← `on_delegate_progress`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum BusDelegateProgress {
+    /// The sub-agent started a new iteration under `paradigm`.
+    IterationStart {
+        iteration: usize,
+        paradigm: BusParadigmKind,
+    },
+    /// A tool finished inside the sub-agent. `snapshot` is a short result
+    /// preview (truncated) — not the full output.
+    ToolResult { tool_name: String, snapshot: String },
+    /// Token usage after a sub-agent inference.
+    TokenUsage { prompt: u32, completion: u32 },
+    /// The sub-agent was cancelled (parent interrupt propagated).
+    Cancelled,
+}
+
 /// Serializable projection of `oneai_agent::AgentLoopResult` (mirrors
 /// `oneai_supervisor::TurnSummary`'s field set — the high-level fields a
 /// frontend needs; full `Conversation`/`GlobalState` are not `Serialize`).
@@ -773,15 +795,29 @@ pub enum EngineYield {
     /// Model delegated to a sub-agent. ← `on_delegate`.
     Delegate {
         turn_id: String,
+        task_id: String,
         task: String,
         agent_kind: BusSubAgentKind,
         speaker: Option<String>,
     },
-    /// A delegated sub-agent finished. ← `on_delegate_complete`.
+    /// A delegated sub-agent finished. ← `on_delegate_complete`. Also emitted
+    /// by the background-completion sink so a background sub-agent's card is
+    /// marked done (the result still arrives separately as a `UserMessage`).
     DelegateComplete {
         turn_id: String,
+        task_id: String,
         summary: BusSubAgent,
         speaker: Option<String>,
+    },
+    /// Mid-run progress from a delegated (incl. background) sub-agent —
+    /// iteration / tool-result snapshot / token usage. ← `on_delegate_progress`.
+    /// `task_id` matches the `Delegate` event's so a frontend can fan it onto
+    /// the right sub-agent card across turns.
+    DelegateProgress {
+        turn_id: String,
+        task_id: String,
+        agent_kind: BusSubAgentKind,
+        event: BusDelegateProgress,
     },
     /// A group-chat member's turn is starting. Emitted by the group-chat bus
     /// observer's `on_speaker_turn` before that member's fragment yields, so a
@@ -964,12 +1000,14 @@ mod tests {
             },
             EngineYield::Delegate {
                 turn_id: "t".into(),
+                task_id: "d1".into(),
                 task: "".into(),
                 agent_kind: BusSubAgentKind::Plan,
                 speaker: None,
             },
             EngineYield::DelegateComplete {
                 turn_id: "t".into(),
+                task_id: "d1".into(),
                 summary: BusSubAgent {
                     completed: true,
                     summary: String::new(),
@@ -980,14 +1018,27 @@ mod tests {
                 },
                 speaker: None,
             },
+            EngineYield::DelegateProgress {
+                turn_id: "t".into(),
+                task_id: "d1".into(),
+                agent_kind: BusSubAgentKind::Plan,
+                event: BusDelegateProgress::IterationStart {
+                    iteration: 1,
+                    paradigm: BusParadigmKind::ReAct,
+                },
+            },
         ];
         for f in &fragments {
-            // Round-trips and still has a `speaker` JSON key.
+            // Round-trips. Most variants also carry a `speaker` JSON key;
+            // `DelegateProgress` is a mid-run progress event, not a speech
+            // act, so it deliberately has no speaker — skip that sub-check.
             let line = serde_json::to_string(f).unwrap();
-            assert!(
-                line.contains(r#""speaker""#),
-                "variant lost speaker field: {line}"
-            );
+            if !matches!(f, EngineYield::DelegateProgress { .. }) {
+                assert!(
+                    line.contains(r#""speaker""#),
+                    "variant lost speaker field: {line}"
+                );
+            }
             let _ = serde_json::from_str::<EngineYield>(&line).unwrap();
         }
     }
