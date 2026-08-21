@@ -100,7 +100,65 @@ impl ContextAssembler {
         // what the compressor did to the prior assembly.
         self.inject_sources(&mut conversation, |_policy, _key| true);
 
+        // Per-iteration lossless truncation of STALE tool results (gap-analysis
+        // follow-up): old large tool outputs (a 16k web page from 3 iterations
+        // ago) stop being re-processed every iteration. Only the ephemeral
+        // inference copy is trimmed — the durable log keeps full outputs.
+        self.truncate_stale_tool_results(&mut conversation);
+
         Ok(conversation)
+    }
+
+    /// Per-iteration lossless truncation of STALE tool results on the ephemeral
+    /// inference copy. The durable log keeps full outputs; only the per-request
+    /// assembly is trimmed so old large tool results (e.g. a 16k web page from
+    /// 3 iterations ago) stop being re-processed every iteration. The last
+    /// `KEEP_FULL_RECENT` tool results stay full (the active batch + recent
+    /// reference); older ones over `MAX_STALE_TOOL_RESULT_CHARS` are capped to a
+    /// snippet + a pointer. Idempotent + no-op on short results / small convs.
+    ///
+    /// `memory_search` only searches archived facts, not raw tool outputs, so
+    /// the pointer tells the model to re-run the tool for the full output (the
+    /// durable transcript has it, but it's not in context anymore) — never a
+    /// false "use memory_search" promise. Assistant/user/system messages are
+    /// never touched (the model's own prior reasoning/output must stay intact).
+    fn truncate_stale_tool_results(&self, conversation: &mut Conversation) {
+        const MAX_STALE_TOOL_RESULT_CHARS: usize = 2000;
+        const KEEP_FULL_RECENT: usize = 4;
+
+        // Indexes of Tool-role messages, in order.
+        let tool_idx: Vec<usize> = conversation
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == oneai_core::Role::Tool)
+            .map(|(i, _)| i)
+            .collect();
+        if tool_idx.len() <= KEEP_FULL_RECENT {
+            return; // nothing stale — small conversation, leave it alone.
+        }
+        let stale_count = tool_idx.len() - KEEP_FULL_RECENT;
+        for &i in tool_idx.iter().take(stale_count) {
+            for block in &mut conversation.messages[i].content {
+                if let oneai_core::ContentBlock::ToolResult {
+                    call_id: _,
+                    content,
+                } = block
+                {
+                    // Count first (releases the immutable borrow) before the
+                    // mutable assign below. `chars().take()` keeps UTF-8
+                    // boundaries safe.
+                    if content.chars().count() > MAX_STALE_TOOL_RESULT_CHARS {
+                        let cut: String =
+                            content.chars().take(MAX_STALE_TOOL_RESULT_CHARS).collect();
+                        *content = format!(
+                            "{cut}\n[...truncated — full output is in the session transcript; \
+                             re-run the tool to retrieve it in full]"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Inject context-source messages into the conversation, filtered by `predicate`.
@@ -636,5 +694,124 @@ mod tests {
         let state3 = LoopState::new("task3");
         let text_b = text_of(&ca.assemble(&state3).unwrap());
         assert!(text_b.contains("ctx-for:/proj-b"));
+    }
+
+    // ─── Stale tool-result truncation (per-iteration, ephemeral) ──────────────
+
+    /// Helper: a Tool message with a single ToolResult block of `n` 'x' chars.
+    fn tool_msg(n: usize) -> oneai_core::Message {
+        oneai_core::Message::tool_result("call".to_string(), "x".repeat(n))
+    }
+
+    fn tool_content(m: &oneai_core::Message) -> &str {
+        match &m.content[0] {
+            oneai_core::ContentBlock::ToolResult { content, .. } => content,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn truncates_stale_tool_results_keeps_last_n_full() {
+        // 6 tool results, each 5000 chars. The last 4 stay full; the first 2
+        // are capped to ~2000 chars + a pointer.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        for _ in 0..6 {
+            conv.add_message(tool_msg(5000));
+        }
+        let ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        let tools: Vec<&oneai_core::Message> = conv
+            .messages
+            .iter()
+            .filter(|m| m.role == oneai_core::Role::Tool)
+            .collect();
+        assert_eq!(tools.len(), 6);
+        // Last 4: full (5000 'x').
+        for t in &tools[2..] {
+            assert_eq!(
+                tool_content(t).len(),
+                5000,
+                "recent tool result must stay full"
+            );
+        }
+        // First 2 (stale): truncated.
+        for t in &tools[0..2] {
+            let c = tool_content(t);
+            assert!(
+                c.contains("[...truncated"),
+                "stale result must be truncated"
+            );
+            assert!(c.len() < 5000, "stale result must be shorter than original");
+            // Snippet is 2000 'x' + the pointer line; verify the head survived.
+            assert!(c.starts_with(&"x".repeat(100)), "snippet head preserved");
+        }
+    }
+
+    #[test]
+    fn leaves_short_tool_results_untouched() {
+        // 6 tool results, each 500 chars — all under the 2000 cap → no truncation.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        for _ in 0..6 {
+            conv.add_message(tool_msg(500));
+        }
+        let ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        for m in &conv.messages {
+            assert_eq!(tool_content(m).len(), 500, "short result must be untouched");
+            assert!(!tool_content(m).contains("[...truncated"));
+        }
+    }
+
+    #[test]
+    fn no_truncation_when_fewer_than_keep_full() {
+        // 3 tool results (≤ KEEP_FULL_RECENT=4) → nothing is stale → no truncation.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        for _ in 0..3 {
+            conv.add_message(tool_msg(5000));
+        }
+        let ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        for m in &conv.messages {
+            assert_eq!(tool_content(m).len(), 5000, "≤4 tool results → all full");
+        }
+    }
+
+    #[test]
+    fn does_not_touch_assistant_or_user_messages() {
+        // A large assistant Text block must survive even when stale tool results
+        // around it are truncated — the model's own reasoning/output is never cut.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        conv.add_message(oneai_core::Message::assistant("a".repeat(8000)));
+        for _ in 0..6 {
+            conv.add_message(tool_msg(5000));
+        }
+        conv.add_message(oneai_core::Message::user("b".repeat(8000)));
+        let ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        // Assistant + user Text blocks untouched (still 8000 chars each).
+        let assistant_text = conv
+            .messages
+            .iter()
+            .find(|m| m.role == oneai_core::Role::Assistant)
+            .and_then(|m| match &m.content[0] {
+                oneai_core::ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            assistant_text.len(),
+            8000,
+            "assistant text must not be truncated"
+        );
+        let user_text = conv
+            .messages
+            .iter()
+            .find(|m| m.role == oneai_core::Role::User)
+            .and_then(|m| match &m.content[0] {
+                oneai_core::ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(user_text.len(), 8000, "user text must not be truncated");
     }
 }
