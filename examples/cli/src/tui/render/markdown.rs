@@ -538,7 +538,14 @@ fn syntect_highlight(lang: &str, content: &str) -> Vec<Vec<Span<'static>>> {
 /// Render a table with aligned columns and box-drawing borders.
 ///
 /// Uses Unicode box-drawing characters for borders and aligns column content
-/// based on the maximum column width (including header).
+/// based on the maximum column width (including header). When the table is
+/// wider than `max_width`, columns are shrunk proportionally (min 1) and the
+/// total is guaranteed to fit `max_width`. Cell content that overflows its
+/// (possibly shrunk) column wraps *within the column* — continuation lines are
+/// rendered with the leading border + preceding columns (empty/padded) + the
+/// column separator prepended, so a wide cell wraps under its own column
+/// instead of spilling into the first column / wrapping at the screen edge
+/// (issue #32).
 fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> Vec<Line<'static>> {
     if headers.is_empty() {
         return vec![Line::from(Span::styled(
@@ -549,8 +556,8 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
 
     let num_cols = headers.len();
 
-    // Calculate column widths: max of header width and all row cell widths
-    let col_widths: Vec<usize> = (0..num_cols)
+    // Desired column widths: max of header width and all row cell widths.
+    let desired: Vec<usize> = (0..num_cols)
         .map(|col_idx| {
             let header_w = headers.get(col_idx).map(|h| h.width()).unwrap_or(0);
             let max_row_w = rows
@@ -562,112 +569,359 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
         })
         .collect();
 
-    // Calculate total table width: borders + separators + content
-    // │ col1 │ col2 │ col3 │ = total_border + total_content + col_separators
-    let total_content_width = col_widths.iter().sum::<usize>();
-    let total_table_width = total_content_width + num_cols + 1 + 2 * num_cols; // borders + separators + padding
-                                                                               // If table is too wide, shrink columns proportionally
-    let available = max_width.saturating_sub(2); // subtract "│ " left border
-    let col_widths = if total_table_width > max_width && available > 0 {
-        // Distribute available width across columns proportionally
-        let ratio = available as f64 / (total_content_width + num_cols + 1 + 2 * num_cols) as f64;
-        col_widths
-            .iter()
-            .map(|w| ((*w as f64 * ratio) as usize).max(3))
-            .collect::<Vec<usize>>()
+    // Fit the table to max_width. A rendered row is, per column, `║ ` + content(w)
+    // + ` ║ ` separators + ` ║` end ⇒ overhead = 3*num_cols + 1 (verified against
+    // the span layout below). Shrinking to fit guarantees no row exceeds the
+    // terminal width — without it, an over-wide row wraps at the screen edge
+    // from column 0 (the #32 bug at the row level).
+    let overhead = 3 * num_cols + 1;
+    let available = max_width.saturating_sub(overhead);
+    let col_widths: Vec<usize> = if available == 0 {
+        // Too narrow to lay out columns — give each the minimum so wrapping
+        // still keeps content inside its own cell rather than across the row.
+        vec![1; num_cols]
     } else {
-        col_widths
+        let total_desired: usize = desired.iter().sum();
+        if total_desired <= available {
+            desired.clone()
+        } else {
+            // Proportional shrink with a floor of 1, then greedily trim the
+            // widest column until the sum fits `available` exactly.
+            let mut ws: Vec<usize> = desired
+                .iter()
+                .map(|w| {
+                    let scaled =
+                        ((*w as f64) * (available as f64) / (total_desired as f64)) as usize;
+                    scaled.max(1)
+                })
+                .collect();
+            let mut sum: usize = ws.iter().sum();
+            while sum > available {
+                // Decrement the widest column that can still shrink.
+                let target = ws
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, v)| *v)
+                    .map(|(i, _)| i);
+                match target {
+                    Some(i) if ws[i] > 1 => {
+                        ws[i] -= 1;
+                        sum -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            ws
+        }
     };
+
+    // Wrap each header + data cell to its column width (word-aware, char-split
+    // for over-long words). A wrapped cell yields 1+ lines; rows render as many
+    // lines as their tallest cell, with shorter cells padding continuation lines
+    // to keep the separator grid aligned.
+    let header_wrapped: Vec<Vec<String>> = headers
+        .iter()
+        .zip(col_widths.iter())
+        .map(|(h, w)| wrap_cell(h, *w))
+        .collect();
+    let rows_wrapped: Vec<Vec<Vec<String>>> = rows
+        .iter()
+        .map(|row| {
+            col_widths
+                .iter()
+                .enumerate()
+                .map(|(i, w)| wrap_cell(row.get(i).map(|s| s.as_str()).unwrap_or(""), *w))
+                .collect()
+        })
+        .collect();
 
     let mut lines = Vec::new();
 
-    // Header separator line: ╔══════╦══════╗
-    let mut top_line_spans = vec![Span::styled("╔", Style::default().fg(HEADLINE_COLOR))];
-    for (i, w) in col_widths.iter().enumerate() {
-        top_line_spans.push(Span::styled(
-            "═".repeat(*w + 2),
-            Style::default().fg(HEADLINE_COLOR),
-        ));
-        if i < num_cols - 1 {
-            top_line_spans.push(Span::styled("╦", Style::default().fg(HEADLINE_COLOR)));
-        }
-    }
-    top_line_spans.push(Span::styled("╗", Style::default().fg(HEADLINE_COLOR)));
-    lines.push(Line::from(top_line_spans));
+    // Top border: ╔══════╦══════╗
+    lines.push(table_border_line(&col_widths, '╔', '╦', '╗'));
 
-    // Header row: │ col1 │ col2 │
-    let mut header_spans = vec![Span::styled("║ ", Style::default().fg(HEADLINE_COLOR))];
-    for (i, (header, w)) in headers.iter().zip(col_widths.iter()).enumerate() {
-        let padding = w.saturating_sub(header.width());
-        header_spans.push(Span::styled(
-            header.clone(),
-            Style::default()
-                .fg(HEADLINE_COLOR)
-                .add_modifier(Modifier::BOLD),
-        ));
-        header_spans.push(Span::styled(
-            " ".repeat(padding),
-            Style::default().fg(HEADLINE_COLOR),
-        ));
-        if i < num_cols - 1 {
-            header_spans.push(Span::styled(" ║ ", Style::default().fg(HEADLINE_COLOR)));
-        }
+    // Header row (possibly multi-line). BOLD + HEADLINE_COLOR content,
+    // HEADLINE_COLOR separators.
+    let header_lines = wrapped_line_count(&header_wrapped);
+    for li in 0..header_lines {
+        lines.push(table_content_line(&header_wrapped, li, &col_widths, true));
     }
-    header_spans.push(Span::styled(" ║", Style::default().fg(HEADLINE_COLOR)));
-    lines.push(Line::from(header_spans));
 
     // Header-data separator: ╠══════╬══════╣
-    let mut sep_spans = vec![Span::styled("╠", Style::default().fg(HEADLINE_COLOR))];
-    for (i, w) in col_widths.iter().enumerate() {
-        sep_spans.push(Span::styled(
-            "═".repeat(*w + 2),
-            Style::default().fg(HEADLINE_COLOR),
-        ));
-        if i < num_cols - 1 {
-            sep_spans.push(Span::styled("╬", Style::default().fg(HEADLINE_COLOR)));
-        }
-    }
-    sep_spans.push(Span::styled("╣", Style::default().fg(HEADLINE_COLOR)));
-    lines.push(Line::from(sep_spans));
+    lines.push(table_border_line(&col_widths, '╠', '╬', '╣'));
 
-    // Data rows: │ val │ val │
-    for row in rows {
-        let mut row_spans = vec![Span::styled("║ ", Style::default().fg(ASSISTANT_COLOR))];
-        for (i, w) in col_widths.iter().enumerate() {
-            let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
-            let padding = w.saturating_sub(cell.width());
-            row_spans.push(Span::styled(
-                cell.to_string(),
-                Style::default().fg(ASSISTANT_COLOR),
-            ));
-            row_spans.push(Span::styled(
-                " ".repeat(padding),
-                Style::default().fg(ratatui::style::Color::Reset),
-            ));
-            if i < num_cols - 1 {
-                row_spans.push(Span::styled(" ║ ", Style::default().fg(CODE_BLOCK_BORDER)));
-            }
+    // Data rows (each possibly multi-line). ASSISTANT_COLOR content,
+    // CODE_BLOCK_BORDER separators.
+    for row_wrapped in &rows_wrapped {
+        let n = wrapped_line_count(row_wrapped);
+        for li in 0..n {
+            lines.push(table_content_line(row_wrapped, li, &col_widths, false));
         }
-        row_spans.push(Span::styled(" ║", Style::default().fg(CODE_BLOCK_BORDER)));
-        lines.push(Line::from(row_spans));
     }
 
     // Bottom border: ╚══════╩══════╝
-    let mut bottom_spans = vec![Span::styled("╚", Style::default().fg(HEADLINE_COLOR))];
-    for (i, w) in col_widths.iter().enumerate() {
-        bottom_spans.push(Span::styled(
-            "═".repeat(*w + 2),
-            Style::default().fg(HEADLINE_COLOR),
-        ));
-        if i < num_cols - 1 {
-            bottom_spans.push(Span::styled("╩", Style::default().fg(HEADLINE_COLOR)));
-        }
-    }
-    bottom_spans.push(Span::styled("╝", Style::default().fg(HEADLINE_COLOR)));
-    lines.push(Line::from(bottom_spans));
+    lines.push(table_border_line(&col_widths, '╚', '╩', '╝'));
 
     // Blank line after table
     lines.push(Line::from(Span::raw("")));
 
     lines
+}
+
+/// Build a box-drawing border line (`╔═══╦═══╗` etc.) sized to `col_widths`.
+/// Each column slot is `w + 2` (content + 1 space padding each side).
+fn table_border_line(col_widths: &[usize], left: char, mid: char, right: char) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        left.to_string(),
+        Style::default().fg(HEADLINE_COLOR),
+    )];
+    for (i, w) in col_widths.iter().enumerate() {
+        spans.push(Span::styled(
+            "═".repeat(*w + 2),
+            Style::default().fg(HEADLINE_COLOR),
+        ));
+        if i < col_widths.len() - 1 {
+            spans.push(Span::styled(
+                mid.to_string(),
+                Style::default().fg(HEADLINE_COLOR),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        right.to_string(),
+        Style::default().fg(HEADLINE_COLOR),
+    ));
+    Line::from(spans)
+}
+
+/// Build one content line of a row (header or data) at wrapped-line index `li`.
+/// Each column contributes `cols[i].get(li)` (or empty on a continuation line),
+/// padded to `col_widths[i]`, separated by ` ║ ` (right border ` ║`). Header
+/// cells use HEADLINE_COLOR+BOLD; data cells use ASSISTANT_COLOR; header
+/// separators are HEADLINE_COLOR, data separators CODE_BLOCK_BORDER — matching
+/// the pre-wrap styling.
+fn table_content_line(
+    cols: &[Vec<String>],
+    li: usize,
+    col_widths: &[usize],
+    is_header: bool,
+) -> Line<'static> {
+    let content_color = if is_header {
+        HEADLINE_COLOR
+    } else {
+        ASSISTANT_COLOR
+    };
+    let sep_color = if is_header {
+        HEADLINE_COLOR
+    } else {
+        CODE_BLOCK_BORDER
+    };
+    let mut spans = vec![Span::styled("║ ", Style::default().fg(sep_color))];
+    for (i, w) in col_widths.iter().enumerate() {
+        let chunk = cols
+            .get(i)
+            .and_then(|c| c.get(li))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let padding = w.saturating_sub(chunk.width());
+        let mut style = Style::default().fg(content_color);
+        if is_header {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(chunk.to_string(), style));
+        spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().fg(ratatui::style::Color::Reset),
+        ));
+        if i < col_widths.len() - 1 {
+            spans.push(Span::styled(" ║ ", Style::default().fg(sep_color)));
+        }
+    }
+    spans.push(Span::styled(" ║", Style::default().fg(sep_color)));
+    Line::from(spans)
+}
+
+/// Number of display lines a wrapped row occupies (max across its cells, min 1
+/// so even an all-empty row still emits one line).
+fn wrapped_line_count(cols: &[Vec<String>]) -> usize {
+    cols.iter().map(|c| c.len()).max().unwrap_or(0).max(1)
+}
+
+/// Wrap `text` to fit within `width` display cells. Word-aware (splits on
+/// ASCII whitespace, keeps words intact when they fit); a single word longer
+/// than `width` is hard-split char by char (width-aware, so CJK/counted
+/// correctly). `width == 0` yields a single empty line (the caller clamps
+/// column widths to ≥ 1, so this is just a safety net).
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    // Split on ASCII whitespace while preserving it as soft break points; words
+    // themselves are never broken unless they exceed `width`.
+    for word in text.split(' ') {
+        let word_w = word.width();
+        if word_w > width {
+            // The word alone overflows — flush the current line, then hard-split
+            // the word char by char across as many lines as needed.
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            let mut piece = String::new();
+            let mut piece_w = 0usize;
+            for ch in word.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if piece_w + cw > width && !piece.is_empty() {
+                    out.push(std::mem::take(&mut piece));
+                    piece_w = 0;
+                }
+                piece.push(ch);
+                piece_w += cw;
+            }
+            if !piece.is_empty() {
+                cur = piece;
+                cur_w = piece_w;
+            }
+        } else if cur_w == 0 {
+            cur.push_str(word);
+            cur_w = word_w;
+        } else if cur_w + 1 + word_w <= width {
+            cur.push(' ');
+            cur.push_str(word);
+            cur_w += 1 + word_w;
+        } else {
+            out.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_w = word_w;
+        }
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn visual_width(s: &str) -> usize {
+        s.width()
+    }
+
+    #[test]
+    fn wrap_cell_word_aware() {
+        assert_eq!(
+            wrap_cell("hello world", 5),
+            vec!["hello".to_string(), "world".to_string()]
+        );
+        // Words that fit together stay on one line.
+        assert_eq!(wrap_cell("ab cd", 5), vec!["ab cd".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_hard_splits_overlong_word() {
+        // width 4, word 10 chars → 3 lines (4+4+2).
+        assert_eq!(
+            wrap_cell("abcdefghij", 4),
+            vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrap_cell_zero_width_is_empty_line() {
+        assert_eq!(wrap_cell("x", 0), vec!["".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_empty_yields_one_empty_line() {
+        assert_eq!(wrap_cell("", 5), vec!["".to_string()]);
+    }
+
+    #[test]
+    fn table_overflow_wraps_within_column_with_separators() {
+        // A single 10-char cell in column 0; max_width forces that column to
+        // shrink to 4, so the cell must wrap inside its column.
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![vec!["xxxxxxxxxx".to_string(), "y".to_string()]];
+        let lines = render_table(&headers, &rows, 12);
+
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        // Every rendered line is a proper table line (begins with a box char),
+        // never wrapping from column 0 of the screen (issue #32).
+        for t in &texts {
+            if t.is_empty() {
+                continue;
+            }
+            let first = t.chars().next().unwrap();
+            assert!(
+                matches!(first, '║' | '╔' | '╠' | '╚'),
+                "line should start with a box char, got: {t:?}"
+            );
+            // No line exceeds the terminal width.
+            assert!(
+                visual_width(t) <= 12,
+                "line overflows max_width: {t:?} (w={})",
+                visual_width(t)
+            );
+        }
+
+        // The wide cell wraps to 3 continuation lines (chunks xxxx / xxxx /
+        // xx), each carrying the `║` separator grid (so it stays inside column
+        // 0, not the first column).
+        let data_lines: Vec<&String> = texts
+            .iter()
+            .filter(|t| t.starts_with('║') && t.contains('x'))
+            .collect();
+        assert_eq!(
+            data_lines.len(),
+            3,
+            "expected 3 wrapped lines for the 10-char cell"
+        );
+        for dl in &data_lines {
+            assert!(
+                dl.contains(" ║ "),
+                "wrapped line must keep the column separator: {dl}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_fits_when_narrow() {
+        // Many columns, tiny width — must still fit and not overflow the row.
+        let headers = vec!["h1".to_string(), "h2".to_string(), "h3".to_string()];
+        let rows = vec![vec![
+            "longvalue1".to_string(),
+            "longvalue2".to_string(),
+            "longvalue3".to_string(),
+        ]];
+        let lines = render_table(&headers, &rows, 16);
+        for line in &lines {
+            let t = line_text(line);
+            if t.is_empty() {
+                continue;
+            }
+            assert!(
+                visual_width(&t) <= 16,
+                "overflow: {t:?} (w={})",
+                visual_width(&t)
+            );
+        }
+    }
+
+    #[test]
+    fn table_empty_headers() {
+        let lines = render_table(&[], &[], 40);
+        assert_eq!(line_text(&lines[0]), "(empty table)");
+    }
 }
