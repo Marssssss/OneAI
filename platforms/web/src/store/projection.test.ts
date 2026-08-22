@@ -414,3 +414,66 @@ describe('ProjectionStore session metrics (#35)', () => {
     expect(m.totalPrompt).toBe(100)
   })
 })
+
+describe('ProjectionStore error banner (#34)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('a turn error shows as a chat node but does NOT set the header banner (no duplication)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({ kind: 'stream_chunk', turn_id: 't1', text: 'hel', speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    // Engine emits an error yield on interrupt (non-recoverable → turn ends).
+    y({ kind: 'error', message: 'Agent interrupted during inference.', recoverable: false })
+    const snap = store.getSnapshot()
+    // The message IS visible — as an in-conversation error node.
+    expect(snap.nodes.some((n) => n.kind === 'error' && n.text === 'Agent interrupted during inference.')).toBe(true)
+    // …but NOT duplicated in the header banner.
+    expect(snap.lastError).toBe(null)
+    expect(snap.turnActive).toBe(false)
+  })
+
+  it('clears a stale header error on session switch (issue #34)', async () => {
+    // A rejecting rpc makes an action (compact) fail → lastError is set + emit
+    // fires, so the snapshot genuinely carries the error before the switch.
+    const rejectingRpc = (): OneAiRpcClient => ({
+      onEvent: () => () => {},
+      onStatus: () => () => {},
+      getStatus: () => 'closed' as const,
+      call: () => Promise.reject(new Error('rpc failed')),
+    } as unknown as OneAiRpcClient)
+    const store = new ProjectionStore(rejectingRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    await store.compact(5)
+    expect(store.getSnapshot().lastError).not.toBe(null)
+    // Switching to another session must clear the stale banner — it does not
+    // belong to the session being switched to.
+    y({ kind: 'session_loaded', id: 'B', messages: [] })
+    expect(store.getSnapshot().lastError).toBe(null)
+    // A fresh /clear of the live session clears it too.
+    await store.compact(5)
+    expect(store.getSnapshot().lastError).not.toBe(null)
+    y({ kind: 'session_cleared', id: 'B' })
+    expect(store.getSnapshot().lastError).toBe(null)
+  })
+
+  it('clears a stale header error when a new turn starts', async () => {
+    const rejectingRpc = (): OneAiRpcClient => ({
+      onEvent: () => () => {},
+      onStatus: () => () => {},
+      getStatus: () => 'closed' as const,
+      call: () => Promise.reject(new Error('rpc failed')),
+    } as unknown as OneAiRpcClient)
+    const store = new ProjectionStore(rejectingRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    await store.compact(5)
+    expect(store.getSnapshot().lastError).not.toBe(null)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    expect(store.getSnapshot().lastError).toBe(null)
+  })
+})

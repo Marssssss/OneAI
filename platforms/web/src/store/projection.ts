@@ -727,6 +727,10 @@ export class ProjectionStore {
       case 'turn_start': {
         this.state.currentTurnId = y.turn_id
         this.state.turnActive = true
+        // A new turn supersedes any stale operational error (e.g. a prior
+        // action's RPC failure surfaced in the header banner) — clear it so
+        // the banner doesn't linger across turns (issue #34).
+        this.state.lastError = null
         this.state.turnStartPerf.set(y.turn_id, performance.now())
         this.state.turnEndPerf.delete(y.turn_id)
         this.state.turnIterations.set(y.turn_id, 0)
@@ -1028,7 +1032,11 @@ export class ProjectionStore {
         break
       }
       case 'error': {
-        this.state.lastError = y.message
+        // A turn-level error is surfaced as an in-conversation error node
+        // (appended below) — do NOT also set `lastError` (the header banner),
+        // or the same message shows twice (issue #34). `lastError` stays
+        // reserved for non-conversational failures (RPC/action errors) that
+        // have no chat node of their own.
         // Mark streaming nodes for the current turn as errored; always add an
         // error node so the message is visible.
         this.state.nodes = [
@@ -1063,6 +1071,7 @@ export class ProjectionStore {
         this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = []
+        this.state.lastError = null
         this.resetLedgers()
         this.restoreBaseline(y.id)
         this.emitNow()
@@ -1077,6 +1086,7 @@ export class ProjectionStore {
         this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
+        this.state.lastError = null
         this.resetLedgers()
         this.restoreBaseline(y.id)
         // Reloaded messages replay without a turn_id (Message doesn't persist
@@ -1094,6 +1104,7 @@ export class ProjectionStore {
         this.state.sessionId = y.id
         this.state.nodes = []
         this.state.currentSpeaker = null
+        this.state.lastError = null
         this.metricsCache.delete(y.id)
         this.resetLedgers()
         this.restoreBaseline(y.id)
@@ -1107,6 +1118,7 @@ export class ProjectionStore {
           this.state.sessionId = null
           this.state.nodes = []
           this.state.currentSpeaker = null
+          this.state.lastError = null
           this.metricsCache.delete(y.id)
           this.resetLedgers()
           this.restoreBaseline(null)
