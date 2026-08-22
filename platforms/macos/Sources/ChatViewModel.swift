@@ -422,8 +422,27 @@ final class ChatViewModel: ObservableObject {
     /// renders the overlay layer on top. See `AppOverlay`.
     @Published var overlay: AppOverlay? = nil
 
+    /// First-run onboarding (issue #33): the "添加一个 API Key 开始使用"
+    /// banner shows once while `needsKeyConfig`; once dismissed (× or by
+    /// opening settings) the flag is persisted to UserDefaults so it never
+    /// nags on subsequent launches.
+    @Published var onboardingDismissed: Bool = false
+
     var needsKeyConfig: Bool {
         (kind == "openai" || kind == "anthropic") && apiKey.isEmpty
+    }
+
+    /// Show the first-run onboarding banner only on the very first encounter
+    /// (no key configured AND not yet dismissed).
+    var showOnboarding: Bool {
+        needsKeyConfig && !onboardingDismissed
+    }
+
+    /// Permanently dismiss the first-run banner (persists across launches).
+    func dismissOnboarding() {
+        guard !onboardingDismissed else { return }
+        onboardingDismissed = true
+        UserDefaults.standard.set(true, forKey: "oneai_onboarding_dismissed")
     }
 
     /// Map a base url to a provider kind. See `kind` for the rules.
@@ -558,6 +577,10 @@ final class ChatViewModel: ObservableObject {
         embApiKey = embPrefs.string(forKey: "apiKey") ?? ""
         embBaseUrl = embPrefs.string(forKey: "baseUrl") ?? ""
         embPrefs.register(defaults: ["provider": "auto"])
+        // First-run onboarding flag (issue #33) lives in the standard suite
+        // alongside `oneai_language` — it's an app-level UI preference, not
+        // provider config.
+        onboardingDismissed = UserDefaults.standard.bool(forKey: "oneai_onboarding_dismissed")
     }
 
     // MARK: Provider config

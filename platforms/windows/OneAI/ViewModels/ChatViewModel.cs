@@ -123,6 +123,14 @@ public class ChatViewModel : ObservableObject
 
     // Visibility helpers for x:Bind (raise on the underlying props' setters).
     public Visibility NeedsKeyConfigVis => NeedsKeyConfig ? Visibility.Visible : Visibility.Collapsed;
+
+    // First-run onboarding (issue #33): the "添加一个 API Key 开始使用"
+    // banner shows only once while NeedsKeyConfig. The dismissal flag is a
+    // one-way persisted state — once dismissed (× or by opening settings) the
+    // banner never returns. Loaded at construction; flipped by DismissOnboarding.
+    public bool OnboardingDismissed { get; private set; }
+    public Visibility OnboardingVis =>
+        (NeedsKeyConfig && !OnboardingDismissed) ? Visibility.Visible : Visibility.Collapsed;
     public Visibility HasErrorVis => Error == null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility SendButtonVis => Running ? Visibility.Collapsed : Visibility.Visible;
     public Visibility StopButtonVis => Running ? Visibility.Visible : Visibility.Collapsed;
@@ -165,10 +173,22 @@ public class ChatViewModel : ObservableObject
         // reference; TryEnqueue still marshals to the UI thread.
         _dq = dq ?? throw new InvalidOperationException("VM must be created on UI thread");
         Provider = ProviderStore.Load();
+        OnboardingDismissed = OnboardingStore.LoadDismissed();
         // Items is an ObservableCollection; add/remove fires CollectionChanged
         // (not PropertyChanged), so the welcome-screen visibility (which reads
         // Items.Count) wouldn't otherwise re-evaluate on the first/last message.
         Items.CollectionChanged += (_, _) => Raise(nameof(WelcomeVis));
+    }
+
+    /// <summary>Permanently dismiss the first-run onboarding banner (issue #33).
+    /// Persists the one-way flag so the banner never returns on later launches.
+    /// Called by the banner's × and "open settings" affordances.</summary>
+    public void DismissOnboarding()
+    {
+        if (OnboardingDismissed) return;
+        OnboardingDismissed = true;
+        OnboardingStore.SaveDismissed(true);
+        Raise(nameof(OnboardingVis));
     }
 
     // ── App lifecycle ────────────────────────────────────────────────
@@ -601,7 +621,10 @@ public class ChatViewModel : ObservableObject
         // this is called; NeedsKeyConfigVis is a computed read of them, so without
         // a raise the x:Bind won't re-evaluate and the "未配置 API Key" hint stays
         // visible after a successful save. Re-announce it now that the key is set.
+        // OnboardingVis reads NeedsKeyConfig too — raise it alongside (the banner
+        // vanishes once a key is configured, regardless of the dismissal flag).
         Raise(nameof(NeedsKeyConfigVis));
+        Raise(nameof(OnboardingVis));
     }
 }
 

@@ -123,6 +123,56 @@
   max-width: 640px;
 }
 
+/* First-run onboarding banner (issue #33): shown once when no provider is
+ * configured, dismissed permanently via localStorage so it never nags. */
+.onboarding {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  width: 100%;
+  max-width: 640px;
+  padding: 10px 10px 10px 14px;
+  border: 1px solid var(--oneai-brand-500);
+  background: var(--oneai-bg-elevated);
+  border-radius: var(--oneai-radius);
+  color: var(--oneai-text);
+  font-size: 14px;
+}
+.onboardingText {
+  flex: 1;
+  min-width: 0;
+}
+.onboardingAction {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: none;
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  cursor: pointer;
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+}
+.onboardingAction:hover {
+  filter: brightness(1.08);
+}
+.onboardingClose {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-secondary);
+  cursor: pointer;
+  border-radius: 999px;
+  font-size: 16px;
+  line-height: 1;
+}
+.onboardingClose:hover {
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text);
+}
+
 .heroChips {
   display: flex;
   flex-wrap: wrap;

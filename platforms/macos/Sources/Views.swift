@@ -828,14 +828,21 @@ private struct ChatDetail: View {
                 Divider()
             }
 
-            if vm.needsKeyConfig {
-                FirstRunHint(onOpen: onOpenSettings).padding(.horizontal, 12).padding(.vertical, 6)
+            // First-run onboarding banner (issue #33): shown once while no API
+            // key is configured, then never again (dismissed via × or by
+            // opening settings — both persist the flag).
+            if vm.showOnboarding {
+                FirstRunHint(
+                    onOpen: { vm.dismissOnboarding(); onOpenSettings() },
+                    onDismiss: { vm.dismissOnboarding() }
+                )
+                .padding(.horizontal, 12).padding(.vertical, 6)
             }
 
             // Empty conversation → welcome screen (like Doubao/Kimi's default
             // chat surface). Once the first message lands it disappears.
             if vm.items.isEmpty && !vm.running {
-                WelcomeScreen(vm: vm, onOpenSettings: onOpenSettings)
+                WelcomeScreen(vm: vm, onOpenSettings: { vm.dismissOnboarding(); onOpenSettings() })
             }
 
             // Message list — SwiftUI's `ScrollView` (sizes its own content
@@ -989,7 +996,7 @@ private struct WelcomeScreen: View {
                     Text("跨平台 AI Agent 框架 · 单 Agent 对话与多角色场景都在这里")
                         .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                 }
-                if vm.needsKeyConfig {
+                if vm.showOnboarding {
                     Button(action: onOpenSettings) {
                         Label("先配置 Provider 再开始", systemImage: "key.fill")
                             .font(.oCaption)
@@ -1660,19 +1667,44 @@ private struct ThreeDots: View {
 
 // MARK: - First-run hint
 
+/// First-run onboarding banner (issue #33): shown once while no API key is
+/// configured. Both tapping it (→ open settings) and the × dismiss it
+/// permanently (persisted via `ChatViewModel.dismissOnboarding()`), so it
+/// never nags on later launches. Bilingual per `AppLocale.current`.
 private struct FirstRunHint: View {
     let onOpen: () -> Void
+    let onDismiss: () -> Void
+    private var title: String {
+        AppLocale.current == .en
+            ? "Add an API Key to get started"
+            : "添加一个 API Key 开始使用"
+    }
+    private var action: String {
+        AppLocale.current == .en ? "Open settings" : "去设置"
+    }
     var body: some View {
-        Button(action: onOpen) {
-            Text("未配置 API Key,点击设置 → 填入 base url / api key / model 后保存")
+        HStack(spacing: 8) {
+            Text(title)
                 .foregroundStyle(Theme.onBg).font(.oCaption)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Theme.primaryCont)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+                .onTapGesture { onOpen() }
+            Button(action: onOpen) {
+                Text(action).font(.oCaption.weight(.semibold))
+                    .foregroundStyle(Theme.primary)
+            }
+            .buttonStyle(.plain).pointerCursor()
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.oCaption2)
+                    .foregroundStyle(Theme.onSurfaceVar)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain).pointerCursor()
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Theme.primaryCont)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 

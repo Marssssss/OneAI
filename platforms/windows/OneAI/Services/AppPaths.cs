@@ -32,6 +32,11 @@ public static class AppPaths
     /// <summary>Provider config (kind/model/apiKey/baseUrl) as JSON.</summary>
     public static string ProviderConfigPath => Path.Combine(AppDataDir, "provider.json");
 
+    /// <summary>First-run onboarding dismissal state (issue #33) as JSON.
+    /// A one-way flag: once the user dismisses the "add an API key" banner,
+    /// it never shows again.</summary>
+    public static string OnboardingStatePath => Path.Combine(AppDataDir, "onboarding.json");
+
     /// <summary>
     /// Canonical OneAI session/Memory db — `%USERPROFILE%\.oneai\oneai.db`,
     /// the same file the Rust <c>SqliteSessionStore::with_defaults()</c>

@@ -8,6 +8,7 @@
 // empty state, a debrief button when a scenario's debrief phase is available,
 // and speaker-tagged bubbles (members passed to ChatView).
 
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { ProjectionSnapshot } from '../store/projection'
@@ -20,7 +21,27 @@ import { Composer, type SlashCommand, type InteractionMode } from './Composer'
 import { ApprovalPanel } from './ApprovalPanel'
 import { GoalBar } from './GoalBar'
 import type { SettingsStore } from '../settings/settingsStore'
+import { useSettings } from '../settings/settingsStore'
 import styles from './ConversationRoot.module.css'
+
+// localStorage flag for the first-run API-key onboarding banner (issue #33):
+// once dismissed (× or "open settings"), the banner never returns, so it
+// doesn't nag the user on every launch.
+const ONBOARDING_DISMISSED_KEY = 'oneai.onboarding.apikey.dismissed'
+function readOnboardingDismissed(): boolean {
+  try {
+    return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeOnboardingDismissed(): void {
+  try {
+    localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1')
+  } catch {
+    /* ignore — private mode etc. */
+  }
+}
 
 interface ConversationRootProps {
   snapshot: ProjectionSnapshot
@@ -69,6 +90,9 @@ interface ConversationRootProps {
   onSelectWorkspace: (path: string) => void
   /** Open the native OS folder picker (App owns the RPC). */
   onAddWorkspace: () => void
+  /** Open the settings modal — used by the first-run API-key onboarding
+   *  banner (issue #33). */
+  onOpenSettings: () => void
 }
 
 export function ConversationRoot({
@@ -97,8 +121,24 @@ export function ConversationRoot({
   onCloseWorkspaceDropdown,
   onSelectWorkspace,
   onAddWorkspace,
+  onOpenSettings,
 }: ConversationRootProps): ReactNode {
   const { t } = useLocale()
+  const settings = useSettings(settingsStore)
+  // First-run onboarding (issue #33): prompt "添加一个 API Key 开始使用" once
+  // when no provider is configured. Dismissed permanently via localStorage so
+  // it never nags — both × and "open settings" set the flag.
+  const [onboardingDismissed, setOnboardingDismissed] = useState(readOnboardingDismissed)
+  const noProvider = settings.providers.length === 0
+  const dismissOnboarding = () => {
+    writeOnboardingDismissed()
+    setOnboardingDismissed(true)
+  }
+  const openSettingsFromOnboarding = () => {
+    writeOnboardingDismissed()
+    setOnboardingDismissed(true)
+    onOpenSettings()
+  }
   const statusText =
     connection === 'open'
       ? t('status.open')
@@ -109,6 +149,7 @@ export function ConversationRoot({
           : t('status.closed')
 
   const empty = snapshot.nodes.length === 0
+  const showOnboarding = empty && noProvider && !onboardingDismissed
   const scenarioActive = snapshot.currentScenario !== null
   const heroChips = scenarios.slice(0, 5)
   // Header brand: scenario name while a scenario runs, otherwise the session
@@ -184,6 +225,27 @@ export function ConversationRoot({
               />
               <div className={styles.emptySlogan}>{t('chat.empty.slogan')}</div>
             </div>
+            {showOnboarding && (
+              <div className={styles.onboarding}>
+                <span className={styles.onboardingText}>
+                  {t('onboarding.apikey.title')}
+                </span>
+                <button
+                  className={styles.onboardingAction}
+                  onClick={openSettingsFromOnboarding}
+                >
+                  {t('onboarding.apikey.action')}
+                </button>
+                <button
+                  className={styles.onboardingClose}
+                  onClick={dismissOnboarding}
+                  aria-label={t('onboarding.apikey.dismiss')}
+                  title={t('onboarding.apikey.dismiss')}
+                >
+                  ×
+                </button>
+              </div>
+            )}
             <div className={styles.emptyComposer}>{composerEl}</div>
             {heroChips.length > 0 && (
               <div className={styles.heroChips}>

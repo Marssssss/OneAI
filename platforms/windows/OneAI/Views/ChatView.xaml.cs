@@ -107,6 +107,19 @@ public sealed partial class ChatView : UserControl
         await dlg.ShowAsync();
     }
 
+    // First-run onboarding banner (issue #33): "去设置" opens the settings
+    // dialog AND permanently dismisses the banner (one-way flag) so it never
+    // nags again. The × button dismisses without opening settings.
+    private async void OpenSettings_Click(object sender, RoutedEventArgs e)
+    {
+        Vm.DismissOnboarding();
+        var dlg = new SettingsDialog { XamlRoot = this.XamlRoot };
+        dlg.SetVm(Vm);
+        await dlg.ShowAsync();
+    }
+
+    private void DismissOnboarding_Click(object sender, RoutedEventArgs e) => Vm.DismissOnboarding();
+
     // ── Topic intake ───────────────────────────────────────────────────
     // Collect each field's TextBox value (keyed by field id, stashed in Tag) by
     // walking the intake page's visual tree, then hand them to the VM.

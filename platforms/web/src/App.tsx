@@ -485,6 +485,7 @@ export default function App(): React.ReactNode {
             onCloseWorkspaceDropdown={() => setWorkspaceDropdownOpen(false)}
             onSelectWorkspace={handleWorkspaceSelect}
             onAddWorkspace={handleAddWorkspace}
+            onOpenSettings={() => setModal({ kind: 'settings' })}
           />
         }
         details={

@@ -189,11 +189,21 @@
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Border>
 
-            <!-- First-run hint -->
+            <!-- First-run onboarding banner (issue #33): shown once while no
+                 API key is configured; dismissed permanently via × or "去设置"
+                 (Vm.OnboardingVis gates both NeedsKeyConfig AND the dismissal flag). -->
             <Border Grid.Row="2" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="10"
-                    Padding="12,8" Margin="12,6" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}">
-                <TextBlock Text="未配置 API Key,点击设置 → 填入 kind / model / key 后保存" FontSize="12"
-                           Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
+                    Padding="12,8" Margin="12,6" Visibility="{x:Bind Vm.OnboardingVis, Mode=OneWay}">
+                <Grid ColumnDefinitions="*,Auto,Auto">
+                    <TextBlock Grid.Column="0" Text="添加一个 API Key 开始使用" FontSize="12"
+                               VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
+                    <Button Grid.Column="1" Click="OpenSettings_Click" Margin="8,0,0,0"
+                            Padding="8,2" FontSize="12" Content="去设置" />
+                    <Button Grid.Column="2" Click="DismissOnboarding_Click" Margin="4,0,0,0"
+                            Padding="8,2" FontSize="14" Content="✕"
+                            AutomationProperties.Name="知道了" />
+                </Grid>
             </Border>
 
             <!-- Message list + optional artifact canvas split. A welcome overlay
@@ -220,7 +230,7 @@
                                        FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                        HorizontalAlignment="Center" TextWrapping="Wrap" />
                         </StackPanel>
-                        <Button Click="Settings_Click" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}"
+                        <Button Click="Settings_Click" Visibility="{x:Bind Vm.OnboardingVis, Mode=OneWay}"
                                 HorizontalAlignment="Center" Padding="12,6">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE713;" FontSize="12" />
