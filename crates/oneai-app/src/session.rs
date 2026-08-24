@@ -277,6 +277,9 @@ struct AppResources {
     #[allow(dead_code)]
     tool_registry: Arc<oneai_tool::ToolRegistry>,
     interaction_gate: Arc<dyn oneai_core::traits::InteractionGate>,
+    /// Permission-decision audit log (gap-analysis P1 #9) — cloned into each
+    /// per-turn AgentLoop. `None` = no trail.
+    permission_audit_log: Option<Arc<dyn oneai_core::audit::PermissionAuditLog>>,
     /// Engine bus (when `AppBuilder::engine_bus` was called). `None` for
     /// direct-drive apps.
     engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
@@ -404,6 +407,7 @@ impl AppSession {
                 tool_executor: app.tool_executor.clone(),
                 tool_registry: app.tool_registry.clone(),
                 interaction_gate: app.interaction_gate.clone(),
+                permission_audit_log: app.permission_audit_log.clone(),
                 engine_bus: app.engine_bus.clone(),
                 background_registry: app.background_registry.clone(),
                 memory_manager: app.memory_manager.clone(),
@@ -1471,6 +1475,14 @@ impl AppSession {
             // Phase 2A background delegation is wired after the if/else —
             // gated on an engine bus being available (fire-and-auto-notify
             // needs a bus to inject results + re-trigger turns).
+        };
+
+        // gap P1 #9 — the permission-decision audit log (when configured).
+        // Sub-agent loops clone it from this loop, so delegated tool calls
+        // land in the same trail.
+        let agent_loop = match self.app.permission_audit_log.clone() {
+            Some(l) => agent_loop.with_permission_audit_log(l),
+            None => agent_loop,
         };
 
         // ─── Phase 2A: fire-and-auto-notify background delegation ──────────

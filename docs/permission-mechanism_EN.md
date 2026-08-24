@@ -135,6 +135,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* native UI dialogs */ }
 | CodingPack default `PermissionProfile` | `crates/oneai-domain/src/coding_pack.rs:354` |
 | `PermissionResolver` resolution path | `crates/oneai-tool/src/executor.rs:164` (4-branch consumer) |
 | Native gates (Linux CLI / per-target) | `crates/oneai-platform-desktop/src/{linux,bridge_common}.rs` + `crates/oneai-platform-{android,ios,harmony}/src/` |
+| Permission-decision audit (`PermissionAuditEvent`/`PermissionAuditLog` + Noop/InMemory/Jsonl) | `crates/oneai-core/src/audit.rs` |
 
 ## 8. Industry comparison
 
@@ -153,6 +154,7 @@ OneAI's distinct points: **7 decision points (5 per-iteration + 2 on-demand) uni
 - **Configure threshold**: `ThresholdInteractionGate::new(buffer_size, threshold, config)` or `new_manual_only` (all through approval).
 - **Domain permission policy**: DomainPack layer 3 `PermissionProfile` — `deny_by_default` (regex blacklist), `auto_approve` (whitelist tool names), `require_confirmation`, `permission_overrides`.
 - **TUI InteractionMode**: Normal/Auto/Plan (Shift+Tab toggle); Plan mode blocks tool execution.
+- **Decision audit log**: `AppBuilder::permission_audit_log(Arc<dyn PermissionAuditLog>)` (CLI config `permission_audit_log = "~/.oneai/permission-audit.jsonl"`). Every terminal permission decision (policy deny/auto-approve, Guardian verdict, human approve/abort/revise, direct execution, exposure-guard rejection) is recorded as one structured event; args are stored as a SHA-256 digest only, never in plaintext. Record sites: `execute_with_approval` (ToolExecutor + code_interpreter bridge), `AgentLoop::execute_tool_calls`/`handle_approval`, StateGraph tool nodes, ReActAgent; sub-agent loops inherit the same log via Clone.
 - **CLI**: indirectly via `provider`/`agent` paths; in TUI Shift+Tab toggles mode.
 - **Security hardening detail**: see [evolution-plan §1.4](evolution-plan-2026-07.md) (output cap / 3-path resolution / ThresholdGate migrated to PermissionLevel / ShellTool blacklist + path traversal + sandbox).
 

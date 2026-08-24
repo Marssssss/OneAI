@@ -151,7 +151,7 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 6. ✅ **退避加 jitter**；Gemini/Ollama 接 `send_with_retry`。——jitter ✅（`error_recovery.rs:167`）；Gemini/Ollama ✅（2026-08-24 `12536d9`，四家 provider 重试全闭合）。
 7. ✅ **ToolExecutor 级输出尺寸上限**（统一的 tool-result 截断守卫，而非各工具 ad-hoc）。——evolution §1.4-a（`executor.rs:47,326` `max_output_bytes`+`enforce_output_limit`）。
 8. ✅ **`ShellTool::new()` 默认接 `default_sandbox_backend`**；黑名单改用规范化命令解析；文件工具 `..` 改 canonical-path 校验。——evolution §1.4-c（`coding_pack.rs:198` + 黑名单 + `path_has_traversal`）。
-9. ⚠️ **统一权限路径**：`ToolExecutor` 接 `PermissionProfile`（修 workflow 绕过 deny 的洞）；加权限决策审计日志；`ThresholdInteractionGate` 迁到 `PermissionLevel`。——PermissionProfile ✅（§1.4-b `executor.rs:85`）；ThresholdGate ✅（§1.4-d）；**权限决策审计日志仍未加**（2026-08-05 核实，仅 best-effort `tracing::warn!`）。
+9. ✅ **统一权限路径**：`ToolExecutor` 接 `PermissionProfile`（修 workflow 绕过 deny 的洞）；加权限决策审计日志；`ThresholdInteractionGate` 迁到 `PermissionLevel`。——PermissionProfile ✅（§1.4-b `executor.rs:85`）；ThresholdGate ✅（§1.4-d）；权限决策审计日志 ✅（2026-08-24：`oneai-core::audit` — `PermissionAuditEvent`/`PermissionAuditLog` trait + Noop/InMemory/Jsonl 三实现；`execute_with_approval` + `AgentLoop::execute_tool_calls`/`handle_approval` + StateGraph 执行器 + ReActAgent 全决策点记录，args 只存 SHA-256 摘要；`AppBuilder::permission_audit_log` + CLI `permission_audit_log` 配置项）。
 10. ✅ **`apply_paradigm_switch` 只删范式 prompt**，保留 runtime_context 与 domain system block。——evolution §1.1（范式尾部标记 + `retain` 仅删被标记块，保留稳定前缀含 runtime_context）。
 
 ### P2 能力补齐（对标 SWE-agent/computer-use/Letta）

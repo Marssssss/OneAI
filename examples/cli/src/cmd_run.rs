@@ -53,6 +53,11 @@ pub fn cmd_run(
             .default_parser()
             .generation_config(config.generation.clone())
             .embedding_config(config.embedding.clone());
+        // gap P1 #9 — permission-decision audit trail when configured.
+        let builder = match config.permission_audit_log_sink() {
+            Some(l) => builder.permission_audit_log(l),
+            None => builder,
+        };
         let builder = if let Some(uid) = user {
             builder.user_id(uid)
         } else {

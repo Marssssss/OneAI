@@ -980,6 +980,10 @@ pub(crate) async fn build_engine_server(
         .default_rate_limiter()
         .engine_bus();
     let mut builder = builder.generation_config(config.generation.clone());
+    // gap P1 #9 — permission-decision audit trail when configured.
+    if let Some(l) = config.permission_audit_log_sink() {
+        builder = builder.permission_audit_log(l);
+    }
     // Clone before the move into ProviderFactory::create — start_group
     // injects these defaults into group-chat members that lack their own.
     let runtime_provider_config = provider_config.clone();

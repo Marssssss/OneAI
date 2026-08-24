@@ -63,6 +63,10 @@ pub fn cmd_a2a_serve(domain: Option<&str>, port: u16) {
             let provider = oneai_provider::ProviderFactory::create(mc.clone());
             builder = builder.provider(Arc::from(provider));
         }
+        // gap P1 #9 — permission-decision audit trail when configured.
+        if let Some(l) = config.permission_audit_log_sink() {
+            builder = builder.permission_audit_log(l);
+        }
 
         let app = builder.build().await.expect("App build failed");
 

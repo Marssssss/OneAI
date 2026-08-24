@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use oneai_core::audit::{self, PermissionAuditEvent, PermissionAuditLog, PermissionDecision};
 use oneai_core::budget::TokenBudget;
 use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
@@ -1206,6 +1207,13 @@ pub struct AgentLoop {
     /// max nesting depth, optional global budget pool). Default preserves
     /// today's behavior. Set via [`AgentLoop::with_delegation_policy`].
     delegation_policy: DelegationPolicy,
+    /// Permission-decision audit log (gap-analysis P1 #9). When `Some`, every
+    /// terminal tool-permission decision on the loop path (policy
+    /// deny/auto-approve, exposure guard, gate approve/abort/revise, direct
+    /// execution) is recorded as a structured audit event — durable
+    /// replacement for best-effort `tracing` visibility. Sub-agents inherit
+    /// it via `Clone` (the factory clones the parent loop's fields).
+    permission_audit_log: Option<Arc<dyn PermissionAuditLog>>,
 }
 
 /// Manual Clone implementation for AgentLoop — all fields are Arc/RwLock/Arc<RwLock>,
@@ -1243,6 +1251,7 @@ impl Clone for AgentLoop {
             domain_pack: self.domain_pack.clone(),
             permission_pack: self.permission_pack.clone(),
             delegation_policy: self.delegation_policy.clone(),
+            permission_audit_log: self.permission_audit_log.clone(),
         }
     }
 }
@@ -1315,6 +1324,7 @@ impl AgentLoop {
             domain_pack: None,
             permission_pack: None,
             delegation_policy: DelegationPolicy::default(),
+            permission_audit_log: None,
         }
     }
 
@@ -1361,6 +1371,7 @@ impl AgentLoop {
             domain_pack: Some(domain_pack),
             permission_pack: None,
             delegation_policy: DelegationPolicy::default(),
+            permission_audit_log: None,
         }
     }
 
@@ -1400,6 +1411,18 @@ impl AgentLoop {
         match pack {
             Some(p) => self.with_permission_pack(p),
             None => self,
+        }
+    }
+
+    /// Attach a permission-decision audit log (gap-analysis P1 #9). When
+    /// set, every terminal tool-permission decision on this loop's dispatch
+    /// path is recorded as a structured
+    /// [`oneai_core::audit::PermissionAuditEvent`]. Cloned sub-agent loops
+    /// inherit the same log, so delegated tool calls land in the same trail.
+    pub fn with_permission_audit_log(self, audit_log: Arc<dyn PermissionAuditLog>) -> Self {
+        Self {
+            permission_audit_log: Some(audit_log),
+            ..self
         }
     }
 
@@ -3977,6 +4000,7 @@ impl AgentLoop {
                 hook_registry: self.hook_registry.clone(),
                 recovery_manager: self.recovery_manager.clone(),
                 config: self.config.clone(),
+                permission_audit_log: self.permission_audit_log.clone(),
             });
 
         // 3. Build DelegateFactory bridge
@@ -4546,6 +4570,7 @@ impl AgentLoop {
                 r
             });
 
+        let audit_log = self.permission_audit_log.clone();
         let futures: Vec<_> = resolved
             .into_iter()
             .map(|(call, tool_opt, perm_check)| {
@@ -4554,6 +4579,7 @@ impl AgentLoop {
                 let args = call.args.clone();
                 let interaction_gate = self.interaction_gate.clone();
                 let exposure_resolver = exposure_resolver.clone();
+                let audit_log = audit_log.clone();
                 async move {
                     // Step 0 (#27): exposure guard — a model call naming a
                     // `Hidden` or `CodeModeOnly` tool is rejected. The schema
@@ -4566,6 +4592,18 @@ impl AgentLoop {
                             tool.as_ref(),
                         );
                         if !e.is_model_dispatchable() {
+                            audit::emit_audit(
+                                audit_log.as_ref(),
+                                PermissionAuditEvent::new(
+                                    tool.name(),
+                                    Some(tool.risk_level()),
+                                    PermissionDecision::NotDispatchable {
+                                        exposure: format!("{:?}", e),
+                                    },
+                                    &args,
+                                    audit::SOURCE_AGENT_LOOP,
+                                ),
+                            );
                             return Ok(ToolCallResult {
                                 call_id,
                                 tool_name,
@@ -4586,20 +4624,44 @@ impl AgentLoop {
                     }
                     // Step 1: Check domain PermissionProfile (highest priority)
                     match perm_check {
-                        Some(PermissionAction::Deny { reason }) => Ok(ToolCallResult {
-                            call_id,
-                            tool_name,
-                            output: ToolOutput {
-                                success: false,
-                                content: String::new(),
-                                error: Some(format!("Denied by domain policy: {}", reason)),
-                                ..Default::default()
-                            },
-                        }),
+                        Some(PermissionAction::Deny { reason }) => {
+                            audit::emit_audit(
+                                audit_log.as_ref(),
+                                PermissionAuditEvent::new(
+                                    &tool_name,
+                                    None,
+                                    PermissionDecision::DeniedByPolicy {
+                                        reason: reason.clone(),
+                                    },
+                                    &args,
+                                    audit::SOURCE_AGENT_LOOP,
+                                ),
+                            );
+                            Ok(ToolCallResult {
+                                call_id,
+                                tool_name,
+                                output: ToolOutput {
+                                    success: false,
+                                    content: String::new(),
+                                    error: Some(format!("Denied by domain policy: {}", reason)),
+                                    ..Default::default()
+                                },
+                            })
+                        }
                         Some(PermissionAction::AutoApprove) => {
                             // Domain says auto-approve — skip approval gate
                             match tool_opt {
                                 Some(tool) => {
+                                    audit::emit_audit(
+                                        audit_log.as_ref(),
+                                        PermissionAuditEvent::new(
+                                            &tool_name,
+                                            Some(tool.risk_level()),
+                                            PermissionDecision::AutoApprovedByPolicy,
+                                            &args,
+                                            audit::SOURCE_AGENT_LOOP,
+                                        ),
+                                    );
                                     let output = tool.execute(args).await?;
                                     Ok::<ToolCallResult, oneai_core::error::OneAIError>(
                                         ToolCallResult {
@@ -4645,6 +4707,7 @@ impl AgentLoop {
                                         args,
                                         call_id,
                                         tool_name,
+                                        audit_log.as_ref(),
                                     )
                                     .await
                                 }
@@ -4685,9 +4748,20 @@ impl AgentLoop {
                                             args,
                                             call_id,
                                             tool_name,
+                                            audit_log.as_ref(),
                                         )
                                         .await
                                     } else {
+                                        audit::emit_audit(
+                                            audit_log.as_ref(),
+                                            PermissionAuditEvent::new(
+                                                &tool_name,
+                                                Some(tool.risk_level()),
+                                                PermissionDecision::DirectExecution,
+                                                &args,
+                                                audit::SOURCE_AGENT_LOOP,
+                                            ),
+                                        );
                                         let output = tool.execute(args).await?;
                                         Ok::<ToolCallResult, oneai_core::error::OneAIError>(
                                             ToolCallResult {
@@ -4738,9 +4812,20 @@ impl AgentLoop {
                                             args,
                                             call_id,
                                             tool_name,
+                                            audit_log.as_ref(),
                                         )
                                         .await
                                     } else {
+                                        audit::emit_audit(
+                                            audit_log.as_ref(),
+                                            PermissionAuditEvent::new(
+                                                &tool_name,
+                                                Some(tool.risk_level()),
+                                                PermissionDecision::DirectExecution,
+                                                &args,
+                                                audit::SOURCE_AGENT_LOOP,
+                                            ),
+                                        );
                                         let output = tool.execute(args).await?;
                                         Ok(ToolCallResult {
                                             call_id,
@@ -5595,6 +5680,7 @@ impl AgentLoop {
                     hook_registry: self.hook_registry.clone(),
                     recovery_manager: self.recovery_manager.clone(),
                     config: self.config.clone(),
+                    permission_audit_log: self.permission_audit_log.clone(),
                 });
             let executor = oneai_workflow::StateGraphExecutor::new(
                 action_executor,
@@ -6618,6 +6704,7 @@ impl AgentLoop {
     /// the tool (optionally with rewritten args); `Revise{feedback}` rejects
     /// execution and feeds the corrective guidance back as the tool result;
     /// `Abort{reason}` is the hard deny.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_approval(
         interaction_gate: Arc<dyn InteractionGate>,
         request: oneai_core::ApprovalRequest,
@@ -6625,12 +6712,24 @@ impl AgentLoop {
         args: serde_json::Value,
         call_id: String,
         tool_name: String,
+        audit_log: Option<&Arc<dyn PermissionAuditLog>>,
     ) -> Result<ToolCallResult> {
+        let risk = request.risk_level;
         let resp = interaction_gate
             .request(InteractionRequest::ToolApproval { approval: request })
             .await;
         match resp {
             Ok(InteractionResponse::Proceed) => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        &tool_name,
+                        Some(risk),
+                        PermissionDecision::ApprovedByGate,
+                        &args,
+                        audit::SOURCE_AGENT_LOOP,
+                    ),
+                );
                 let output = tool.execute(args).await?;
                 Ok(ToolCallResult {
                     call_id,
@@ -6640,6 +6739,16 @@ impl AgentLoop {
             }
             Ok(InteractionResponse::ProceedWith { modification }) => match modification {
                 InteractionModification::ReplaceToolArgs(new_args) => {
+                    audit::emit_audit(
+                        audit_log,
+                        PermissionAuditEvent::new(
+                            &tool_name,
+                            Some(risk),
+                            PermissionDecision::ApprovedWithModification,
+                            &new_args,
+                            audit::SOURCE_AGENT_LOOP,
+                        ),
+                    );
                     let output = tool.execute(new_args).await?;
                     Ok(ToolCallResult {
                         call_id,
@@ -6648,6 +6757,16 @@ impl AgentLoop {
                     })
                 }
                 _ => {
+                    audit::emit_audit(
+                        audit_log,
+                        PermissionAuditEvent::new(
+                            &tool_name,
+                            Some(risk),
+                            PermissionDecision::ApprovedByGate,
+                            &args,
+                            audit::SOURCE_AGENT_LOOP,
+                        ),
+                    );
                     let output = tool.execute(args).await?;
                     Ok(ToolCallResult {
                         call_id,
@@ -6656,46 +6775,104 @@ impl AgentLoop {
                     })
                 }
             },
-            Ok(InteractionResponse::Revise { feedback }) => Ok(ToolCallResult {
-                call_id,
-                tool_name,
-                output: ToolOutput {
-                    success: false,
-                    content: String::new(),
-                    error: Some(format!("User rejected: {}", feedback)),
-                    ..Default::default()
-                },
-            }),
-            Ok(InteractionResponse::Abort { reason }) => Ok(ToolCallResult {
-                call_id,
-                tool_name,
-                output: ToolOutput {
-                    success: false,
-                    content: String::new(),
-                    error: Some(format!("Denied: {}", reason)),
-                    ..Default::default()
-                },
-            }),
-            Ok(_) => Ok(ToolCallResult {
-                call_id,
-                tool_name,
-                output: ToolOutput {
-                    success: false,
-                    content: String::new(),
-                    error: Some("Unsupported interaction response for tool approval".to_string()),
-                    ..Default::default()
-                },
-            }),
-            Err(e) => Ok(ToolCallResult {
-                call_id,
-                tool_name,
-                output: ToolOutput {
-                    success: false,
-                    content: String::new(),
-                    error: Some(format!("Interaction error: {}", e)),
-                    ..Default::default()
-                },
-            }),
+            Ok(InteractionResponse::Revise { feedback }) => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        &tool_name,
+                        Some(risk),
+                        PermissionDecision::RevisedByGate {
+                            feedback: feedback.clone(),
+                        },
+                        &args,
+                        audit::SOURCE_AGENT_LOOP,
+                    ),
+                );
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("User rejected: {}", feedback)),
+                        ..Default::default()
+                    },
+                })
+            }
+            Ok(InteractionResponse::Abort { reason }) => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        &tool_name,
+                        Some(risk),
+                        PermissionDecision::DeniedByGate {
+                            reason: reason.clone(),
+                        },
+                        &args,
+                        audit::SOURCE_AGENT_LOOP,
+                    ),
+                );
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Denied: {}", reason)),
+                        ..Default::default()
+                    },
+                })
+            }
+            Ok(_) => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        &tool_name,
+                        Some(risk),
+                        PermissionDecision::DeniedByGate {
+                            reason: "unsupported interaction response".to_string(),
+                        },
+                        &args,
+                        audit::SOURCE_AGENT_LOOP,
+                    ),
+                );
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(
+                            "Unsupported interaction response for tool approval".to_string(),
+                        ),
+                        ..Default::default()
+                    },
+                })
+            }
+            Err(e) => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        &tool_name,
+                        Some(risk),
+                        PermissionDecision::GateError {
+                            error: e.to_string(),
+                        },
+                        &args,
+                        audit::SOURCE_AGENT_LOOP,
+                    ),
+                );
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Interaction error: {}", e)),
+                        ..Default::default()
+                    },
+                })
+            }
         }
     }
 }
@@ -6738,6 +6915,9 @@ pub struct AgentLoopGraphActionExecutor {
     hook_registry: Arc<RwLock<HookRegistry>>,
     recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
     config: AgentLoopConfig,
+    /// Permission-decision audit log — cloned from the parent loop, so
+    /// StateGraph ToolCall nodes record into the same trail.
+    permission_audit_log: Option<Arc<dyn PermissionAuditLog>>,
 }
 
 #[async_trait::async_trait]
@@ -6878,6 +7058,18 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             let perm_action = domain.resolve_permission(tool_name, args);
             match perm_action {
                 oneai_domain::PermissionAction::Deny { reason } => {
+                    audit::emit_audit(
+                        self.permission_audit_log.as_ref(),
+                        PermissionAuditEvent::new(
+                            tool_name,
+                            None,
+                            PermissionDecision::DeniedByPolicy {
+                                reason: reason.clone(),
+                            },
+                            args,
+                            audit::SOURCE_STATE_GRAPH,
+                        ),
+                    );
                     return Ok(oneai_workflow::ActionResult {
                         output: String::new(),
                         error: Some(format!("Denied by domain policy: {}", reason)),
@@ -6885,6 +7077,16 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                 }
                 oneai_domain::PermissionAction::AutoApprove => {
                     // Skip approval gate — domain says auto-approve
+                    audit::emit_audit(
+                        self.permission_audit_log.as_ref(),
+                        PermissionAuditEvent::new(
+                            tool_name,
+                            Some(tool.risk_level()),
+                            PermissionDecision::AutoApprovedByPolicy,
+                            args,
+                            audit::SOURCE_STATE_GRAPH,
+                        ),
+                    );
                     let output = tool.execute(args.clone()).await?;
                     state.conversation.add_message(Message::tool_result(
                         format!("graph_tool_{}", tool_name),
@@ -6934,6 +7136,16 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                             .await;
                     }
                     // Standard or Read permission — execute directly
+                    audit::emit_audit(
+                        self.permission_audit_log.as_ref(),
+                        PermissionAuditEvent::new(
+                            tool_name,
+                            Some(tool.risk_level()),
+                            PermissionDecision::DirectExecution,
+                            args,
+                            audit::SOURCE_STATE_GRAPH,
+                        ),
+                    );
                     let output = tool.execute(args.clone()).await?;
                     state.conversation.add_message(Message::tool_result(
                         format!("graph_tool_{}", tool_name),
@@ -6963,6 +7175,16 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         }
 
         // Standard or Read permission — execute directly
+        audit::emit_audit(
+            self.permission_audit_log.as_ref(),
+            PermissionAuditEvent::new(
+                tool_name,
+                Some(tool.risk_level()),
+                PermissionDecision::DirectExecution,
+                args,
+                audit::SOURCE_STATE_GRAPH,
+            ),
+        );
         let output = tool.execute(args.clone()).await?;
         state.conversation.add_message(Message::tool_result(
             format!("graph_tool_{}", tool_name),
@@ -7106,12 +7328,24 @@ impl AgentLoopGraphActionExecutor {
         tool_name: &str,
         state: &mut oneai_workflow::GraphState,
     ) -> Result<oneai_workflow::ActionResult> {
+        let risk = request.risk_level;
+        let audit_log = self.permission_audit_log.as_ref();
         let resp = self
             .interaction_gate
             .request(InteractionRequest::ToolApproval { approval: request })
             .await?;
         match resp {
             InteractionResponse::Proceed => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        tool_name,
+                        Some(risk),
+                        PermissionDecision::ApprovedByGate,
+                        &args,
+                        audit::SOURCE_STATE_GRAPH,
+                    ),
+                );
                 let output = tool.execute(args).await?;
                 state.conversation.add_message(Message::tool_result(
                     format!("graph_tool_{}", tool_name),
@@ -7124,6 +7358,16 @@ impl AgentLoopGraphActionExecutor {
             }
             InteractionResponse::ProceedWith { modification } => match modification {
                 InteractionModification::ReplaceToolArgs(new_args) => {
+                    audit::emit_audit(
+                        audit_log,
+                        PermissionAuditEvent::new(
+                            tool_name,
+                            Some(risk),
+                            PermissionDecision::ApprovedWithModification,
+                            &new_args,
+                            audit::SOURCE_STATE_GRAPH,
+                        ),
+                    );
                     let output = tool.execute(new_args).await?;
                     state.conversation.add_message(Message::tool_result(
                         format!("graph_tool_{}", tool_name),
@@ -7135,6 +7379,16 @@ impl AgentLoopGraphActionExecutor {
                     })
                 }
                 _ => {
+                    audit::emit_audit(
+                        audit_log,
+                        PermissionAuditEvent::new(
+                            tool_name,
+                            Some(risk),
+                            PermissionDecision::ApprovedByGate,
+                            &args,
+                            audit::SOURCE_STATE_GRAPH,
+                        ),
+                    );
                     let output = tool.execute(args).await?;
                     state.conversation.add_message(Message::tool_result(
                         format!("graph_tool_{}", tool_name),
@@ -7146,18 +7400,60 @@ impl AgentLoopGraphActionExecutor {
                     })
                 }
             },
-            InteractionResponse::Revise { feedback } => Ok(oneai_workflow::ActionResult {
-                output: String::new(),
-                error: Some(format!("User rejected: {}", feedback)),
-            }),
-            InteractionResponse::Abort { reason } => Ok(oneai_workflow::ActionResult {
-                output: String::new(),
-                error: Some(format!("Denied: {}", reason)),
-            }),
-            _ => Ok(oneai_workflow::ActionResult {
-                output: String::new(),
-                error: Some("Unsupported interaction response for tool approval".to_string()),
-            }),
+            InteractionResponse::Revise { feedback } => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        tool_name,
+                        Some(risk),
+                        PermissionDecision::RevisedByGate {
+                            feedback: feedback.clone(),
+                        },
+                        &args,
+                        audit::SOURCE_STATE_GRAPH,
+                    ),
+                );
+                Ok(oneai_workflow::ActionResult {
+                    output: String::new(),
+                    error: Some(format!("User rejected: {}", feedback)),
+                })
+            }
+            InteractionResponse::Abort { reason } => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        tool_name,
+                        Some(risk),
+                        PermissionDecision::DeniedByGate {
+                            reason: reason.clone(),
+                        },
+                        &args,
+                        audit::SOURCE_STATE_GRAPH,
+                    ),
+                );
+                Ok(oneai_workflow::ActionResult {
+                    output: String::new(),
+                    error: Some(format!("Denied: {}", reason)),
+                })
+            }
+            _ => {
+                audit::emit_audit(
+                    audit_log,
+                    PermissionAuditEvent::new(
+                        tool_name,
+                        Some(risk),
+                        PermissionDecision::DeniedByGate {
+                            reason: "unsupported interaction response".to_string(),
+                        },
+                        &args,
+                        audit::SOURCE_STATE_GRAPH,
+                    ),
+                );
+                Ok(oneai_workflow::ActionResult {
+                    output: String::new(),
+                    error: Some("Unsupported interaction response for tool approval".to_string()),
+                })
+            }
         }
     }
 
@@ -7906,5 +8202,226 @@ mod dynamic_tool_prompt_tests {
         let mut state = LoopState::from_conversation(conv, "x");
         assert_eq!(loop_.activate_forced_paradigm(&mut state), None);
         assert_eq!(state.active_paradigm, ParadigmKind::ReAct);
+    }
+}
+
+#[cfg(test)]
+mod permission_audit_tests {
+    //! Gap P1 #9 — permission-decision audit trail on the AgentLoop path.
+    use super::*;
+    use crate::context_assembler::ContextAssembler;
+    use crate::mock_provider::{MockProvider, ScriptedResponse};
+    use crate::mock_tool::MockTool;
+    use crate::streaming::IncrementalStreamParser;
+    use crate::sub_agent::SubAgentFactoryNone;
+    use oneai_core::audit::{InMemoryAuditLog, PermissionDecision};
+    use oneai_core::budget::{BudgetAllocation, ContextBudgetManager, TokenBudget};
+    use oneai_core::{PermissionLevel, RiskLevel};
+    use oneai_parser::ThreeLayerParser;
+    use oneai_skill::SkillSelector;
+    use std::collections::HashMap;
+
+    fn build_audit_loop(
+        tools: Vec<Arc<dyn Tool>>,
+        gate: Arc<dyn InteractionGate>,
+        script: Vec<ScriptedResponse>,
+        audit: Arc<InMemoryAuditLog>,
+    ) -> AgentLoop {
+        let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        for t in tools {
+            map.insert(t.name().to_string(), t);
+        }
+        AgentLoop::new(
+            Arc::new(MockProvider::from_script(script)),
+            Arc::new(tokio::sync::RwLock::new(map)),
+            Arc::new(ThreeLayerParser::new()),
+            gate,
+            Arc::new(SkillSelector::new()),
+            Arc::new(ContextBudgetManager::new(
+                TokenBudget::new(100000),
+                BudgetAllocation::default(),
+                Arc::new(oneai_core::budget::NoopCompressor),
+            )),
+            Arc::new(SubAgentFactoryNone),
+            ContextAssembler::new(),
+            IncrementalStreamParser::new(),
+            AgentLoopConfig::default(),
+        )
+        .with_permission_audit_log(audit)
+    }
+
+    #[tokio::test]
+    async fn audit_records_direct_execution_for_read_tool() {
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+        let tool = Arc::new(MockTool::new(
+            "read_file",
+            "read",
+            serde_json::json!({"type": "object"}),
+            ToolOutput {
+                success: true,
+                content: "hello".to_string(),
+                error: None,
+                ..Default::default()
+            },
+            PermissionLevel::Read,
+        )) as Arc<dyn Tool>;
+        let loop_ = build_audit_loop(
+            vec![tool],
+            Arc::new(oneai_tool::NoopInteractionGate),
+            vec![
+                ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "a.txt"})),
+                ScriptedResponse::direct_answer("done"),
+            ],
+            audit.clone(),
+        );
+        let result = loop_.run("read the file").await.unwrap();
+        assert!(result.completed);
+
+        let events = audit.snapshot();
+        let direct: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.decision, PermissionDecision::DirectExecution))
+            .collect();
+        assert_eq!(direct.len(), 1, "events: {:?}", events);
+        assert_eq!(direct[0].tool_name, "read_file");
+        assert_eq!(direct[0].source, oneai_core::audit::SOURCE_AGENT_LOOP);
+        assert_eq!(direct[0].risk_level, Some(RiskLevel::Low));
+    }
+
+    #[tokio::test]
+    async fn audit_records_gate_denial_for_full_tool() {
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+        let tool = Arc::new(MockTool::new(
+            "danger",
+            "dangerous",
+            serde_json::json!({"type": "object"}),
+            ToolOutput {
+                success: true,
+                content: "boom".to_string(),
+                error: None,
+                ..Default::default()
+            },
+            PermissionLevel::Full,
+        )) as Arc<dyn Tool>;
+        // Channel gate enabled ONLY for ToolApproval, responder always
+        // aborts. (DenyAllInteractionGate can't be used here — it aborts
+        // every decision point incl. PreInfer, ending the whole run.)
+        let cfg = oneai_tool::InteractionGateConfig {
+            preinfer: false,
+            postinfer: false,
+            tool_approval: true,
+            plan_decision: false,
+            plan_review: false,
+            ..oneai_tool::InteractionGateConfig::default()
+        };
+        let (gate, mut receiver) = oneai_tool::ChannelInteractionGate::with_config(16, cfg);
+        tokio::spawn(async move {
+            while let Some(item) = receiver.recv().await {
+                item.response_tx
+                    .send(InteractionResponse::Abort {
+                        reason: "not allowed".to_string(),
+                    })
+                    .unwrap();
+            }
+        });
+        let loop_ = build_audit_loop(
+            vec![tool],
+            Arc::new(gate),
+            vec![
+                ScriptedResponse::tool_call("danger", serde_json::json!({})),
+                ScriptedResponse::direct_answer("ok"),
+            ],
+            audit.clone(),
+        );
+        let result = loop_.run("do the dangerous thing").await.unwrap();
+        assert!(result.completed);
+
+        let events = audit.snapshot();
+        let denied: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.decision, PermissionDecision::DeniedByGate { .. }))
+            .collect();
+        assert_eq!(denied.len(), 1, "events: {:?}", events);
+        assert_eq!(denied[0].tool_name, "danger");
+        assert_eq!(denied[0].risk_level, Some(RiskLevel::High));
+        // The tool itself never ran.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.decision, PermissionDecision::DirectExecution))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_records_gate_approval_for_full_tool() {
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+        let tool = Arc::new(MockTool::new(
+            "danger",
+            "dangerous",
+            serde_json::json!({"type": "object"}),
+            ToolOutput {
+                success: true,
+                content: "boom".to_string(),
+                error: None,
+                ..Default::default()
+            },
+            PermissionLevel::Full,
+        )) as Arc<dyn Tool>;
+        // Channel gate with an approver task.
+        let (gate, mut receiver) = oneai_tool::ChannelInteractionGate::new(16);
+        tokio::spawn(async move {
+            while let Some(item) = receiver.recv().await {
+                item.response_tx.send(InteractionResponse::Proceed).unwrap();
+            }
+        });
+        let loop_ = build_audit_loop(
+            vec![tool],
+            Arc::new(gate),
+            vec![
+                ScriptedResponse::tool_call("danger", serde_json::json!({})),
+                ScriptedResponse::direct_answer("ok"),
+            ],
+            audit.clone(),
+        );
+        let result = loop_.run("do the dangerous thing").await.unwrap();
+        assert!(result.completed);
+
+        let events = audit.snapshot();
+        let approved: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.decision, PermissionDecision::ApprovedByGate))
+            .collect();
+        assert_eq!(approved.len(), 1, "events: {:?}", events);
+        assert_eq!(approved[0].tool_name, "danger");
+        assert_eq!(approved[0].risk_level, Some(RiskLevel::High));
+    }
+
+    #[tokio::test]
+    async fn audit_log_survives_clone_for_sub_agents() {
+        // Sub-agent loops are clones of the parent loop; the audit log must
+        // come along so delegated tool calls land in the same trail.
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+        let loop_ = build_audit_loop(
+            vec![],
+            Arc::new(oneai_tool::NoopInteractionGate),
+            vec![],
+            audit.clone(),
+        );
+        let cloned = loop_.clone();
+        assert!(cloned.permission_audit_log.is_some());
+        // Same underlying sink (Arc identity via a probe record).
+        let probe = oneai_core::audit::PermissionAuditEvent::new(
+            "probe",
+            None,
+            PermissionDecision::DirectExecution,
+            &serde_json::json!({}),
+            oneai_core::audit::SOURCE_AGENT_LOOP,
+        );
+        if let Some(l) = cloned.permission_audit_log.as_ref() {
+            l.record(&probe);
+        }
+        assert_eq!(audit.len(), 1);
     }
 }

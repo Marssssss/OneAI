@@ -20,6 +20,7 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod active_cwd;
+pub mod audit;
 pub mod budget;
 pub mod catalog;
 pub mod circuit_breaker;
@@ -38,6 +39,7 @@ pub mod traits;
 pub mod types;
 pub mod usage;
 
+pub use audit::*;
 pub use budget::*;
 pub use catalog::*;
 pub use circuit_breaker::*;

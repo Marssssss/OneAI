@@ -153,6 +153,11 @@ pub fn run_tui(
 
         let mut builder = builder.generation_config(generation.clone());
         builder = builder.embedding_config(embedding.clone());
+        // gap P1 #9 — permission-decision audit trail when configured
+        // (`permission_audit_log = "..."` in ~/.oneai/config.toml).
+        if let Some(l) = crate::config::OneaiConfig::load_or_default().permission_audit_log_sink() {
+            builder = builder.permission_audit_log(l);
+        }
         if let Some(config) = provider_config {
             let provider = ProviderFactory::create(config);
             builder = builder.provider(Arc::from(provider));

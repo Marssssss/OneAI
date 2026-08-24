@@ -131,6 +131,11 @@ pub struct AppBuilder {
     /// Unified interaction gate — every loop-suspend decision point.
     /// When `None` at `build()` time, defaults to `NoopInteractionGate` (zero latency).
     interaction_gate: Option<Arc<dyn InteractionGate>>,
+    /// Permission-decision audit log (gap-analysis P1 #9). When set, it is
+    /// wired into the ToolExecutor, the code-interpreter bridge, and every
+    /// AgentLoop the app spawns — one structured trail for every terminal
+    /// tool-permission decision.
+    permission_audit_log: Option<Arc<dyn oneai_core::audit::PermissionAuditLog>>,
     /// Engine bus — when set (via [`AppBuilder::engine_bus`]), the app's
     /// interaction gate becomes a `BusInteractionGate` over this bus and
     /// `AppSession::run_turn_via_bus` is available (emits `EngineYield`s).
@@ -324,6 +329,7 @@ impl AppBuilder {
             provider: None,
             tool_registry: Arc::new(ToolRegistry::new()),
             interaction_gate: None,
+            permission_audit_log: None,
             engine_bus: None,
             parser: None,
             memory_manager: None,
@@ -489,6 +495,20 @@ impl AppBuilder {
     /// Set the unified interaction gate directly.
     pub fn interaction_gate(mut self, gate: Arc<dyn InteractionGate>) -> Self {
         self.interaction_gate = Some(gate);
+        self
+    }
+
+    /// Set the permission-decision audit log (gap-analysis P1 #9). Every
+    /// terminal tool-permission decision (policy deny/auto-approve, Guardian
+    /// verdict, gate approve/abort/revise, direct execution) across the
+    /// ToolExecutor path, the code-interpreter bridge, and every AgentLoop
+    /// (incl. sub-agents, which inherit it) is then recorded as a
+    /// structured [`oneai_core::audit::PermissionAuditEvent`].
+    pub fn permission_audit_log(
+        mut self,
+        log: Arc<dyn oneai_core::audit::PermissionAuditLog>,
+    ) -> Self {
+        self.permission_audit_log = Some(log);
         self
     }
 
@@ -1903,6 +1923,10 @@ impl AppBuilder {
                 Some(g) => exec.with_guardian(g.clone()),
                 None => exec,
             };
+            let exec = match &self.permission_audit_log {
+                Some(l) => exec.with_audit_log(l.clone()),
+                None => exec,
+            };
             Arc::new(exec)
         };
 
@@ -2077,6 +2101,10 @@ impl AppBuilder {
             };
             let code_tool = match &guardian {
                 Some(g) => code_tool.with_guardian(g.clone()),
+                None => code_tool,
+            };
+            let code_tool = match &self.permission_audit_log {
+                Some(l) => code_tool.with_audit_log(l.clone()),
                 None => code_tool,
             };
             // #27 — wire the exposure resolver so the code-mode bridge tool
@@ -2661,6 +2689,7 @@ impl AppBuilder {
             tool_registry: self.tool_registry,
             tool_executor,
             interaction_gate,
+            permission_audit_log: self.permission_audit_log.clone(),
             engine_bus: self.engine_bus,
             background_registry,
             parser,
@@ -2731,6 +2760,9 @@ pub struct App {
     pub tool_executor: Arc<ToolExecutor>,
     /// Unified interaction gate — every loop-suspend decision point.
     pub interaction_gate: Arc<dyn InteractionGate>,
+    /// Permission-decision audit log (gap-analysis P1 #9) — cloned into each
+    /// AgentLoop the session spawns. `None` = no audit trail.
+    pub permission_audit_log: Option<Arc<dyn oneai_core::audit::PermissionAuditLog>>,
     /// Engine bus (when `AppBuilder::engine_bus` was called). `None` for
     /// non-bus (direct-drive) apps; `Some` lets `AppSession::run_turn_via_bus`
     /// emit `EngineYield`s and means `interaction_gate` is a `BusInteractionGate`.

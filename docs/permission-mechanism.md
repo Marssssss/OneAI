@@ -135,6 +135,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 | CodingPack 默认 `PermissionProfile` | `crates/oneai-domain/src/coding_pack.rs:354` |
 | `PermissionResolver` 解析路径 | `crates/oneai-tool/src/executor.rs:164`（4 分支消费）|
 | 原生 gate（Linux CLI / 各端）| `crates/oneai-platform-desktop/src/{linux,bridge_common}.rs` + `oneai-platform-{android,ios,harmony}/src/` |
+| 权限决策审计（`PermissionAuditEvent`/`PermissionAuditLog` + Noop/InMemory/Jsonl）| `crates/oneai-core/src/audit.rs` |
 
 ## 8. 与业界对比
 
@@ -153,6 +154,7 @@ OneAI 独特点：**7 决策点（5 每轮 + 2 按需）统一一个可替换 ga
 - **配阈值**：`ThresholdInteractionGate::new(buffer_size, threshold, config)` 或 `new_manual_only`（全走审批）。
 - **域权限策略**：DomainPack 第③层 `PermissionProfile`——`deny_by_default`（黑名单正则）、`auto_approve`（白名单工具名）、`require_confirmation`、`permission_overrides`。
 - **TUI InteractionMode**：Normal/Auto/Plan 三模式（Shift+Tab 切换），Plan 模式阻断工具执行。
+- **决策审计日志**：`AppBuilder::permission_audit_log(Arc<dyn PermissionAuditLog>)`（CLI 配置 `permission_audit_log = "~/.oneai/permission-audit.jsonl"`）。每个终态权限决策（策略 deny/自动放行、Guardian 裁决、人工批准/中止/退回、直接执行、曝光守卫拦截）记一条结构化事件；args 只存 SHA-256 摘要不落明文。记录点：`execute_with_approval`（ToolExecutor + code_interpreter 桥）、`AgentLoop::execute_tool_calls`/`handle_approval`、StateGraph 工具节点、ReActAgent；子 Agent 经 Clone 继承同一日志。
 - **CLI**：经 `provider`/`agent` 路径间接；TUI 内 Shift+Tab 切模式。
 - **安全护栏细节**：见 [evolution-plan §1.4](evolution-plan-2026-07.md)（输出上限 / 三路径解析 / ThresholdGate 迁 PermissionLevel / ShellTool 黑名单+path traversal+沙箱）。
 

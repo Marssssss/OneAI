@@ -40,6 +40,13 @@ pub struct OneaiConfig {
     /// users leave this section out entirely.
     #[serde(default)]
     pub embedding: oneai_core::EmbeddingConfig,
+    /// Permission-decision audit log path (gap-analysis P1 #9). When set
+    /// (e.g. `~/.oneai/permission-audit.jsonl`), every terminal tool
+    /// permission decision (policy deny / auto-approve, Guardian verdict,
+    /// gate approve/abort/revise, direct execution) is appended as one JSON
+    /// line. Empty / absent → no audit trail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_audit_log: Option<String>,
 }
 
 /// One entry in the `[[providers]]` list — a named, switchable provider
@@ -137,6 +144,7 @@ impl Default for OneaiConfig {
             ui: UiConfig::default(),
             generation: oneai_core::GenerationConfig::new(),
             embedding: oneai_core::EmbeddingConfig::auto(),
+            permission_audit_log: None,
         }
     }
 }
@@ -156,6 +164,39 @@ impl OneaiConfig {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".oneai")
             .join("packs")
+    }
+
+    /// Build the permission-audit sink from `permission_audit_log` (gap P1
+    /// #9). `~` expands to the home dir. Returns `None` when unset/empty, or
+    /// when the file cannot be opened (warned on stderr — auditing must
+    /// never break startup).
+    pub fn permission_audit_log_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn oneai_core::audit::PermissionAuditLog>> {
+        let raw = self.permission_audit_log.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let path = if let Some(rest) = raw.strip_prefix("~/") {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(rest)
+        } else if raw == "~" {
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+        } else {
+            PathBuf::from(raw)
+        };
+        match oneai_core::audit::JsonlAuditLog::new(&path) {
+            Ok(log) => Some(std::sync::Arc::new(log)),
+            Err(e) => {
+                eprintln!(
+                    "Warning: cannot open permission audit log {}: {} — continuing without audit",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Load config from the default path, or return defaults if file doesn't exist.

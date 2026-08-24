@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use oneai_core::audit::{self, PermissionAuditLog};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{
     effective_exposure, ExposureResolver, InteractionGate, PermissionResolver, Tool,
@@ -83,6 +84,11 @@ pub struct CodeInterpreterTool {
     /// [`execute_with_approval`] with this context. `None` → the bridge
     /// skips the Guardian (the manual gate / no-UI posture still applies).
     guardian: Option<Arc<GuardianContext>>,
+    /// Permission-decision audit log (gap-analysis P1 #9). When `Some`,
+    /// script-internal tool calls record their terminal permission decision
+    /// with source [`oneai_core::audit::SOURCE_CODE_BRIDGE`] — the same
+    /// trail a direct call writes, so the audit is path-complete.
+    audit_log: Option<Arc<dyn PermissionAuditLog>>,
     /// #27 — the exposure resolver (DomainPack `PermissionProfile`). When
     /// `Some`, the bridge's tool list is filtered by the *effective* exposure
     /// (resolver override or tool's own [`Tool::exposure`]); only
@@ -120,6 +126,7 @@ impl CodeInterpreterTool {
             max_output_bytes,
             proxy_port: None,
             guardian: None,
+            audit_log: None,
             exposure_resolver: None,
         }
     }
@@ -138,6 +145,14 @@ impl CodeInterpreterTool {
     /// by the same [`GuardianContext`] a direct call hits (#28 Stage 2).
     pub fn with_guardian(mut self, guardian: Arc<GuardianContext>) -> Self {
         self.guardian = Some(guardian);
+        self
+    }
+
+    /// Wire the permission-decision audit log (gap-analysis P1 #9) —
+    /// script-internal tool calls are then recorded with the
+    /// `code_interpreter_bridge` source, same trail as direct calls.
+    pub fn with_audit_log(mut self, audit_log: Arc<dyn PermissionAuditLog>) -> Self {
+        self.audit_log = Some(audit_log);
         self
     }
 
@@ -299,9 +314,11 @@ impl CodeInterpreterTool {
             &self.gate,
             self.resolver.as_ref(),
             self.guardian.as_deref(),
+            self.audit_log.as_ref(),
             &self.config,
             &tool_name,
             args.clone(),
+            audit::SOURCE_CODE_BRIDGE,
         )
         .await
         .unwrap_or_else(|e| ToolOutput {

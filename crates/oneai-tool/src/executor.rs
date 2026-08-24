@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use oneai_core::audit::{self, PermissionAuditLog, PermissionDecision};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, PermissionResolver, Tool};
 use oneai_core::{
@@ -92,6 +93,11 @@ pub struct ToolExecutor {
     /// that to Run/Deny/Prompt *before* the manual gate. `None` → the
     /// pre-Stage-2 behaviour (manual gate / no-UI proceed).
     guardian: Option<Arc<GuardianContext>>,
+    /// Optional permission-decision audit log (gap-analysis P1 #9). When
+    /// `Some`, every terminal permission decision on this path is recorded as
+    /// a structured [`oneai_core::audit::PermissionAuditEvent`]. `None` → no
+    /// audit trail (the pre-P1 behaviour, tracing only).
+    audit_log: Option<Arc<dyn PermissionAuditLog>>,
     /// Configuration.
     config: ToolExecutorConfig,
 }
@@ -107,6 +113,7 @@ impl ToolExecutor {
             interaction_gate: Arc::new(DenyAllInteractionGate),
             permission_resolver: None,
             guardian: None,
+            audit_log: None,
             config: ToolExecutorConfig::default(),
         }
     }
@@ -121,6 +128,7 @@ impl ToolExecutor {
             interaction_gate,
             permission_resolver: None,
             guardian: None,
+            audit_log: None,
             config: ToolExecutorConfig::default(),
         }
     }
@@ -136,6 +144,7 @@ impl ToolExecutor {
             interaction_gate,
             permission_resolver: None,
             guardian: None,
+            audit_log: None,
             config,
         }
     }
@@ -159,6 +168,16 @@ impl ToolExecutor {
         self
     }
 
+    /// Attach a permission-decision audit log (gap-analysis P1 #9). When set,
+    /// every terminal permission decision on this executor's path (policy
+    /// deny / auto-approve, Guardian verdict, gate approve/abort/revise,
+    /// direct execution) is recorded as a structured event — the durable
+    /// replacement for best-effort `tracing::warn!` visibility.
+    pub fn with_audit_log(mut self, audit_log: Arc<dyn PermissionAuditLog>) -> Self {
+        self.audit_log = Some(audit_log);
+        self
+    }
+
     /// Execute a tool by name with the given arguments.
     ///
     /// Delegates to [`execute_with_approval`] — the single shared approval
@@ -173,9 +192,11 @@ impl ToolExecutor {
             &self.interaction_gate,
             self.permission_resolver.as_ref(),
             self.guardian.as_deref(),
+            self.audit_log.as_ref(),
             &self.config,
             tool_name,
             args,
+            audit::SOURCE_TOOL_EXECUTOR,
         )
         .await
     }
@@ -230,14 +251,17 @@ impl ToolExecutor {
 /// so the `code_interpreter` bridge can call it without holding a
 /// `ToolExecutor` (which would form an `Arc` cycle: the tool lives in the
 /// same registry it would query).
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_with_approval(
     tools_map: &Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     interaction_gate: &Arc<dyn InteractionGate>,
     permission_resolver: Option<&Arc<dyn PermissionResolver>>,
     guardian: Option<&GuardianContext>,
+    audit_log: Option<&Arc<dyn PermissionAuditLog>>,
     config: &ToolExecutorConfig,
     tool_name: &str,
     args: serde_json::Value,
+    source: &'static str,
 ) -> Result<ToolOutput> {
     // Look up the tool in the shared registry map.
     let tool = {
@@ -255,6 +279,18 @@ pub async fn execute_with_approval(
         Some(resolver) => match resolver.resolve(tool_name, &args) {
             PermissionAction::Deny { reason } => {
                 tracing::warn!("Tool '{}' denied by domain policy: {}", tool_name, reason);
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        None,
+                        PermissionDecision::DeniedByPolicy {
+                            reason: reason.clone(),
+                        },
+                        &args,
+                        source,
+                    ),
+                );
                 return Ok(ToolOutput {
                     success: false,
                     content: String::new(),
@@ -264,6 +300,16 @@ pub async fn execute_with_approval(
             }
             PermissionAction::AutoApprove => {
                 tracing::info!("Tool '{}' auto-approved by domain policy", tool_name);
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        None,
+                        PermissionDecision::AutoApprovedByPolicy,
+                        &args,
+                        source,
+                    ),
+                );
                 // Domain says skip the gate entirely regardless of risk.
                 return execute_with_timeout(tool, args, config).await;
             }
@@ -301,10 +347,34 @@ pub async fn execute_with_approval(
             match g.apply(tool_name, &args).await {
                 oneai_core::ReviewAction::Run { reason } => {
                     tracing::info!("Guardian auto-approved tool '{}': {}", tool_name, reason);
+                    audit::emit_audit(
+                        audit_log,
+                        oneai_core::audit::PermissionAuditEvent::new(
+                            tool_name,
+                            Some(effective_level),
+                            PermissionDecision::GuardianApproved {
+                                reason: reason.clone(),
+                            },
+                            &args,
+                            source,
+                        ),
+                    );
                     return execute_with_timeout(tool, args, config).await;
                 }
                 oneai_core::ReviewAction::Deny { reason } => {
                     tracing::warn!("Guardian denied tool '{}': {}", tool_name, reason);
+                    audit::emit_audit(
+                        audit_log,
+                        oneai_core::audit::PermissionAuditEvent::new(
+                            tool_name,
+                            Some(effective_level),
+                            PermissionDecision::GuardianDenied {
+                                reason: reason.clone(),
+                            },
+                            &args,
+                            source,
+                        ),
+                    );
                     return Ok(ToolOutput {
                         success: false,
                         content: String::new(),
@@ -359,6 +429,16 @@ pub async fn execute_with_approval(
                     tool_name,
                     args
                 );
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::ApprovedByGate,
+                        &args,
+                        source,
+                    ),
+                );
                 execute_with_timeout(tool, args, config).await
             }
             InteractionResponse::ProceedWith { modification } => {
@@ -378,10 +458,32 @@ pub async fn execute_with_approval(
                     tool_name,
                     final_args
                 );
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::ApprovedWithModification,
+                        &final_args,
+                        source,
+                    ),
+                );
                 execute_with_timeout(tool, final_args, config).await
             }
             InteractionResponse::Abort { reason } => {
                 tracing::warn!("Tool '{}' denied: {}", tool_name, reason);
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::DeniedByGate {
+                            reason: reason.clone(),
+                        },
+                        &args,
+                        source,
+                    ),
+                );
                 Ok(ToolOutput {
                     success: false,
                     content: String::new(),
@@ -391,6 +493,18 @@ pub async fn execute_with_approval(
             }
             InteractionResponse::Revise { feedback } => {
                 tracing::warn!("Tool '{}' revise-feedback: {}", tool_name, feedback);
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::RevisedByGate {
+                            feedback: feedback.clone(),
+                        },
+                        &args,
+                        source,
+                    ),
+                );
                 Ok(ToolOutput {
                     success: false,
                     content: String::new(),
@@ -400,11 +514,33 @@ pub async fn execute_with_approval(
             }
             InteractionResponse::Choose { .. } => {
                 // PlanDecision-only reply; doesn't apply to ToolApproval. Proceed.
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::ApprovedByGate,
+                        &args,
+                        source,
+                    ),
+                );
                 execute_with_timeout(tool, args, config).await
             }
             // InteractionResponse is #[non_exhaustive]; unknown variants
             // (e.g. future decision points) default to proceeding.
-            _ => execute_with_timeout(tool, args, config).await,
+            _ => {
+                audit::emit_audit(
+                    audit_log,
+                    oneai_core::audit::PermissionAuditEvent::new(
+                        tool_name,
+                        Some(effective_level),
+                        PermissionDecision::ApprovedByGate,
+                        &args,
+                        source,
+                    ),
+                );
+                execute_with_timeout(tool, args, config).await
+            }
         }
     } else {
         // No approval needed (or the gate disabled the ToolApproval point) —
@@ -414,6 +550,16 @@ pub async fn execute_with_approval(
             "Tool '{}' executing directly (risk level: {:?})",
             tool_name,
             effective_level
+        );
+        audit::emit_audit(
+            audit_log,
+            oneai_core::audit::PermissionAuditEvent::new(
+                tool_name,
+                Some(effective_level),
+                PermissionDecision::DirectExecution,
+                &args,
+                source,
+            ),
         );
         execute_with_timeout(tool, args, config).await
     }
@@ -922,6 +1068,142 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "ok");
+    }
+
+    // ─── Permission audit log (gap P1 #9) ────────────────────────────────────
+
+    use oneai_core::audit::{InMemoryAuditLog, PermissionDecision};
+
+    #[tokio::test]
+    async fn test_audit_records_direct_execution() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(NoopInteractionGate))
+            .with_audit_log(audit.clone());
+
+        executor
+            .execute("calculator", serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
+
+        let events = audit.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool_name, "calculator");
+        assert!(matches!(
+            events[0].decision,
+            PermissionDecision::DirectExecution
+        ));
+        assert_eq!(events[0].source, oneai_core::audit::SOURCE_TOOL_EXECUTOR);
+        assert_eq!(events[0].risk_level, Some(RiskLevel::Low));
+    }
+
+    #[tokio::test]
+    async fn test_audit_records_policy_deny_and_auto_approve() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+
+        // Deny via resolver — short-circuits before the gate.
+        let executor =
+            ToolExecutor::with_interaction_gate(registry.clone(), Arc::new(NoopInteractionGate))
+                .with_permission_resolver(Arc::new(StubResolver {
+                    action: PermissionAction::Deny {
+                        reason: "nope".to_string(),
+                    },
+                }))
+                .with_audit_log(audit.clone());
+        executor
+            .execute("calculator", serde_json::json!({"expression": "1"}))
+            .await
+            .unwrap();
+
+        // AutoApprove via resolver — skips the gate.
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(NoopInteractionGate))
+            .with_permission_resolver(Arc::new(StubResolver {
+                action: PermissionAction::AutoApprove,
+            }))
+            .with_audit_log(audit.clone());
+        executor
+            .execute("calculator", serde_json::json!({"expression": "1"}))
+            .await
+            .unwrap();
+
+        let events = audit.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].decision,
+            PermissionDecision::DeniedByPolicy { reason } if reason == "nope"
+        ));
+        assert!(matches!(
+            events[1].decision,
+            PermissionDecision::AutoApprovedByPolicy
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_audit_records_gate_approve_and_deny() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(ShellTool::new())).await.unwrap();
+        let audit = Arc::new(InMemoryAuditLog::new(16));
+
+        // Approve path (ChannelInteractionGate always proceeds).
+        let (gate, mut receiver) = ChannelInteractionGate::new(16);
+        tokio::spawn(async move {
+            while let Some(item) = receiver.recv().await {
+                item.response_tx.send(InteractionResponse::Proceed).unwrap();
+            }
+        });
+        let executor = ToolExecutor::with_interaction_gate(registry.clone(), Arc::new(gate))
+            .with_audit_log(audit.clone());
+        let _ = executor
+            .execute("shell", serde_json::json!({"command": "echo hi"}))
+            .await;
+
+        // Deny path (DenyAllInteractionGate always aborts).
+        let executor =
+            ToolExecutor::with_interaction_gate(registry, Arc::new(DenyAllInteractionGate))
+                .with_audit_log(audit.clone());
+        let out = executor
+            .execute("shell", serde_json::json!({"command": "echo hi"}))
+            .await
+            .unwrap();
+        assert!(!out.success);
+
+        let events = audit.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].decision,
+            PermissionDecision::ApprovedByGate
+        ));
+        assert!(matches!(
+            &events[1].decision,
+            PermissionDecision::DeniedByGate { .. }
+        ));
+        // Both carry the High risk level (ShellTool).
+        assert_eq!(events[0].risk_level, Some(RiskLevel::High));
+    }
+
+    #[tokio::test]
+    async fn test_no_audit_log_is_noop() {
+        // No log wired — execution must be unaffected.
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(NoopInteractionGate));
+        let result = executor
+            .execute("calculator", serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
+        assert!(result.success);
     }
 
     #[tokio::test]

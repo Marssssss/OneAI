@@ -95,6 +95,9 @@ pub struct ReActAgent {
 
     /// Agent configuration.
     config: ReActConfig,
+
+    /// Permission-decision audit log (gap-analysis P1 #9). `None` = no trail.
+    permission_audit_log: Option<Arc<dyn oneai_core::audit::PermissionAuditLog>>,
 }
 
 impl ReActAgent {
@@ -112,7 +115,39 @@ impl ReActAgent {
             parser,
             interaction_gate,
             config,
+            permission_audit_log: None,
         }
+    }
+
+    /// Attach a permission-decision audit log (gap-analysis P1 #9) — tool
+    /// approvals/denials in the ReAct loop are then recorded with the
+    /// `react_agent` source.
+    pub fn with_permission_audit_log(
+        mut self,
+        audit_log: Arc<dyn oneai_core::audit::PermissionAuditLog>,
+    ) -> Self {
+        self.permission_audit_log = Some(audit_log);
+        self
+    }
+
+    /// Record one permission decision (no-op when no audit log is wired).
+    fn audit_decision(
+        &self,
+        tool_name: &str,
+        risk: Option<oneai_core::RiskLevel>,
+        decision: oneai_core::audit::PermissionDecision,
+        args: &serde_json::Value,
+    ) {
+        oneai_core::audit::emit_audit(
+            self.permission_audit_log.as_ref(),
+            oneai_core::audit::PermissionAuditEvent::new(
+                tool_name,
+                risk,
+                decision,
+                args,
+                oneai_core::audit::SOURCE_REACT_AGENT,
+            ),
+        );
     }
 
     /// Create with default configuration.
@@ -239,6 +274,12 @@ impl ReActAgent {
 
                             match interaction_response {
                                 InteractionResponse::Proceed => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::ApprovedByGate,
+                                        &args_value,
+                                    );
                                     let output = tool.execute(args_value).await?;
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
@@ -246,12 +287,26 @@ impl ReActAgent {
                                     ));
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
+                                    let replaced = matches!(
+                                        modification,
+                                        InteractionModification::ReplaceToolArgs(_)
+                                    );
                                     let final_args = match modification {
                                         InteractionModification::ReplaceToolArgs(new_args) => {
                                             new_args
                                         }
                                         _ => args_value,
                                     };
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        if replaced {
+                                            oneai_core::audit::PermissionDecision::ApprovedWithModification
+                                        } else {
+                                            oneai_core::audit::PermissionDecision::ApprovedByGate
+                                        },
+                                        &final_args,
+                                    );
                                     let output = tool.execute(final_args).await?;
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
@@ -259,18 +314,42 @@ impl ReActAgent {
                                     ));
                                 }
                                 InteractionResponse::Revise { feedback } => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::RevisedByGate {
+                                            feedback: feedback.clone(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format!("Tool execution rejected: {}", feedback),
                                     ));
                                 }
                                 InteractionResponse::Abort { reason } => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::DeniedByGate {
+                                            reason: reason.clone(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format!("Tool execution denied: {}", reason),
                                     ));
                                 }
                                 _ => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::DeniedByGate {
+                                            reason: "unsupported interaction response".to_string(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         "Tool approval: unsupported response".to_string(),
@@ -279,6 +358,12 @@ impl ReActAgent {
                             }
                         } else {
                             // Low/medium risk — execute directly
+                            self.audit_decision(
+                                name,
+                                Some(tool.risk_level()),
+                                oneai_core::audit::PermissionDecision::DirectExecution,
+                                &args_value,
+                            );
                             let output = tool.execute(args_value).await?;
                             conv.add_message(Message::tool_result(
                                 id.clone(),
@@ -472,6 +557,12 @@ impl ReActAgent {
                                 .await?;
                             match interaction_response {
                                 InteractionResponse::Proceed => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::ApprovedByGate,
+                                        &args_value,
+                                    );
                                     let output = tool.execute(args_value).await?;
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
@@ -479,12 +570,26 @@ impl ReActAgent {
                                     ));
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
+                                    let replaced = matches!(
+                                        modification,
+                                        InteractionModification::ReplaceToolArgs(_)
+                                    );
                                     let final_args = match modification {
                                         InteractionModification::ReplaceToolArgs(new_args) => {
                                             new_args
                                         }
                                         _ => args_value,
                                     };
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        if replaced {
+                                            oneai_core::audit::PermissionDecision::ApprovedWithModification
+                                        } else {
+                                            oneai_core::audit::PermissionDecision::ApprovedByGate
+                                        },
+                                        &final_args,
+                                    );
                                     let output = tool.execute(final_args).await?;
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
@@ -492,18 +597,42 @@ impl ReActAgent {
                                     ));
                                 }
                                 InteractionResponse::Revise { feedback } => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::RevisedByGate {
+                                            feedback: feedback.clone(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format!("Rejected: {}", feedback),
                                     ));
                                 }
                                 InteractionResponse::Abort { reason } => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::DeniedByGate {
+                                            reason: reason.clone(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format!("Denied: {}", reason),
                                     ));
                                 }
                                 _ => {
+                                    self.audit_decision(
+                                        name,
+                                        Some(oneai_core::RiskLevel::High),
+                                        oneai_core::audit::PermissionDecision::DeniedByGate {
+                                            reason: "unsupported interaction response".to_string(),
+                                        },
+                                        &args_value,
+                                    );
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         "Unsupported approval response".to_string(),
@@ -511,6 +640,12 @@ impl ReActAgent {
                                 }
                             }
                         } else {
+                            self.audit_decision(
+                                name,
+                                Some(tool.risk_level()),
+                                oneai_core::audit::PermissionDecision::DirectExecution,
+                                &args_value,
+                            );
                             let output = tool.execute(args_value).await?;
                             conv.add_message(Message::tool_result(
                                 id.clone(),
