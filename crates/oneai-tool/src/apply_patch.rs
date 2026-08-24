@@ -470,6 +470,49 @@ fn find_fuzzy_match(lines: &[String], hunk: &DiffHunk) -> Option<usize> {
     None
 }
 
+// ─── Backup / undo (gap P2 #12) ─────────────────────────────────────────────
+
+/// In-memory snapshot of one patch target taken before the commit phase
+/// (gap-analysis P2 #12 — a multi-file patch must never leave a
+/// half-modified state). `original == None` means the file did not exist
+/// before the patch — undo then deletes the created file.
+#[derive(Debug, Clone)]
+struct FileBackup {
+    path: String,
+    original: Option<String>,
+}
+
+/// The undo stack replay: restore every backup in reverse order. Returns
+/// human-readable errors for any file that could not be restored (the
+/// caller surfaces them; restore itself is best-effort and never panics).
+async fn restore_backups(backups: &[FileBackup]) -> Vec<String> {
+    let mut restore_errors = Vec::new();
+    for backup in backups.iter().rev() {
+        match &backup.original {
+            Some(content) => {
+                if let Err(e) = tokio::fs::write(&backup.path, content).await {
+                    restore_errors.push(format!(
+                        "CRITICAL: failed to restore {} during undo: {}",
+                        backup.path, e
+                    ));
+                }
+            }
+            None => {
+                // File did not exist before the patch — undo = delete it.
+                match tokio::fs::remove_file(&backup.path).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => restore_errors.push(format!(
+                        "CRITICAL: failed to remove created {} during undo: {}",
+                        backup.path, e
+                    )),
+                }
+            }
+        }
+    }
+    restore_errors
+}
+
 // ─── ApplyPatchTool ──────────────────────────────────────────────────────────
 
 /// Apply a unified diff patch across multiple files.
@@ -478,9 +521,13 @@ fn find_fuzzy_match(lines: &[String], hunk: &DiffHunk) -> Option<usize> {
 /// which is critical for multi-file refactoring, applying code review
 /// suggestions, and generating complete change sets.
 ///
-/// The patch is applied atomically per file: if any hunk in a file fails
-/// (context mismatch), that file's changes are skipped and an error is reported.
-/// Other files' hunks are still applied.
+/// The patch is applied **all-or-nothing** (gap-analysis P2 #12): first a
+/// dry-run computes every file's new content in memory; if ANY file fails
+/// validation (path traversal, read error, hunk context mismatch) the whole
+/// patch aborts and no file is touched. The commit phase snapshots each
+/// target in a backup stack before writing, so even a mid-commit IO failure
+/// rolls back every file already modified — a patch can never leave a
+/// half-modified state.
 ///
 /// Inspired by Codex CLI's `apply_patch` and Aider's batch editing capability.
 pub struct ApplyPatchTool;
@@ -513,8 +560,9 @@ impl Tool for ApplyPatchTool {
         "Apply a unified diff patch to modify multiple files at once. \
         The patch should be in standard unified diff format (--- /+++ headers, \
         @@ hunk headers, context/add/remove lines). Supports multi-file changes, \
-        new file creation, and file deletion. Each file's changes are applied atomically — \
-        if context mismatch occurs, that file is skipped with an error report. \
+        new file creation, and file deletion. Application is all-or-nothing: \
+        if any hunk fails (context mismatch) or any file can't be read, NO file \
+        is modified and the error is reported. \
         Use for: multi-file refactoring, applying review suggestions, batch edits."
     }
 
@@ -574,11 +622,25 @@ impl Tool for ApplyPatchTool {
                         .push(hunk.clone());
                 }
 
-                // Apply hunks per file
+                // ─── Phase 1: dry-run (gap P2 #12) ──────────────────────────
+                // Compute every file's new content IN MEMORY before touching
+                // the filesystem. If any file fails validation (path
+                // traversal, read error, hunk context mismatch), the whole
+                // patch aborts and NOTHING is written — a multi-file patch
+                // can no longer leave a half-modified state.
+                struct PlannedChange {
+                    path: String,
+                    is_new_file: bool,
+                    is_deletion: bool,
+                    new_content: String,
+                    hunk_count: usize,
+                }
+
                 let mut results = Vec::new();
                 let mut errors = Vec::new();
                 let mut files_changed = 0;
                 let mut artifacts: Vec<Artifact> = Vec::new();
+                let mut planned: Vec<PlannedChange> = Vec::new();
 
                 for (file_path, file_hunk_list) in &file_hunks {
                     // Security: reject path traversal
@@ -600,16 +662,18 @@ impl Tool for ApplyPatchTool {
                     let is_deletion = file_hunk_list.iter().any(|h| h.new_file.is_empty());
 
                     if is_deletion {
-                        // Delete the file
-                        let delete_result = tokio::fs::remove_file(&file_path).await;
-                        match delete_result {
-                            Ok(_) => {
-                                results.push(format!("Deleted: {}", file_path));
-                                files_changed += 1;
-                            }
-                            Err(e) => {
-                                errors.push(format!("Failed to delete {}: {}", file_path, e));
-                            }
+                        // Deletion is validated by existence — a missing
+                        // target is a patch error caught here, pre-commit.
+                        match tokio::fs::read_to_string(&file_path).await {
+                            Ok(_) => planned.push(PlannedChange {
+                                path: file_path,
+                                is_new_file: false,
+                                is_deletion: true,
+                                new_content: String::new(),
+                                hunk_count: file_hunk_list.len(),
+                            }),
+                            Err(e) => errors
+                                .push(format!("Failed to read {} for deletion: {}", file_path, e)),
                         }
                         continue;
                     }
@@ -627,7 +691,7 @@ impl Tool for ApplyPatchTool {
                         }
                     };
 
-                    // Apply hunks to content
+                    // Apply hunks to the in-memory copy only
                     let (new_content, hunk_results) =
                         apply_hunks_to_content(&content, file_hunk_list);
 
@@ -639,43 +703,124 @@ impl Tool for ApplyPatchTool {
                                 errors.push(format!("{}: {}", file_path, result.message));
                             }
                         }
-                        // Don't write the file if any hunks failed — keep original
                         continue;
                     }
 
-                    // Write the new content
-                    if is_new_file {
-                        // Create parent directories if needed
-                        if let Some(parent) = std::path::Path::new(&file_path).parent() {
-                            if !parent.as_os_str().is_empty() {
-                                let _ = tokio::fs::create_dir_all(parent).await;
+                    planned.push(PlannedChange {
+                        path: file_path,
+                        is_new_file,
+                        is_deletion: false,
+                        new_content,
+                        hunk_count: file_hunk_list.len(),
+                    });
+                }
+
+                // Any validation failure aborts the whole patch — zero
+                // filesystem writes (all-or-nothing semantics).
+                if !errors.is_empty() {
+                    errors.push(
+                        "Patch aborted before any file was modified (all-or-nothing)".to_string(),
+                    );
+                }
+
+                // ─── Phase 2: commit with backup/undo (gap P2 #12) ──────────
+                // Snapshot each target before writing; if any write/delete
+                // fails mid-commit, replay the backup stack to roll back
+                // every file already touched.
+                if errors.is_empty() {
+                    let mut backups: Vec<FileBackup> = Vec::new();
+                    let mut commit_failed = false;
+
+                    for change in &planned {
+                        // Backup first (None = file did not exist).
+                        let original = if change.is_new_file {
+                            None
+                        } else {
+                            match tokio::fs::read_to_string(&change.path).await {
+                                Ok(text) => Some(text),
+                                Err(e) => {
+                                    errors
+                                        .push(format!("Failed to back up {}: {}", change.path, e));
+                                    commit_failed = true;
+                                    break;
+                                }
                             }
+                        };
+                        backups.push(FileBackup {
+                            path: change.path.clone(),
+                            original,
+                        });
+
+                        // Then commit.
+                        let outcome = if change.is_deletion {
+                            tokio::fs::remove_file(&change.path).await
+                        } else {
+                            if change.is_new_file {
+                                // Create parent directories if needed
+                                if let Some(parent) = std::path::Path::new(&change.path).parent() {
+                                    if !parent.as_os_str().is_empty() {
+                                        let _ = tokio::fs::create_dir_all(parent).await;
+                                    }
+                                }
+                            }
+                            tokio::fs::write(&change.path, &change.new_content).await
+                        };
+
+                        if let Err(e) = outcome {
+                            errors.push(format!(
+                                "Failed to {} {}: {} — rolling back",
+                                if change.is_deletion {
+                                    "delete"
+                                } else {
+                                    "write"
+                                },
+                                change.path,
+                                e
+                            ));
+                            commit_failed = true;
+                            break;
                         }
                     }
 
-                    let write_result = tokio::fs::write(&file_path, new_content).await;
-                    match write_result {
-                        Ok(_) => {
-                            let hunk_count = file_hunk_list.len();
-                            results
-                                .push(format!("Applied {} hunk(s) to {}", hunk_count, file_path));
+                    if commit_failed {
+                        // Undo: restore every file touched so far.
+                        let mut restore_errors = restore_backups(&backups).await;
+                        errors.append(&mut restore_errors);
+                    } else {
+                        // All committed — report per-file results + artifacts.
+                        for change in &planned {
+                            if change.is_deletion {
+                                results.push(format!("Deleted: {}", change.path));
+                            } else {
+                                results.push(format!(
+                                    "Applied {} hunk(s) to {}",
+                                    change.hunk_count, change.path
+                                ));
+                            }
                             files_changed += 1;
                             // Deliverable surface — the patched file's path so a
-                            // frontend can list turn-end outputs.
-                            let size = tokio::fs::metadata(&file_path).await.map(|m| m.len()).ok();
-                            artifacts.push(Artifact {
-                                path: file_path.clone(),
-                                mime_type: infer_mime(&file_path).to_string(),
-                                description: format!(
-                                    "{} {} hunk(s)",
-                                    if is_new_file { "created" } else { "patched" },
-                                    hunk_count
-                                ),
-                                size_bytes: size,
-                            });
-                        }
-                        Err(e) => {
-                            errors.push(format!("Failed to write {}: {}", file_path, e));
+                            // frontend can list turn-end outputs (deletions
+                            // have no artifact).
+                            if !change.is_deletion {
+                                let size = tokio::fs::metadata(&change.path)
+                                    .await
+                                    .map(|m| m.len())
+                                    .ok();
+                                artifacts.push(Artifact {
+                                    path: change.path.clone(),
+                                    mime_type: infer_mime(&change.path).to_string(),
+                                    description: format!(
+                                        "{} {} hunk(s)",
+                                        if change.is_new_file {
+                                            "created"
+                                        } else {
+                                            "patched"
+                                        },
+                                        change.hunk_count
+                                    ),
+                                    size_bytes: size,
+                                });
+                            }
                         }
                     }
                 }
@@ -822,5 +967,132 @@ mod tests {
         let tool = ApplyPatchTool::new();
         assert_eq!(tool.name(), "apply_patch");
         assert_eq!(tool.risk_level(), RiskLevel::Medium);
+    }
+
+    // ─── All-or-nothing + backup/undo (gap P2 #12) ────────────────────────
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("oneai-apply-patch-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn multi_file_patch_with_one_bad_hunk_modifies_nothing() {
+        // Gap P2 #12 — file1's hunk is valid, file2's hunk mismatches.
+        // Pre-fix behavior left file1 modified (half-state); now the whole
+        // patch aborts and BOTH files stay untouched.
+        let dir = temp_dir("atomic-abort");
+        let f1 = dir.join("file1.txt");
+        let f2 = dir.join("file2.txt");
+        std::fs::write(&f1, "line1\nline2\n").unwrap();
+        std::fs::write(&f2, "alpha\nbeta\n").unwrap();
+
+        let patch = format!(
+            "--- a/{f1}\n+++ b/{f1}\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2_patched\n\
+             --- a/{f2}\n+++ b/{f2}\n@@ -1,2 +1,2 @@\n alpha\n-THIS_LINE_DOES_NOT_EXIST\n+gamma\n",
+            f1 = f1.display(),
+            f2 = f2.display()
+        );
+
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(serde_json::json!({"patch": patch}))
+            .await
+            .unwrap();
+
+        assert!(!out.success);
+        assert!(out.content.contains("aborted before any file was modified"));
+        // Neither file may have changed.
+        assert_eq!(std::fs::read_to_string(&f1).unwrap(), "line1\nline2\n");
+        assert_eq!(std::fs::read_to_string(&f2).unwrap(), "alpha\nbeta\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn successful_multi_file_patch_applies_all() {
+        let dir = temp_dir("success");
+        let f1 = dir.join("file1.txt");
+        let f2 = dir.join("file2.txt");
+        std::fs::write(&f1, "line1\nline2\n").unwrap();
+        std::fs::write(&f2, "alpha\nbeta\n").unwrap();
+
+        let patch = format!(
+            "--- a/{f1}\n+++ b/{f1}\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2_patched\n\
+             --- a/{f2}\n+++ b/{f2}\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+beta_patched\n",
+            f1 = f1.display(),
+            f2 = f2.display()
+        );
+
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(serde_json::json!({"patch": patch}))
+            .await
+            .unwrap();
+
+        assert!(out.success, "output: {}", out.content);
+        assert!(std::fs::read_to_string(&f1)
+            .unwrap()
+            .contains("line2_patched"));
+        assert!(std::fs::read_to_string(&f2)
+            .unwrap()
+            .contains("beta_patched"));
+        assert_eq!(out.artifacts.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn restore_backups_rolls_back_modifications_and_creations() {
+        // Direct undo-stack test: modified files are restored to their
+        // snapshot; files created by the patch (backup None) are deleted.
+        let dir = temp_dir("undo");
+        let existing = dir.join("existing.txt");
+        let created = dir.join("created.txt");
+        std::fs::write(&existing, "original content\n").unwrap();
+        std::fs::write(&created, "should vanish\n").unwrap();
+
+        let backups = vec![
+            FileBackup {
+                path: existing.to_string_lossy().into_owned(),
+                original: Some("original content\n".to_string()),
+            },
+            FileBackup {
+                path: created.to_string_lossy().into_owned(),
+                original: None, // did not exist pre-patch → undo deletes
+            },
+        ];
+
+        // Simulate a mid-commit state: both files carry wrong content.
+        std::fs::write(&existing, "WRONG\n").unwrap();
+
+        let errors = restore_backups(&backups).await;
+        assert!(errors.is_empty(), "restore errors: {:?}", errors);
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "original content\n"
+        );
+        assert!(!created.exists(), "created file must be deleted by undo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn deletion_patch_validates_target_exists() {
+        // Deleting a missing file is caught in the dry-run phase.
+        let dir = temp_dir("delete-missing");
+        let missing = dir.join("nope.txt");
+        let patch = format!(
+            "--- a/{f}\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-gone\n",
+            f = missing.display()
+        );
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(serde_json::json!({"patch": patch}))
+            .await
+            .unwrap();
+        assert!(!out.success);
+        assert!(out.content.contains("aborted before any file was modified"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

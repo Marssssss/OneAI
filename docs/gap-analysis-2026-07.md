@@ -156,7 +156,7 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 
 ### P2 能力补齐（对标 SWE-agent/computer-use/Letta）
 11. ✅ **沙箱代码执行工具**（独立于 shell，Standard 权限，有输出上限+超时）。——经 `oneai-wasm` 覆盖（`WasmTool` impl `Tool` + fuel/epoch 超时 + 经 `ToolExecutor` 输出上限；risk 可配，见 [wasm-mechanism](wasm-mechanism.md)）。
-12. ❌ **`apply_patch` 加 backup/undo 栈**（多文件 patch 失败可回滚）。——未做（2026-08-05 核实 `apply_patch.rs` 无 backup/undo）。
+12. ✅ **`apply_patch` 加 backup/undo 栈**（多文件 patch 失败可回滚）。——2026-08-24：改全量 all-or-nothing 两阶段——Phase 1 内存干跑（任一路径遍历/读失败/hunk 失配 → 整体中止、零落盘）；Phase 2 提交前先快照 `FileBackup` undo 栈，中途 IO 失败逆序回滚已写文件（含删除已创建文件）。
 13. ❌ **真 tokenizer**（tiktoken-rs / huggingface-tokenizers），让 `truncate_tool_results` 真用 TokenCounter。——未做（`token_counter.rs` 仍 4 chars/token 启发式，workspace 无 tiktoken/tokenizers 依赖）。
 14. ❌ **StateGraph resume API** + 中途持久化 walk state（向 durable execution 走第一步）。——未做（`state_executor.rs` 无 resume/restore/durable；evolution §4 未标完成，durable execution 推迟）。
 15. ✅ **A2A server 接 axum** + `handle_send_task` 真跑 AgentLoop（补 streaming/push/auth）。——evolution §3.5（`db7b384`，axum server + 真跑 AgentLoop + SSE streaming + shared-secret Bearer auth）。**注**：`tasks/resubscribe` + push-notification 投递 + TaskStore 磁盘持久化按戒律#3 推迟。
