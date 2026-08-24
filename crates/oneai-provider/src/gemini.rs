@@ -25,12 +25,19 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::retry::{is_retryable_status, send_with_retry, ProviderRetryConfig};
+
 /// Google Gemini LLM provider.
+///
+/// Includes automatic retry on transient API errors (429 rate limits,
+/// 503 service unavailable, 529 site overloaded) with exponential backoff.
 pub struct GeminiProvider {
     config: ModelConfig,
     client: Client,
     /// Resolved compatibility profile (drives dispatch; see `compat.rs`).
     compat: crate::compat::Compat,
+    /// Retry config for transient HTTP errors (429/503/529) + network errors.
+    pub retry_config: ProviderRetryConfig,
 }
 
 impl GeminiProvider {
@@ -42,6 +49,7 @@ impl GeminiProvider {
             config,
             client,
             compat,
+            retry_config: ProviderRetryConfig::default(),
         }
     }
 
@@ -52,6 +60,7 @@ impl GeminiProvider {
             config,
             client,
             compat,
+            retry_config: ProviderRetryConfig::default(),
         }
     }
 
@@ -62,12 +71,31 @@ impl GeminiProvider {
             config,
             client,
             compat,
+            retry_config: ProviderRetryConfig::default(),
+        }
+    }
+
+    /// Create with custom retry configuration.
+    pub fn with_retry_config(config: ModelConfig, retry_config: ProviderRetryConfig) -> Self {
+        let client = Client::new();
+        let compat = crate::compat::Compat::from_config(&config);
+        Self {
+            config,
+            client,
+            compat,
+            retry_config,
         }
     }
 
     /// The resolved compatibility profile.
     pub fn compat(&self) -> crate::compat::Compat {
         self.compat
+    }
+
+    /// Set the retry configuration (builder pattern).
+    pub fn retry_config(mut self, config: ProviderRetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
     /// Get the Gemini generateContent endpoint URL.
@@ -419,14 +447,17 @@ impl LlmProvider for GeminiProvider {
             .unwrap_or("gemini-2.0-flash")
             .to_string();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+        })
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -434,6 +465,13 @@ impl LlmProvider for GeminiProvider {
                 .text()
                 .await
                 .map_err(|e| OneAIError::Network(e.to_string()))?;
+            tracing::error!("Gemini API error {}: {}", status, text);
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Gemini API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!(
                 "Gemini API error {}: {}",
                 status, text
@@ -456,14 +494,17 @@ impl LlmProvider for GeminiProvider {
         let url = self.stream_url();
         let model_name = self.config.model_name.clone();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+        })
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -471,6 +512,13 @@ impl LlmProvider for GeminiProvider {
                 .text()
                 .await
                 .map_err(|e| OneAIError::Network(e.to_string()))?;
+            tracing::error!("Gemini API error {}: {}", status, text);
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Gemini API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!(
                 "Gemini API error {}: {}",
                 status, text

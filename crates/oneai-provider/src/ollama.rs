@@ -19,16 +19,25 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::retry::{is_retryable_status, send_with_retry, ProviderRetryConfig};
+
 /// Ollama local LLM provider.
+///
+/// Includes automatic retry on transient errors (429/503/529 responses,
+/// e.g. while the server is still warming up) with exponential backoff.
 pub struct OllamaProvider {
     config: ModelConfig,
     client: Client,
     /// Resolved compatibility profile (drives dispatch; see `compat.rs`).
     compat: crate::compat::Compat,
+    /// Retry config for transient HTTP errors (429/503/529) + network errors.
+    pub retry_config: ProviderRetryConfig,
 }
 
 impl OllamaProvider {
     /// Create a new Ollama provider with the given configuration.
+    ///
+    /// Default retry config: 3 retries, exponential backoff (1s → 2s → 4s).
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
         let compat = crate::compat::Compat::from_config(&config);
@@ -36,6 +45,7 @@ impl OllamaProvider {
             config,
             client,
             compat,
+            retry_config: ProviderRetryConfig::default(),
         }
     }
 
@@ -46,12 +56,31 @@ impl OllamaProvider {
             config,
             client,
             compat,
+            retry_config: ProviderRetryConfig::default(),
+        }
+    }
+
+    /// Create with custom retry configuration.
+    pub fn with_retry_config(config: ModelConfig, retry_config: ProviderRetryConfig) -> Self {
+        let client = Client::new();
+        let compat = crate::compat::Compat::from_config(&config);
+        Self {
+            config,
+            client,
+            compat,
+            retry_config,
         }
     }
 
     /// The resolved compatibility profile.
     pub fn compat(&self) -> crate::compat::Compat {
         self.compat
+    }
+
+    /// Set the retry configuration (builder pattern).
+    pub fn retry_config(mut self, config: ProviderRetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
     /// Get the Ollama chat completions endpoint URL.
@@ -138,14 +167,17 @@ impl LlmProvider for OllamaProvider {
         let body = self.to_ollama_request(&req);
         let url = self.chat_url();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+        })
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -153,6 +185,14 @@ impl LlmProvider for OllamaProvider {
                 .text()
                 .await
                 .map_err(|e| OneAIError::Network(e.to_string()))?;
+            tracing::error!("Ollama API error {}: {}", status, text);
+            // Distinguish rate limit errors from other provider errors
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Ollama API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!(
                 "Ollama API error {}: {}",
                 status, text
@@ -249,14 +289,17 @@ impl LlmProvider for OllamaProvider {
 
         let url = self.chat_url();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+        })
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -264,6 +307,14 @@ impl LlmProvider for OllamaProvider {
                 .text()
                 .await
                 .map_err(|e| OneAIError::Network(e.to_string()))?;
+            tracing::error!("Ollama API error {}: {}", status, text);
+            // Distinguish rate limit errors from other provider errors
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Ollama API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!(
                 "Ollama API error {}: {}",
                 status, text
