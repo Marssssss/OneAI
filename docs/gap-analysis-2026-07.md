@@ -103,7 +103,7 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 **优点**：ProviderPool fallback 链 + FallbackEvent + 断路器真实；SmartRouter 多因子（latency/quality，USD 已彻底删除）真实；3 层模型上下文解析（用户配置 > provider probe > builtin）+ `probe_context_window` 四家都实现；Anthropic `cache_control:ephemeral` 真且 `cache_read_tokens` 回读到 trace；UsageTracker + SqliteUsageTracker 真接线。
 
 **差距**：
-- **Gemini/Ollama 无 provider 级 retry**（只有 OpenAI/Anthropic 调 `send_with_retry`）——一次 429 直冲 AgentLoop 的粗粒度 5s 重试。
+- ~~**Gemini/Ollama 无 provider 级 retry**~~ — ✅ 已闭合（2026-08-24 `12536d9`：四家 provider 全接 `send_with_retry`）。
 - **退避无 jitter**（纯指数 `initial*factor^attempt`）→ 同步客户端 retry-storm 风险。
 - **无真 tokenizer**：全栈 `tiktoken`/`tokenizers`/`hf-hub` 0 命中，全是 4 chars/token 启发式；CJK 比例是粗平均。`truncate_tool_results` 用裸 `chars×4`，忽略已挂载的 TokenCounter——准确分母+近似分子，溢出触发可差 10–20%，CJK 重时可能在压缩触发前真撑爆窗口。
 - **OpenAI provider 跳过 `ContentBlock::Image`/`File`/`Thinking`**（`openai.rs:148`）却声称 `supports_multimodal:true`——视觉仅 Anthropic。
@@ -148,7 +148,7 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 5. ✅ **RecoveryManager 真生效**：工具失败时程序性重试（带 jitter 退避），不只是塞 system message。——evolution §0（`d35671e`）+ §1.4（jitter `error_recovery.rs:167`）。
 
 ### P1 安全护栏补齐
-6. ⚠️ **退避加 jitter**；Gemini/Ollama 接 `send_with_retry`。——jitter ✅（`error_recovery.rs:167`）；**Gemini/Ollama 仍未接 `send_with_retry`**（仅 OpenAI/Anthropic 调，2026-08-05 核实），属 evolution 未覆盖项。
+6. ✅ **退避加 jitter**；Gemini/Ollama 接 `send_with_retry`。——jitter ✅（`error_recovery.rs:167`）；Gemini/Ollama ✅（2026-08-24 `12536d9`，四家 provider 重试全闭合）。
 7. ✅ **ToolExecutor 级输出尺寸上限**（统一的 tool-result 截断守卫，而非各工具 ad-hoc）。——evolution §1.4-a（`executor.rs:47,326` `max_output_bytes`+`enforce_output_limit`）。
 8. ✅ **`ShellTool::new()` 默认接 `default_sandbox_backend`**；黑名单改用规范化命令解析；文件工具 `..` 改 canonical-path 校验。——evolution §1.4-c（`coding_pack.rs:198` + 黑名单 + `path_has_traversal`）。
 9. ⚠️ **统一权限路径**：`ToolExecutor` 接 `PermissionProfile`（修 workflow 绕过 deny 的洞）；加权限决策审计日志；`ThresholdInteractionGate` 迁到 `PermissionLevel`。——PermissionProfile ✅（§1.4-b `executor.rs:85`）；ThresholdGate ✅（§1.4-d）；**权限决策审计日志仍未加**（2026-08-05 核实，仅 best-effort `tracing::warn!`）。
