@@ -144,7 +144,7 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 1. ✅ **接线三层解析器到 `parse_decision`**：畸形 tool args 走 fuzzy→self-correct 并回喂模型（而不是 `unwrap_or(json!({}))`）。"稳定"单点最大杠杆。——evolution §0（`74e375d`）+ §1.5。
 2. ✅ **实现 TokenBudget 真终止**：主循环每轮检查 `budget.remaining()`，超阈值 break。默认 `hard_max_iterations=None` 必须改为有预算或硬上限兜底。——evolution §0（`0416f19`）。
 3. ✅ **修压缩抽取事实路径**：让 `extract_and_archive` 走 `MemoryManager::archive_facts`（嵌入+落 SQLite），兑现 §12.1 的真实承诺。——evolution §0 gap P0 #8（`8bc0e6f`，`FactSink` trait）。
-4. ✅ **真接 OTEL**：`OtlpCollector` 接真 `opentelemetry-otlp` exporter；`OtelMetricsProvider` 接入 AgentLoop；给 sub_agent/A2A 传 `trace_context`/traceparent 实现分布式追踪。——evolution §0（`83e7daf`，`HttpOtlpExporter` 真导出 + metrics 接 AgentLoop）。**注**：sub_agent/A2A 分布式 traceparent 传播仍未做（evolution 未标完成）。
+4. ✅ **真接 OTEL**：`OtlpCollector` 接真 `opentelemetry-otlp` exporter；`OtelMetricsProvider` 接入 AgentLoop；给 sub_agent/A2A 传 `trace_context`/traceparent 实现分布式追踪。——evolution §0（`83e7daf`，`HttpOtlpExporter` 真导出 + metrics 接 AgentLoop）。sub_agent/A2A 分布式 traceparent 传播 ✅（2026-08-24：`oneai-trace::w3c` W3C Trace Context 格式/解析 + `TraceContext::current_traceparent`；子 Agent 经 `DefaultSubAgentFactory::with_trace_context` 继承上下文并以 `AgentLoopConfig.trace_parent_span_id` 挂到父当前 span 下（不再是 trace 孤岛）；A2A client 出站注入 `traceparent` 头、server 入站校验后提升进 `params.metadata` 经 `A2ARunner::run_task_with_trace` 达 runner，AppA2ARunner 记录 `a2a.inbound_traceparent`）。
 5. ✅ **RecoveryManager 真生效**：工具失败时程序性重试（带 jitter 退避），不只是塞 system message。——evolution §0（`d35671e`）+ §1.4（jitter `error_recovery.rs:167`）。
 
 ### P1 安全护栏补齐

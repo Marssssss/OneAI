@@ -62,6 +62,10 @@ mod otel_metrics;
 #[cfg(not(feature = "trace"))]
 mod noop;
 
+// W3C Trace Context (`traceparent`) helpers — pure string conversions, no
+// feature gate so A2A / sub-agent propagation works in any build config.
+pub mod w3c;
+
 // ─── Public exports ──────────────────────────────────────────────────
 
 #[cfg(feature = "trace")]
@@ -78,6 +82,8 @@ pub use metrics::TraceMetrics;
 pub use span::{Span, SpanKind, SpanStatus};
 #[cfg(feature = "trace")]
 pub use tree::{TraceMetadata, TraceTree};
+
+pub use w3c::{format_traceparent, parse_traceparent, Traceparent, TRACEPARENT_HEADER};
 
 // OTEL exports — available when both trace and otel features are enabled
 #[cfg(all(feature = "trace", feature = "otel"))]
@@ -303,5 +309,46 @@ mod tests {
     fn test_in_memory_collector() {
         let collector = InMemoryCollector::new();
         assert_eq!(collector.span_count(), 0);
+    }
+
+    #[test]
+    fn test_current_traceparent_none_without_span() {
+        let ctx = TraceContext::new(Arc::new(InMemoryCollector::new()));
+        assert!(ctx.current_traceparent().is_none());
+    }
+
+    #[test]
+    fn test_current_traceparent_shape_and_root() {
+        let ctx = TraceContext::new(Arc::new(InMemoryCollector::new()));
+        let root = ctx.enter_span(SpanKind::SESSION, "session", None);
+        let child = ctx.enter_span(SpanKind::AGENT, "agent_loop", None);
+
+        let header = ctx.current_traceparent().expect("active span → header");
+        let parsed = w3c::parse_traceparent(&header).expect("well-formed traceparent");
+        // trace-id = the ROOT span's id (all spans in one tree share it)
+        assert_eq!(parsed.trace_id, w3c::w3c_trace_id(&w3c::uuid_to_hex(&root)));
+        // parent-id = the CURRENT (innermost) span
+        assert_eq!(parsed.parent_id, w3c::w3c_span_id(&child));
+        assert!(parsed.sampled());
+
+        // Nesting deeper moves only the parent-id, trace-id stays the root's.
+        let grandchild = ctx.enter_span(SpanKind::LLM, "inference", None);
+        let header2 = ctx.current_traceparent().unwrap();
+        let parsed2 = w3c::parse_traceparent(&header2).unwrap();
+        assert_eq!(parsed2.trace_id, parsed.trace_id);
+        assert_eq!(parsed2.parent_id, w3c::w3c_span_id(&grandchild));
+
+        ctx.exit_span(&grandchild, SpanStatus::Ok);
+        ctx.exit_span(&child, SpanStatus::Ok);
+        ctx.exit_span(&root, SpanStatus::Ok);
+        // No active span left → no header.
+        assert!(ctx.current_traceparent().is_none());
+    }
+
+    #[test]
+    fn test_current_traceparent_disabled_context() {
+        let ctx = TraceContext::disabled();
+        ctx.enter_span(SpanKind::SESSION, "session", None);
+        assert!(ctx.current_traceparent().is_none());
     }
 }

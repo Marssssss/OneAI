@@ -23,6 +23,7 @@ use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 use oneai_core::{Conversation, Message};
 use oneai_domain::MergedDomainPack;
+use oneai_trace::TraceContext;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopObserver};
 use crate::worktree_isolation::{MergeResult, WorktreeConfig, WorktreeHandle, WorktreeIsolation};
@@ -848,6 +849,12 @@ pub struct DefaultSubAgentFactory {
     /// `None` (no store — e.g. tests) → fall back to `Medium` as the user
     /// effort, still capped per-kind (matches the prior bounded default).
     thinking_effort: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
+    /// Parent's trace context (gap P0 #4). When set, every built sub-agent
+    /// loop shares it AND gets `trace_parent_span_id` = the span current at
+    /// creation time — the sub-agent's span tree attaches under the
+    /// delegating span instead of floating as a trace island. Cloned into
+    /// nested factories by `build_parent_factory`.
+    trace_context: Option<TraceContext>,
 }
 
 impl DefaultSubAgentFactory {
@@ -868,6 +875,7 @@ impl DefaultSubAgentFactory {
             child_factory: Arc::new(SubAgentFactoryNone),
             permission_pack: None,
             thinking_effort: None,
+            trace_context: None,
         }
     }
 
@@ -894,6 +902,7 @@ impl DefaultSubAgentFactory {
             child_factory: Arc::new(SubAgentFactoryNone),
             permission_pack: None,
             thinking_effort: None,
+            trace_context: None,
         }
     }
 
@@ -927,6 +936,21 @@ impl DefaultSubAgentFactory {
         store: Option<Arc<dyn oneai_core::ThinkingEffortStore>>,
     ) -> Self {
         self.thinking_effort = store;
+        self
+    }
+
+    /// Wire the parent's trace context (gap P0 #4). Built sub-agent loops
+    /// then share this context AND attach their root span under the span
+    /// current at creation time (no trace islands).
+    pub fn with_trace_context(mut self, ctx: TraceContext) -> Self {
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    /// Like [`Self::with_trace_context`] but accepts `None` (no tracing
+    /// configured → sub-agents stay untraced, today's behavior).
+    pub fn with_optional_trace_context(mut self, ctx: Option<TraceContext>) -> Self {
+        self.trace_context = ctx;
         self
     }
 
@@ -1163,7 +1187,13 @@ impl DefaultSubAgentFactory {
             context_manager: None,
             structured_output: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
-            trace_context: None,
+            // gap P0 #4 — inherit the parent's trace context and attach the
+            // sub-agent's root span under the parent's current span.
+            trace_context: self.trace_context.clone(),
+            trace_parent_span_id: self
+                .trace_context
+                .as_ref()
+                .and_then(|ctx| ctx.current_span_id()),
             #[cfg(feature = "otel")]
             metrics_provider: None,
             plan_mode: false,
@@ -1378,6 +1408,7 @@ impl Clone for DefaultSubAgentFactory {
             child_factory: self.child_factory.clone(),
             permission_pack: self.permission_pack.clone(),
             thinking_effort: self.thinking_effort.clone(),
+            trace_context: self.trace_context.clone(),
         }
     }
 }
@@ -1426,7 +1457,7 @@ mod scoped_tools_tests {
     //! back to all registered tools instead of leaving the sub-agent with an
     //! empty toolset against a prompt that asks it to use tools.
     use super::*;
-    use crate::mock_provider::MockProvider;
+    use crate::mock_provider::{MockProvider, ScriptedResponse};
     use crate::mock_tool::MockTool;
     use oneai_core::traits::Tool;
     use oneai_parser::ThreeLayerParser;
@@ -1500,5 +1531,80 @@ mod scoped_tools_tests {
             .create_scoped_tools(SubAgentKind::Explore.default_tools(), false)
             .await;
         assert!(scoped.read().await.is_empty());
+    }
+
+    // ─── Trace propagation (gap P0 #4) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn sub_agent_spans_attach_under_parent_span() {
+        // A sub-agent loop must NOT be a trace island: its `agent_loop` span
+        // gets the parent loop's current span id as explicit parent.
+        use oneai_trace::{InMemoryCollector, SpanKind, SpanStatus, TraceContext};
+
+        let ctx = TraceContext::new(Arc::new(InMemoryCollector::new()));
+        let parent_span = ctx.enter_span(SpanKind::AGENT, "parent_loop", None);
+
+        let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        map.insert(
+            "read_file".to_string(),
+            Arc::new(MockTool::success_tool("read_file", "ok")) as Arc<dyn Tool>,
+        );
+        let tools = Arc::new(tokio::sync::RwLock::new(map));
+        let factory = DefaultSubAgentFactory::new(
+            Arc::new(MockProvider::from_script(vec![
+                ScriptedResponse::direct_answer("done"),
+            ])),
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            tools,
+        )
+        .with_trace_context(ctx.clone());
+
+        let sub = factory
+            .create(SubAgentKind::Explore, TokenBudget::new(100000))
+            .await
+            .expect("sub-agent created");
+        let summary = sub.run("look around").await.expect("sub-agent runs");
+        assert!(summary.completed);
+
+        // The sub-agent's `agent_loop` span must nest under the parent span.
+        let tree = ctx.build_tree();
+        let parent = tree
+            .root_span
+            .find_span(&parent_span)
+            .expect("parent span in tree");
+        let child = parent
+            .children
+            .iter()
+            .find(|c| c.name == "agent_loop")
+            .unwrap_or_else(|| panic!("agent_loop span not nested: {:?}", parent.children));
+        assert_eq!(child.parent_span_id.as_deref(), Some(parent_span.as_str()));
+
+        ctx.exit_span(&parent_span, SpanStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn sub_agent_without_trace_context_stays_untraced() {
+        // No trace context wired → the sub-agent still runs fine
+        // (backward compat: tracing stays fully optional).
+        let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        map.insert(
+            "read_file".to_string(),
+            Arc::new(MockTool::success_tool("read_file", "ok")) as Arc<dyn Tool>,
+        );
+        let factory = DefaultSubAgentFactory::new(
+            Arc::new(MockProvider::from_script(vec![
+                ScriptedResponse::direct_answer("done"),
+            ])),
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            Arc::new(tokio::sync::RwLock::new(map)),
+        );
+        let sub = factory
+            .create(SubAgentKind::Explore, TokenBudget::new(100000))
+            .await
+            .expect("sub-agent created without trace context");
+        let summary = sub.run("look around").await.expect("runs untraced");
+        assert!(summary.completed);
     }
 }

@@ -753,6 +753,7 @@ fn build_member_loop(
         structured_output: None,
         constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
         trace_context: None,
+        trace_parent_span_id: None,
         #[cfg(feature = "otel")]
         metrics_provider: None,
         plan_mode: false,

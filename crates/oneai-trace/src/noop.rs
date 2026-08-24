@@ -44,6 +44,12 @@ impl TraceContext {
         None
     }
 
+    /// W3C `traceparent` for the current span — always `None` in the
+    /// no-trace stub build.
+    pub fn current_traceparent(&self) -> Option<String> {
+        None
+    }
+
     pub fn is_enabled(&self) -> bool {
         false
     }

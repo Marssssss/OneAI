@@ -141,6 +141,28 @@ pub trait A2ARunner: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Drive a turn carrying an inbound W3C `traceparent` (gap P0 #4 —
+    /// distributed trace propagation). `sink` non-`None` requests streaming
+    /// (equivalent to [`Self::run_task_streaming`]). The default impl drops
+    /// the traceparent and falls back to the existing methods, so runners
+    /// that pre-date trace propagation keep working unchanged; trace-aware
+    /// runners override this to attach the inbound trace context.
+    async fn run_task_with_trace(
+        &self,
+        session_id: &str,
+        message_text: &str,
+        traceparent: Option<&str>,
+        sink: Option<Arc<dyn A2ASseSink>>,
+    ) -> TaskOutcome {
+        let _ = traceparent;
+        match sink {
+            Some(s) if self.supports_streaming() => {
+                self.run_task_streaming(session_id, message_text, s).await
+            }
+            _ => self.run_task(session_id, message_text).await,
+        }
+    }
 }
 
 // ─── PlaceholderRunner (default — preserves pre-3.5 behavior) ─────────────────

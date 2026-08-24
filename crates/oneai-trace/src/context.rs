@@ -279,6 +279,38 @@ impl TraceContext {
 
     // ─── Tree Building ──────────────────────────────────────────────
 
+    /// The W3C `traceparent` header value for the current span (gap P0 #4 —
+    /// distributed propagation to sub-agents / A2A). The trace-id derives
+    /// from the ROOT of the current span's parent chain and the parent-id
+    /// from the current span, so a remote system attaches its spans under
+    /// the same trace. `None` when tracing is disabled or no span is active.
+    pub fn current_traceparent(&self) -> Option<String> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let spans = self.inner.spans.lock().unwrap();
+        let current_id = self.inner.span_stack.lock().unwrap().last().cloned()?;
+        let mut current = spans.get(&current_id)?;
+        // Walk the parent chain to the root (cycle-guarded), mirroring the
+        // OTEL exporter's trace-id resolution.
+        let mut guard = 0;
+        while let Some(parent_id) = current.parent_span_id.as_deref() {
+            match spans.get(parent_id) {
+                Some(parent) => {
+                    current = parent;
+                    guard += 1;
+                    if guard > 64 {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let trace_id = crate::w3c::w3c_trace_id(&crate::w3c::uuid_to_hex(&current.span_id));
+        let parent_id = crate::w3c::w3c_span_id(&current_id);
+        Some(crate::w3c::format_traceparent(&trace_id, &parent_id, true))
+    }
+
     /// Build the final TraceTree from all collected spans.
     ///
     /// Assembles the span tree by:

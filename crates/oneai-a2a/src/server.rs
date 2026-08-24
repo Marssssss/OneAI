@@ -283,7 +283,7 @@ async fn post_jsonrpc(
         return jsonrpc_error_response(StatusCode::UNAUTHORIZED, None, -32000, "unauthorized");
     }
 
-    let value: serde_json::Value = match serde_json::from_slice(&body) {
+    let mut value: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
             return jsonrpc_error_response(
@@ -296,7 +296,35 @@ async fn post_jsonrpc(
     };
 
     let id = value.get("id").cloned();
-    let method = value.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let method = value
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // gap P0 #4 — W3C Trace Context propagation: lift a valid inbound
+    // `traceparent` header into `params.metadata.traceparent` so the handler
+    // / runner see it through the existing JSON-RPC plumbing (no signature
+    // changes downstream). Invalid headers are dropped per spec.
+    if let Some(Ok(tp)) = headers
+        .get(oneai_trace::TRACEPARENT_HEADER)
+        .map(|v| v.to_str())
+    {
+        if oneai_trace::parse_traceparent(tp).is_some() {
+            let params = value
+                .as_object_mut()
+                .and_then(|o| o.get_mut("params"))
+                .and_then(|p| p.as_object_mut());
+            if let Some(params) = params {
+                let metadata = params
+                    .entry("metadata")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(m) = metadata.as_object_mut() {
+                    m.insert("traceparent".to_string(), serde_json::json!(tp));
+                }
+            }
+        }
+    }
 
     // Branch: streaming methods get an SSE response; everything else dispatches
     // through the single-Value router.
@@ -405,9 +433,23 @@ async fn streaming_response(
     // task event and drops the channel sender (closes the SSE stream).
     let host = state.host.clone();
     let runner = state.host.runner().clone();
+    // gap P0 #4 — inbound traceparent lifted into params.metadata by the
+    // POST handler; threaded to the runner alongside the SSE sink.
+    let traceparent = send_params
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("traceparent"))
+        .and_then(|v| v.as_str())
+        .filter(|tp| oneai_trace::parse_traceparent(tp).is_some())
+        .map(|tp| tp.to_string());
     tokio::spawn(async move {
         let outcome = runner
-            .run_task_streaming(&session_id, &message_text, sink.clone())
+            .run_task_with_trace(
+                &session_id,
+                &message_text,
+                traceparent.as_deref(),
+                Some(sink.clone()),
+            )
             .await;
         // Map the outcome to the terminal Task, emit the final `task` event,
         // then let `sink` drop (closing the SSE stream).
@@ -945,5 +987,135 @@ mod tests {
         assert!(text.contains("\"lo\""));
         assert!(text.contains("\"type\":\"task\""));
         assert!(text.contains("completed"));
+    }
+
+    #[tokio::test]
+    async fn traceparent_header_propagates_to_runner() {
+        // gap P0 #4 — a valid inbound `traceparent` HTTP header is lifted
+        // into params.metadata and reaches the runner on BOTH the
+        // tasks/send and tasks/sendSubscribe paths.
+        use crate::runner::{A2ARunner, A2ASseSink, TaskOutcome};
+        use async_trait::async_trait;
+
+        const TP: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+        struct CapturingRunner {
+            captured: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        }
+        #[async_trait]
+        impl A2ARunner for CapturingRunner {
+            async fn run_task(&self, _: &str, _: &str) -> TaskOutcome {
+                TaskOutcome::Done {
+                    final_answer: "done".into(),
+                    completed: true,
+                    iterations: 1,
+                }
+            }
+            async fn run_task_with_trace(
+                &self,
+                session_id: &str,
+                message_text: &str,
+                traceparent: Option<&str>,
+                sink: Option<Arc<dyn A2ASseSink>>,
+            ) -> TaskOutcome {
+                self.captured
+                    .lock()
+                    .unwrap()
+                    .push(traceparent.map(|s| s.to_string()));
+                let _ = sink; // streaming sink unused — the capture is the point
+                self.run_task(session_id, message_text).await
+            }
+            fn supports_streaming(&self) -> bool {
+                true
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let card = AgentCard::new("tp-agent", "traceparent", "https://tp.example.com");
+        let store = Arc::new(TaskStore::new());
+        let host = Arc::new(A2AServerHost::new(card, store).with_runner(
+            Arc::new(CapturingRunner {
+                captured: captured.clone(),
+            }) as Arc<dyn A2ARunner>,
+        ));
+        let state = A2AWebState::new(host, "secret".to_string());
+        let router = build_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+
+        // Non-streaming: tasks/send
+        let resp = client
+            .post(format!("http://{addr}/"))
+            .header("authorization", "Bearer secret")
+            .header("content-type", "application/json")
+            .header("traceparent", TP)
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tasks/send",
+                    "params": {
+                        "id": "tp1",
+                        "message": {"role":"user","parts":[{"type":"text","text":"hi"}]}
+                    }
+                }))
+                .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Streaming: tasks/sendSubscribe
+        let resp = client
+            .post(format!("http://{addr}/"))
+            .header("authorization", "Bearer secret")
+            .header("content-type", "application/json")
+            .header("traceparent", TP)
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tasks/sendSubscribe",
+                    "params": {
+                        "id": "tp2",
+                        "message": {"role":"user","parts":[{"type":"text","text":"hi"}]}
+                    }
+                }))
+                .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.text().await; // drain the SSE stream to let the task finish
+
+        // Malformed header must be dropped (no propagation).
+        let resp = client
+            .post(format!("http://{addr}/"))
+            .header("authorization", "Bearer secret")
+            .header("content-type", "application/json")
+            .header("traceparent", "not-a-valid-header")
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 3, "method": "tasks/send",
+                    "params": {
+                        "id": "tp3",
+                        "message": {"role":"user","parts":[{"type":"text","text":"hi"}]}
+                    }
+                }))
+                .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 3, "runner hit once per request");
+        assert_eq!(calls[0].as_deref(), Some(TP)); // tasks/send carried it
+        assert_eq!(calls[1].as_deref(), Some(TP)); // sendSubscribe carried it
+        assert_eq!(calls[2], None); // malformed header dropped
     }
 }

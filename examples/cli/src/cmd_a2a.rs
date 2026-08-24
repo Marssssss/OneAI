@@ -204,6 +204,35 @@ impl A2ARunner for AppA2ARunner {
     fn supports_streaming(&self) -> bool {
         self.has_provider
     }
+
+    /// gap P0 #4 — record the inbound W3C `traceparent` on this App's trace
+    /// context (attribute on the active span, when one is open) so the
+    /// distributed trace link survives into the local trajectory, then drive
+    /// the usual streaming / non-streaming turn.
+    async fn run_task_with_trace(
+        &self,
+        session_id: &str,
+        message_text: &str,
+        traceparent: Option<&str>,
+        sink: Option<Arc<dyn A2ASseSink>>,
+    ) -> TaskOutcome {
+        if let Some(tp) = traceparent {
+            tracing::info!(
+                "A2A task on session '{}' continuing inbound trace: {}",
+                session_id,
+                tp
+            );
+            if let Some(ctx) = self.app.trace_context.as_ref() {
+                ctx.set_attribute("a2a.inbound_traceparent", serde_json::json!(tp));
+            }
+        }
+        match sink {
+            Some(s) if self.supports_streaming() => {
+                self.run_task_streaming(session_id, message_text, s).await
+            }
+            _ => self.run_task(session_id, message_text).await,
+        }
+    }
 }
 
 /// Observer that relays assistant stream chunks to the A2A SSE sink. Mirrors

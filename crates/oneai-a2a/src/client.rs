@@ -68,6 +68,11 @@ pub struct A2AClient {
     next_id: u64,
     /// Custom headers to include in every request (e.g., authentication).
     headers: HashMap<String, String>,
+    /// Optional trace context (gap P0 #4). When set, every outbound request
+    /// carries a W3C `traceparent` header derived from the context's
+    /// current span, so the remote agent can attach its spans under the
+    /// caller's trace.
+    trace_context: Option<oneai_trace::TraceContext>,
     /// Request timeout in seconds.
     timeout_secs: u64,
 }
@@ -77,6 +82,7 @@ impl A2AClient {
     pub fn new(agent_url: impl Into<String>) -> Self {
         Self {
             http_client: reqwest::Client::new(),
+            trace_context: None,
             agent_url: agent_url.into(),
             agent_card: None,
             next_id: 1,
@@ -89,12 +95,28 @@ impl A2AClient {
     pub fn with_headers(agent_url: impl Into<String>, headers: HashMap<String, String>) -> Self {
         Self {
             http_client: reqwest::Client::new(),
+            trace_context: None,
             agent_url: agent_url.into(),
             agent_card: None,
             next_id: 1,
             headers,
             timeout_secs: 30,
         }
+    }
+
+    /// Wire a trace context (gap P0 #4) — every outbound request then
+    /// carries a W3C `traceparent` header derived from the context's
+    /// current span, letting the remote agent attach its spans under the
+    /// caller's trace.
+    pub fn with_trace_context(mut self, ctx: oneai_trace::TraceContext) -> Self {
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    /// The W3C `traceparent` header value for the current span, when a
+    /// trace context is wired and a span is active.
+    fn outbound_traceparent(&self) -> Option<String> {
+        self.trace_context.as_ref()?.current_traceparent()
     }
 
     /// Set a custom request timeout (in seconds).
@@ -275,12 +297,16 @@ impl A2AClient {
         // SSE streaming requires a different HTTP approach — POST and read SSE response
         let request_json = request.to_json()?;
 
-        let http_request = self
+        let mut http_request = self
             .http_client
             .post(&self.agent_url)
             .header("Content-Type", "application/json")
             .body(request_json)
             .timeout(std::time::Duration::from_secs(self.timeout_secs * 10)); // Longer timeout for streaming
+                                                                              // gap P0 #4 — propagate the caller's trace on the streaming path too.
+        if let Some(tp) = self.outbound_traceparent() {
+            http_request = http_request.header(oneai_trace::TRACEPARENT_HEADER, tp);
+        }
 
         let response = http_request
             .send()
@@ -360,6 +386,10 @@ impl A2AClient {
                     http_request = http_request.header(header_name, header_value);
                 }
             }
+        }
+        // gap P0 #4 — propagate the caller's trace to the remote agent.
+        if let Some(tp) = self.outbound_traceparent() {
+            http_request = http_request.header(oneai_trace::TRACEPARENT_HEADER, tp);
         }
 
         tracing::debug!(

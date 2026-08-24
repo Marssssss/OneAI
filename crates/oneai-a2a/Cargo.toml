@@ -27,6 +27,7 @@ tower-http = { workspace = true }
 oneai-core = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-tool = { workspace = true }
+oneai-trace = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

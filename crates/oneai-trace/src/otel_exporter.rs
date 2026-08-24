@@ -287,21 +287,12 @@ fn span_status_to_otel_code(status: &SpanStatus) -> u8 {
 
 /// Strip a OneAI UUID span id (e.g. `550e8400-e29b-...`) to its 32 hex chars.
 fn hex_span_id(id: &str) -> String {
-    id.chars().filter(|c| c.is_ascii_hexdigit()).collect()
+    crate::w3c::uuid_to_hex(id)
 }
 
 /// 16-hex (8-byte) OTEL span id derived from a OneAI span id.
 fn otel_span_id(id: &str) -> String {
-    let hex = hex_span_id(id);
-    // OTLP spanId is exactly 16 hex chars (8 bytes). Pad/trim to 16.
-    let mut out = hex;
-    if out.len() > 16 {
-        out.truncate(16);
-    }
-    while out.len() < 16 {
-        out.insert(0, '0');
-    }
-    out
+    crate::w3c::w3c_span_id(id)
 }
 
 /// 32-hex (16-byte) OTEL trace id. Resolved by walking the parent chain to
@@ -331,14 +322,7 @@ fn otel_trace_id(span: &Span, by_id: &HashMap<String, &Span>) -> String {
 
 /// Pad/trim a hex string to exactly 32 chars (16-byte OTEL trace id).
 fn pad_trace_id(hex: &str) -> String {
-    let mut out = hex.to_string();
-    if out.len() > 32 {
-        out.truncate(32);
-    }
-    while out.len() < 32 {
-        out.insert(0, '0');
-    }
-    out
+    crate::w3c::w3c_trace_id(hex)
 }
 
 /// Convert a `serde_json::Value` to an OTLP `anyValue` JSON object.

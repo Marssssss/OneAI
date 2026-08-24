@@ -129,6 +129,7 @@ pub trait OtlpExporter { /* HttpOtlpExporter / InMemoryOtlpExporter */ }
 | `OtlpCollector` + `OtlpExporter`/`HttpOtlpExporter`/`InMemoryOtlpExporter`/`OtlpConfig` | `crates/oneai-trace/src/otel_exporter.rs` |
 | `OtelMetricsProvider` + `MetricsSnapshot` | `crates/oneai-trace/src/otel_metrics.rs:119,40` |
 | `noop.rs` (feature-off zero-cost stub) | `crates/oneai-trace/src/noop.rs` |
+| W3C `traceparent` (`parse/format_traceparent` + UUID→W3C ID mapping + `TraceContext::current_traceparent`) | `crates/oneai-trace/src/w3c.rs` + `context.rs` |
 | AgentLoop trace write points | `crates/oneai-agent/src/agent_loop.rs` (P2-3 key points) |
 
 ## 8. Industry comparison
@@ -151,6 +152,10 @@ OneAI's distinct points: **OpenInference-compatible + zero-cost-off** (off, full
 - **Consume metrics**: `ctx.build_tree()` → `TraceMetrics::compute_from_tree`; `merge` aggregates.
 - **Eval integration**: `oneai-eval`'s efficiency axis/SWE-bench auto-consumes `TraceTree`.
 - **Feature flags**: `trace` (default on), `otel` (opt-in).
+- **Distributed propagation (gap P0 #4)**:
+  - **Sub-agents**: `DefaultSubAgentFactory::with_trace_context(ctx)` (wired automatically by AppSession) — the child loop shares the parent context, and `AgentLoopConfig.trace_parent_span_id` captures the parent loop's current span at creation time, so the child tree nests under the delegating span (no trace islands).
+  - **A2A outbound**: with `A2AClient::with_trace_context(ctx)`, every request carries a W3C `traceparent` header (`00-{root-span 32hex}-{current-span 16hex}-01`; UUID→hex mapping identical to the OTEL exporter).
+  - **A2A inbound**: the axum layer validates the `traceparent` header and lifts it into `params.metadata.traceparent`, reaching the runner via `A2ARunner::run_task_with_trace`; the CLI's `AppA2ARunner` records it as an `a2a.inbound_traceparent` span attribute. Malformed headers are dropped per the W3C spec.
 
 ## 10. Further reading
 

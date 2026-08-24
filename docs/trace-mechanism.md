@@ -129,6 +129,7 @@ pub trait OtlpExporter { /* HttpOtlpExporter / InMemoryOtlpExporter */ }
 | `OtlpCollector` + `OtlpExporter`/`HttpOtlpExporter`/`InMemoryOtlpExporter`/`OtlpConfig` | `crates/oneai-trace/src/otel_exporter.rs` |
 | `OtelMetricsProvider` + `MetricsSnapshot` | `crates/oneai-trace/src/otel_metrics.rs:119,40` |
 | `noop.rs`（feature off 零开销 stub）| `crates/oneai-trace/src/noop.rs` |
+| W3C `traceparent`（`parse/format_traceparent` + UUID→W3C ID 映射 + `TraceContext::current_traceparent`）| `crates/oneai-trace/src/w3c.rs` + `context.rs` |
 | AgentLoop 写轨迹接入点 | `crates/oneai-agent/src/agent_loop.rs`（P2-3 各关键点）|
 
 ## 8. 与业界对比
@@ -151,6 +152,10 @@ OneAI 独特点：**OpenInference 兼容 + 零开销可关**（关 feature 全�
 - **消费指标**：`ctx.build_tree()` → `TraceMetrics::compute_from_tree`；`merge` 聚合。
 - **评测接入**：`oneai-eval` 效率轴/SWE-bench 自动消费 `TraceTree`。
 - **feature flags**：`trace`（默认开）、`otel`（opt-in）。
+- **分布式传播（gap P0 #4）**：
+  - **子 Agent**：`DefaultSubAgentFactory::with_trace_context(ctx)`（AppSession 自动接线）——子循环共享父上下文，且 `AgentLoopConfig.trace_parent_span_id` 取创建时刻父循环的当前 span，子树挂在委托 span 之下（不再是 trace 孤岛）。
+  - **A2A 出站**：`A2AClient::with_trace_context(ctx)` 后，每个请求自动带 W3C `traceparent` 头（`00-{根span32hex}-{当前span16hex}-01`，UUID→hex 映射与 OTEL exporter 一致）。
+  - **A2A 入站**：axum 层校验 `traceparent` 头并提升进 `params.metadata.traceparent`，经 `A2ARunner::run_task_with_trace` 到达 runner；CLI 的 `AppA2ARunner` 把它记为 `a2a.inbound_traceparent` span 属性。非法头按 W3C 规范丢弃。
 
 ## 10. 深入阅读
 

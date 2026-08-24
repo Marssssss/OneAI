@@ -972,6 +972,12 @@ pub struct AgentLoopConfig {
     /// paradigm switch, delegation, approval). When None, tracing is
     /// completely disabled (zero overhead).
     pub trace_context: Option<TraceContext>,
+    /// Explicit parent span id for this loop's root `agent_loop` span
+    /// (gap P0 #4 — distributed trace propagation). Sub-agent loops get the
+    /// PARENT loop's current span id here so their span tree attaches under
+    /// the delegating span instead of floating as trace islands. `None` =
+    /// fall back to the trace context's span-stack top (today's behavior).
+    pub trace_parent_span_id: Option<String>,
     /// OTEL metrics provider — when set (and the `otel` feature is on), the
     /// loop records real counters/histograms at the lifecycle hot paths:
     /// inference requests + token usage, tool-call success/failure, errors.
@@ -1094,6 +1100,7 @@ impl Default for AgentLoopConfig {
             structured_output: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None,
+            trace_parent_span_id: None,
             // OTEL metrics are opt-in — AppBuilder wires the provider when the
             // `otel` feature is on and the user enables metrics.
             #[cfg(feature = "otel")]
@@ -1713,7 +1720,13 @@ impl AgentLoop {
 
         // ─── Trace: start AGENT span for the entire loop ──────────────
         let loop_span_id = if let Some(ctx) = &self.config.trace_context {
-            let span_id = ctx.enter_span(SpanKind::AGENT, "agent_loop", None);
+            // gap P0 #4 — sub-agent loops carry the parent's current span id
+            // so their tree attaches under the delegating span (no islands).
+            let span_id = ctx.enter_span(
+                SpanKind::AGENT,
+                "agent_loop",
+                self.config.trace_parent_span_id.as_deref(),
+            );
             ctx.set_attribute("agent.task", serde_json::json!(state.original_task));
             ctx.set_attribute(
                 "agent.paradigm",

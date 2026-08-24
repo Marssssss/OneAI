@@ -180,9 +180,26 @@ impl A2AHandler {
             }
         };
 
+        // gap P0 #4 — inbound W3C traceparent (injected into params metadata
+        // by the axum layer from the HTTP header). Threaded to the runner so
+        // trace-aware implementations attach the distributed trace.
+        let traceparent = send_params
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("traceparent"))
+            .and_then(|v| v.as_str())
+            .filter(|tp| oneai_trace::parse_traceparent(tp).is_some())
+            .map(|tp| tp.to_string());
+        if let Some(tp) = &traceparent {
+            tracing::info!("A2A tasks/send continuing inbound trace: {}", tp);
+        }
+
         // Drive the runner — a real AgentLoop turn when the CLI injected an
         // App-backed runner (PlaceholderRunner ack by default).
-        let outcome = self.runner.run_task(&session_id, &message_text).await;
+        let outcome = self
+            .runner
+            .run_task_with_trace(&session_id, &message_text, traceparent.as_deref(), None)
+            .await;
 
         // Map the outcome to a terminal Task state.
         let task_result = match &outcome {
@@ -506,5 +523,119 @@ mod tests {
             .await;
         // Should produce the same result as handle_send_task
         assert!(response.get("result").is_some());
+    }
+
+    // ─── Inbound W3C traceparent propagation (gap P0 #4) ──────────────────
+
+    /// Runner that captures the traceparent handed to `run_task_with_trace`.
+    struct CapturingRunner {
+        captured: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl A2ARunner for CapturingRunner {
+        async fn run_task(&self, _session_id: &str, _message_text: &str) -> TaskOutcome {
+            TaskOutcome::Done {
+                final_answer: "ok".to_string(),
+                completed: true,
+                iterations: 1,
+            }
+        }
+
+        async fn run_task_with_trace(
+            &self,
+            session_id: &str,
+            message_text: &str,
+            traceparent: Option<&str>,
+            _sink: Option<Arc<dyn crate::runner::A2ASseSink>>,
+        ) -> TaskOutcome {
+            self.captured
+                .lock()
+                .unwrap()
+                .push(traceparent.map(|s| s.to_string()));
+            self.run_task(session_id, message_text).await
+        }
+    }
+
+    fn params_with_traceparent(task_id: &str, traceparent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": task_id,
+            "message": {
+                "role": "user",
+                "parts": [{"type": "text", "text": "distributed call"}]
+            },
+            "metadata": { "traceparent": traceparent }
+        })
+    }
+
+    #[tokio::test]
+    async fn valid_inbound_traceparent_reaches_runner() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let card = AgentCard::new("trace-agent", "t", "https://t.example.com");
+        let handler = A2AHandler::new(card, Arc::new(TaskStore::new())).with_runner(Arc::new(
+            CapturingRunner {
+                captured: captured.clone(),
+            },
+        ));
+
+        let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let response = handler
+            .handle_send_task(
+                Some(serde_json::json!(1)),
+                &params_with_traceparent("task-tp-1", tp),
+            )
+            .await;
+        assert!(response.get("result").is_some());
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].as_deref(), Some(tp));
+    }
+
+    #[tokio::test]
+    async fn malformed_inbound_traceparent_is_dropped() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let card = AgentCard::new("trace-agent", "t", "https://t.example.com");
+        let handler = A2AHandler::new(card, Arc::new(TaskStore::new())).with_runner(Arc::new(
+            CapturingRunner {
+                captured: captured.clone(),
+            },
+        ));
+
+        let response = handler
+            .handle_send_task(
+                Some(serde_json::json!(1)),
+                &params_with_traceparent("task-tp-2", "garbage-not-a-traceparent"),
+            )
+            .await;
+        assert!(response.get("result").is_some());
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], None); // malformed → not propagated
+    }
+
+    #[tokio::test]
+    async fn no_metadata_means_no_traceparent() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let card = AgentCard::new("trace-agent", "t", "https://t.example.com");
+        let handler = A2AHandler::new(card, Arc::new(TaskStore::new())).with_runner(Arc::new(
+            CapturingRunner {
+                captured: captured.clone(),
+            },
+        ));
+
+        let params = serde_json::json!({
+            "id": "task-tp-3",
+            "message": {
+                "role": "user",
+                "parts": [{"type": "text", "text": "plain call"}]
+            }
+        });
+        let response = handler
+            .handle_send_task(Some(serde_json::json!(1)), &params)
+            .await;
+        assert!(response.get("result").is_some());
+        assert_eq!(captured.lock().unwrap()[0], None);
     }
 }

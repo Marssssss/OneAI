@@ -1272,6 +1272,7 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                trace_parent_span_id: None,
                 // Wire OTEL metrics into the loop (gap-analysis #4) — the
                 // provider is built in AppBuilder via `otel_metrics(...)`.
                 #[cfg(feature = "otel")]
@@ -1344,7 +1345,10 @@ impl AppSession {
                         self.app.tool_executor.tools_map(),
                     )
                     .with_permission_pack(domain.clone())
-                    .with_thinking_effort_store(self.app.thinking_effort.clone()),
+                    .with_thinking_effort_store(self.app.thinking_effort.clone())
+                    // gap P0 #4 — sub-agents inherit the session's trace
+                    // context (their spans attach under the delegating span).
+                    .with_optional_trace_context(self.trace_context.clone()),
                 ),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
@@ -1395,6 +1399,7 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                trace_parent_span_id: None,
                 // Wire OTEL metrics into the loop (gap-analysis #4) — the
                 // provider is built in AppBuilder via `otel_metrics(...)`.
                 #[cfg(feature = "otel")]
@@ -1464,7 +1469,10 @@ impl AppSession {
                         self.app.interaction_gate.clone(),
                         self.app.tool_executor.tools_map(),
                     )
-                    .with_thinking_effort_store(self.app.thinking_effort.clone()),
+                    .with_thinking_effort_store(self.app.thinking_effort.clone())
+                    // gap P0 #4 — sub-agents inherit the session's trace
+                    // context (their spans attach under the delegating span).
+                    .with_optional_trace_context(self.trace_context.clone()),
                 ),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
