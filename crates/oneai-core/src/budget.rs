@@ -684,7 +684,12 @@ impl ContextBudgetManager {
         //无损截断 tier — the model keeps a capped view, and the pointer tells
         // it to reach for `memory_search` for the full output.
         let conversation = if estimate.tool_results as u32 > allocated.tool_results {
-            truncate_tool_results(conversation, allocated.tool_results)
+            truncate_tool_results(
+                conversation,
+                allocated.tool_results,
+                self.token_counter.as_deref(),
+                self.model_name.as_deref(),
+            )
         } else {
             conversation
         };
@@ -774,14 +779,57 @@ pub struct BudgetSourceEstimate {
 pub(crate) fn truncate_tool_results(
     conversation: Conversation,
     tool_results_token_budget: u32,
+    token_counter: Option<&dyn crate::token_counter::TokenCounter>,
+    model_name: Option<&str>,
 ) -> Conversation {
-    // Roughly 4 chars per token; cap each block at the full budget in chars
-    // (a single runaway output shouldn't eat the whole window silently, but
-    // per-block proportional capping is overkill here — the summary step still
-    // bounds older turns).
-    let max_chars = (tool_results_token_budget as usize)
-        .saturating_mul(4)
-        .max(1);
+    let truncate_marker = "\n[...output truncated — use memory_search for the full output]";
+
+    // Cap one block's content at the token budget and return the cut string.
+    // With a real counter the cut point is measured in TOKENS (binary search
+    // over the char prefix — gap P2 #13); without one it falls back to the
+    // legacy ~4 chars/token char cap.
+    let cap_block = |content: &str| -> String {
+        match (token_counter, model_name) {
+            (Some(counter), Some(model)) => {
+                // Reserve headroom for the marker suffix itself.
+                let target_tokens = tool_results_token_budget.saturating_sub(30);
+                let chars: Vec<char> = content.chars().collect();
+                // Binary search the longest prefix whose token count fits.
+                let (mut lo, mut hi) = (0usize, chars.len());
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    let prefix: String = chars[..mid].iter().collect();
+                    if counter.count_tokens(&prefix, model) <= target_tokens {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                chars[..lo].iter().collect()
+            }
+            _ => {
+                // Legacy heuristic cap: roughly 4 chars per token.
+                let max_chars = (tool_results_token_budget as usize)
+                    .saturating_mul(4)
+                    .max(1);
+                content.chars().take(max_chars).collect()
+            }
+        }
+    };
+
+    let needs_cap = |content: &str| -> bool {
+        match (token_counter, model_name) {
+            (Some(counter), Some(model)) => {
+                counter.count_tokens(content, model) > tool_results_token_budget
+            }
+            _ => {
+                let max_chars = (tool_results_token_budget as usize)
+                    .saturating_mul(4)
+                    .max(1);
+                content.chars().count() > max_chars
+            }
+        }
+    };
 
     let mut out = Conversation::with_id(conversation.id.clone());
     out.metadata = conversation.metadata.clone();
@@ -791,14 +839,11 @@ pub(crate) fn truncate_tool_results(
             .into_iter()
             .map(|block| match block {
                 ContentBlock::ToolResult { call_id, content } => {
-                    if content.chars().count() > max_chars {
-                        let cut: String = content.chars().take(max_chars).collect();
+                    if needs_cap(&content) {
+                        let cut = cap_block(&content);
                         ContentBlock::ToolResult {
                             call_id,
-                            content: format!(
-                                "{}\n[...output truncated — use memory_search for the full output]",
-                                cut
-                            ),
+                            content: format!("{}{}", cut, truncate_marker),
                         }
                     } else {
                         ContentBlock::ToolResult { call_id, content }
@@ -819,6 +864,7 @@ pub(crate) fn truncate_tool_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token_counter::TokenCounter;
 
     #[test]
     fn truncate_tool_results_caps_oversized_output_with_pointer() {
@@ -837,7 +883,7 @@ mod tests {
         });
 
         // 100-token tool_results budget → ~400 chars cap.
-        let out = truncate_tool_results(conv, 100);
+        let out = truncate_tool_results(conv, 100, None, None);
         let tool_msg = out.messages.iter().find(|m| m.role == Role::Tool).unwrap();
         let block = tool_msg.content.first().unwrap();
         match block {
@@ -888,7 +934,62 @@ mod tests {
             }],
             metadata: std::collections::HashMap::new(),
         });
-        let out = truncate_tool_results(conv, 100);
+        let out = truncate_tool_results(conv, 100, None, None);
+        let block = out.messages[0].content.first().unwrap();
+        match block {
+            ContentBlock::ToolResult { content, .. } => assert_eq!(content, "small output"),
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn truncate_tool_results_with_counter_caps_by_tokens() {
+        // gap P2 #13 — with a real counter wired, the cap is measured in
+        // TOKENS (via the counter), not the legacy chars×4 proxy. The cut
+        // prefix must stay within the budget as measured by the same counter.
+        let counter = crate::token_counter::HeuristicTokenCounter::new();
+        let long_output = "word ".repeat(10_000); // ~50k chars
+        let mut conv = Conversation::with_id("c1".into());
+        conv.add_message(Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                content: long_output.clone(),
+            }],
+            metadata: std::collections::HashMap::new(),
+        });
+
+        let budget_tokens = 200u32;
+        let out = truncate_tool_results(conv, budget_tokens, Some(&counter), Some("gpt-4o"));
+        let block = out.messages[0].content.first().unwrap();
+        match block {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.contains("memory_search"));
+                // The retained prefix (minus the marker) fits the budget
+                // under the SAME counter that decided the cut.
+                let prefix = content.split("\n[...output truncated").next().unwrap();
+                assert!(counter.count_tokens(prefix, "gpt-4o") <= budget_tokens);
+                // And it actually retained content (not over-truncated).
+                assert!(prefix.chars().count() > 100);
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn truncate_tool_results_with_counter_leaves_fitting_output_intact() {
+        // Under budget per the counter → untouched (no marker appended).
+        let counter = crate::token_counter::HeuristicTokenCounter::new();
+        let mut conv = Conversation::with_id("c1".into());
+        conv.add_message(Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                content: "small output".to_string(),
+            }],
+            metadata: std::collections::HashMap::new(),
+        });
+        let out = truncate_tool_results(conv, 500, Some(&counter), Some("gpt-4o"));
         let block = out.messages[0].content.first().unwrap();
         match block {
             ContentBlock::ToolResult { content, .. } => assert_eq!(content, "small output"),

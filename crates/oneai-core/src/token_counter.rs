@@ -674,6 +674,138 @@ impl TokenCounter for HeuristicTokenCounter {
     }
 }
 
+// ─── TiktokenTokenCounter (real BPE — gap P2 #13) ─────────────────────
+
+/// Real-tokenizer token counter backed by `tiktoken-rs` (OpenAI BPE).
+///
+/// Gap-analysis P2 #13: the framework previously counted tokens with a
+/// chars-per-token heuristic only. This counter replaces the *text→tokens*
+/// estimation with a real BPE encode (`o200k_base`, the GPT-4o-era encoding,
+/// bundled in-crate — no runtime download), which is accurate for code and
+/// natural language and dramatically better for CJK (where the old
+/// ~2 chars/token heuristic badly under-counts).
+///
+/// Scope of the approximation: OneAI talks to many providers (Anthropic /
+/// Google / Ollama / …), each with its own tokenizer, and no single offline
+/// tokenizer is exact for all of them. `o200k_base` is used as the universal
+/// approximation — this is the standard practice for cross-provider token
+/// *budgeting* (it is what drives context-fit / trimming / routing decisions,
+/// not billing). Per-provider message/system/tool *overhead* still comes from
+/// the model-aware [`HeuristicTokenCounter`] profiles, and
+/// `context_window_size` delegates to it (including the 3-layer resolver).
+///
+/// Only compiled under the `real-tokenizer` feature (default-off) so the
+/// foundation crate stays lean for embed/wasm targets; `oneai-app` and the
+/// CLI enable it.
+#[cfg(feature = "real-tokenizer")]
+pub struct TiktokenTokenCounter {
+    /// Shared BPE encoder. `o200k_base` is bundled, so construction is
+    /// effectively infallible; it is built once and shared across calls.
+    bpe: std::sync::Arc<tiktoken_rs::CoreBPE>,
+    /// Delegates context-window sizing + per-message overhead profiles.
+    fallback: HeuristicTokenCounter,
+}
+
+#[cfg(feature = "real-tokenizer")]
+impl TiktokenTokenCounter {
+    /// Create a counter using the bundled `o200k_base` BPE encoding.
+    pub fn new() -> Self {
+        let bpe = tiktoken_rs::o200k_base()
+            .expect("o200k_base is bundled with tiktoken-rs and cannot fail to load");
+        Self {
+            bpe: std::sync::Arc::new(bpe),
+            fallback: HeuristicTokenCounter::new(),
+        }
+    }
+
+    /// Attach a 3-layer `ModelContextResolver` (delegated to the underlying
+    /// heuristic counter for `context_window_size`).
+    pub fn with_resolver(self, resolver: Arc<ModelContextResolver>) -> Self {
+        Self {
+            fallback: self.fallback.with_resolver(resolver),
+            ..self
+        }
+    }
+
+    /// The attached resolver, if any.
+    pub fn resolver(&self) -> Option<&Arc<ModelContextResolver>> {
+        self.fallback.resolver()
+    }
+}
+
+#[cfg(feature = "real-tokenizer")]
+impl Default for TiktokenTokenCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "real-tokenizer")]
+impl TokenCounter for TiktokenTokenCounter {
+    fn count_tokens(&self, text: &str, _model: &str) -> u32 {
+        // Real BPE encode — model-agnostic (see struct docs).
+        self.bpe.encode_ordinary(text).len() as u32
+    }
+
+    fn count_conversation_tokens(&self, conversation: &Conversation, model: &str) -> u32 {
+        let profile = self.fallback.profile_for_model(model);
+        let mut total_tokens = 0u32;
+
+        // System prompt overhead (added once at the start).
+        total_tokens += profile.system_prompt_overhead_tokens;
+
+        for msg in &conversation.messages {
+            // Per-message overhead (role markers, separators, formatting).
+            total_tokens += profile.message_overhead_tokens;
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        total_tokens += self.count_tokens(text, model);
+                    }
+                    ContentBlock::ToolCall { name, args, .. } => {
+                        let name_tokens = self.count_tokens(name, model);
+                        let args_tokens = self.count_tokens(args, model);
+                        total_tokens +=
+                            name_tokens + args_tokens + profile.tool_definition_overhead_tokens;
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        total_tokens += self.count_tokens(content, model);
+                        // Tool result formatting overhead (call_id + formatting).
+                        total_tokens += 4;
+                    }
+                    ContentBlock::Image { .. } => {
+                        total_tokens += 170;
+                    }
+                    ContentBlock::Thinking { text, .. } => {
+                        total_tokens += self.count_tokens(text, model);
+                    }
+                    ContentBlock::File { .. } => {
+                        total_tokens += 50;
+                    }
+                }
+            }
+        }
+
+        total_tokens
+    }
+
+    fn context_window_size(&self, model: &str) -> u32 {
+        self.fallback.context_window_size(model)
+    }
+
+    fn fits_context_window(
+        &self,
+        conversation: &Conversation,
+        model: &str,
+        threshold: f64,
+    ) -> ContextFitResult {
+        let total_tokens = self.count_conversation_tokens(conversation, model);
+        let context_window = self.context_window_size(model);
+        ContextFitResult::new(total_tokens, context_window, threshold)
+    }
+}
+
 // ─── Helper functions ──────────────────────────────────────────────────
 
 /// Get default overhead values for a tokenizer type.
@@ -1059,6 +1191,50 @@ mod tests {
         // CJK text → chars_per_token_cjk
         let cpt = profile.chars_per_token_for_text("你好世界");
         assert!((cpt - 2.0).abs() < 0.01);
+    }
+
+    // ─── TiktokenTokenCounter tests (real-tokenizer feature) ────────
+
+    #[cfg(feature = "real-tokenizer")]
+    #[test]
+    fn test_tiktoken_counts_real_bpe_tokens() {
+        let counter = TiktokenTokenCounter::new();
+        // "Hello world" is exactly 2 BPE tokens in o200k.
+        assert_eq!(counter.count_tokens("Hello world", "gpt-4o"), 2);
+        // Empty string → 0 tokens.
+        assert_eq!(counter.count_tokens("", "gpt-4o"), 0);
+    }
+
+    #[cfg(feature = "real-tokenizer")]
+    #[test]
+    fn test_tiktoken_cjk_counts_higher_than_heuristic() {
+        // gap P2 #13 — the old ~2 chars/token CJK heuristic under-counts;
+        // real BPE counts each CJK ideograph at ≥1 token, so the real count
+        // must exceed the heuristic for a CJK-heavy string.
+        let text = "这是一个很长的中文句子用来测试分词器的估算能力";
+        let real = TiktokenTokenCounter::new().count_tokens(text, "gpt-4o");
+        let heuristic = HeuristicTokenCounter::new().count_tokens(text, "gpt-4o");
+        assert!(
+            real > heuristic,
+            "real BPE ({}) must exceed chars/2 heuristic ({}) for CJK",
+            real,
+            heuristic
+        );
+    }
+
+    #[cfg(feature = "real-tokenizer")]
+    #[test]
+    fn test_tiktoken_conversation_and_context_window() {
+        let counter = TiktokenTokenCounter::new();
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("Hello world".to_string()));
+        let tokens = counter.count_conversation_tokens(&conv, "gpt-4o");
+        // gpt-4o profile: system overhead 8 + message overhead 4 + 2 BPE tokens.
+        assert_eq!(tokens, 14);
+        // Context-window sizing delegates to the heuristic/resolver library.
+        assert_eq!(counter.context_window_size("gpt-4o"), 200_000);
+        let fit = counter.fits_context_window(&conv, "gpt-4o", 0.8);
+        assert!(fit.fits);
     }
 
     #[test]

@@ -54,6 +54,8 @@ pub fn cmd_a2a_serve(domain: Option<&str>, port: u16) {
             .default_rate_limiter()
             .noop_interaction_gate() // headless server → auto-approve tools
             .trace_in_memory()
+            // gap P2 #13 — real BPE token counting for budget/compression.
+            .default_token_counter()
             .generation_config(config.generation.clone())
             .embedding_config(config.embedding.clone())
             .domain_pack(domain_pack)

@@ -1214,6 +1214,17 @@ impl AppSession {
         let rate_limiter = self.app.rate_limiter.clone();
         let circuit_breaker = self.app.circuit_breaker.clone();
         let token_counter = self.app.token_counter.clone();
+        // gap P2 #13 — the compression pipeline (ContextBudgetManager) gets
+        // the app's real BPE counter when wired, so tool-result truncation /
+        // budget checks measure TOKENS instead of the chars×4 proxy.
+        let budget_counter: Option<(Arc<dyn oneai_core::TokenCounter>, String)> =
+            self.app.token_counter.as_ref().and_then(|tc| {
+                provider
+                    .config()
+                    .model_name
+                    .clone()
+                    .map(|m| (tc.clone(), m))
+            });
 
         // Whether self-managed memory tools are actually registered (issue #12).
         // Detected from the registry rather than `domain.memory_profile` so the
@@ -1318,25 +1329,30 @@ impl AppSession {
                     self.session_id.clone(),
                 ),
             );
+            let budget_manager = {
+                let mgr = oneai_core::budget::ContextBudgetManager::new(
+                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
+                    oneai_core::budget::BudgetAllocation::default(),
+                    compressor,
+                )
+                .with_discarded_sink(
+                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                        self.app.memory_manager.clone(),
+                    )),
+                    self.session_id.clone(),
+                );
+                match &budget_counter {
+                    Some((tc, m)) => mgr.with_token_counter(tc.clone(), m.clone()),
+                    None => mgr,
+                }
+            };
             AgentLoop::with_domain_pack(
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
-                Arc::new(
-                    oneai_core::budget::ContextBudgetManager::new(
-                        oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
-                        oneai_core::budget::BudgetAllocation::default(),
-                        compressor,
-                    )
-                    .with_discarded_sink(
-                        Arc::new(oneai_memory::ArchivalDiscardedSink::new(
-                            self.app.memory_manager.clone(),
-                        )),
-                        self.session_id.clone(),
-                    ),
-                ),
+                Arc::new(budget_manager),
                 Arc::new(
                     oneai_agent::DefaultSubAgentFactory::new(
                         provider.clone(),
@@ -1443,25 +1459,30 @@ impl AppSession {
                     self.session_id.clone(),
                 ),
             );
+            let budget_manager = {
+                let mgr = oneai_core::budget::ContextBudgetManager::new(
+                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
+                    oneai_core::budget::BudgetAllocation::default(),
+                    compressor,
+                )
+                .with_discarded_sink(
+                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                        self.app.memory_manager.clone(),
+                    )),
+                    self.session_id.clone(),
+                );
+                match &budget_counter {
+                    Some((tc, m)) => mgr.with_token_counter(tc.clone(), m.clone()),
+                    None => mgr,
+                }
+            };
             AgentLoop::new(
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
-                Arc::new(
-                    oneai_core::budget::ContextBudgetManager::new(
-                        oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
-                        oneai_core::budget::BudgetAllocation::default(),
-                        compressor,
-                    )
-                    .with_discarded_sink(
-                        Arc::new(oneai_memory::ArchivalDiscardedSink::new(
-                            self.app.memory_manager.clone(),
-                        )),
-                        self.session_id.clone(),
-                    ),
-                ),
+                Arc::new(budget_manager),
                 Arc::new(
                     oneai_agent::DefaultSubAgentFactory::new(
                         provider.clone(),

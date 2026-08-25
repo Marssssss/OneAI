@@ -111,7 +111,7 @@ Key methods: `remaining()`(:355), `record_usage(prompt, completion)`(:360), `can
 - `needs_compression(conv)`(:576): uses `TokenCounter` (if configured) or the compressor heuristic (~4 chars/token) to estimate tokens; exceeding `budget.total` means compression is needed;
 - `compress(conv)`(:597): a **three-step pipeline** —
   1. `estimate_source_tokens`(:647) estimates per source;
-  2. if tool_results exceed the allocation → `truncate_tool_results`(:688) **lossless truncation tier** — each `ToolResult` block is truncated head-wise to a character cap derived from the budget + a `[...output truncated — use memory_search for the full output]` pointer appended, telling the model to fetch the full output via `memory_search` (`budget.rs:705`);
+  2. if tool_results exceed the allocation → `truncate_tool_results` **lossless truncation tier** — each `ToolResult` block is truncated head-wise + a `[...output truncated — use memory_search for the full output]` pointer appended, telling the model to fetch the full output via `memory_search`. Cut point: when a `TokenCounter` is wired (sessions wire the real BPE one by default) the prefix cap is found by **token**-measured binary search; without one it falls back to a `budget×4` char cap (post gap P2 #13 the main path no longer uses raw `chars×4`);
   3. `compressor.compress()` summarizes the older segments;
   4. if a `DiscardedSink` is configured, the `discarded_messages` are persisted as a raw-transcript snapshot (`budget.rs:616-623`, C2 fallback) — "compression is not loss".
 
@@ -156,15 +156,24 @@ This design **mirrors opencode's `BUILTIN_MODEL_CONTEXT` + three-layer resolutio
 
 `count_conversation_tokens`(:572) counts per block Text/ToolCall/ToolResult/Image(170)/Thinking/File(50) + per-msg overhead + system overhead.
 
-### 4.3 ContextFitResult (whether it fits)
+### 4.3 TiktokenTokenCounter (real BPE, gap P2 #13)
+
+`tiktoken-rs 0.12` bundles the o200k_base (GPT-4o-era) BPE data (**no runtime download**); oneai-core's `real-tokenizer` feature (enabled by default in oneai-app/CLI) compiles in `TiktokenTokenCounter`:
+
+- `count_tokens` runs a real `encode_ordinary` — exact for code/natural language; CJK is no longer under-counted by the ~2 chars/token heuristic. For multi-provider setups o200k serves as the universal approximation (for budget/trim/routing decisions, not billing).
+- Per-message/system/tool-definition overheads still come from the `HeuristicTokenCounter` provider profiles; `context_window_size` delegates to it (incl. the 3-layer resolver).
+- `AppBuilder::default_token_counter()` and the auto-wire path default to it; once `ContextBudgetManager.with_token_counter` is wired, `truncate_tool_results` cuts by **tokens** (binary search), no longer raw `chars×4`.
+- `oneai token count` shows both the real BPE count and the heuristic estimate.
+
+### 4.4 ContextFitResult (whether it fits)
 
 `token_counter.rs:90` — the assembly-check result: `fits` (whether ≤ window×threshold), `total_tokens`, `context_window`, `remaining_tokens`, `overflow_tokens`, `utilization_pct`. The threshold defaults to 0.8 (leaving 20% for new tokens, :73-78). Used by SmartRouter context-aware routing and ContextManager trimming.
 
-### 4.4 ContextAccounting (per-category token breakdown)
+### 4.5 ContextAccounting (per-category token breakdown)
 
 `context_accounting.rs:31` — breaks context-window occupancy **down by category**: system prompt / user / assistant / tool_call / tool_result / thinking / image / file, each with tokens + share + a visualization bar. Serves the TUI sidebar `📝~ctx N%` and the `/context` command, **both sourcing from the same** `HeuristicTokenCounter` for consistency (:9, :82-166). `agent_loop.rs:1195-1200` computes accounting each turn with the real model name (e.g. `glm-5.1` rather than the provider-type name) to feed the observer.
 
-### 4.5 SmartRouter's token counting
+### 4.6 SmartRouter's token counting
 
 `HeuristicTokenCounter`'s `context_window_size`(:629) delegates to the resolver when one is attached (L1→cache→L3, :634-636). SmartRouter uses it to decide "can this model hold the current conversation" for routing decisions — context-aware routing.
 

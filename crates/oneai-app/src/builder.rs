@@ -1364,7 +1364,9 @@ impl AppBuilder {
     /// - CJK language detection (Chinese/Japanese/Korean: ~2 chars/token)
     /// - Per-message overhead (role markers, formatting)
     pub fn default_token_counter(self) -> Self {
-        self.token_counter(Arc::new(oneai_core::HeuristicTokenCounter::new()))
+        // gap P2 #13 — real BPE tokenization (tiktoken o200k), not the
+        // chars-per-token heuristic.
+        self.token_counter(Arc::new(oneai_core::TiktokenTokenCounter::new()))
     }
 
     /// Set a custom context manager for model-aware context trimming.
@@ -2481,7 +2483,9 @@ impl AppBuilder {
             if self.context_manager_config.is_some() || self.context_manager.is_some() {
                 // Auto-create if context manager is configured, attaching the
                 // resolver so context_window_size consults the 3-layer path.
-                let mut counter = oneai_core::HeuristicTokenCounter::new();
+                // gap P2 #13 — real BPE counting (tiktoken), heuristic only
+                // for the per-model overhead profiles.
+                let mut counter = oneai_core::TiktokenTokenCounter::new();
                 if let Some(r) = &resolved_resolver {
                     counter = counter.with_resolver(r.clone());
                 }
@@ -2495,7 +2499,7 @@ impl AppBuilder {
         let resolved_context_manager = self.context_manager.or_else(|| {
             self.context_manager_config.map(|config| {
                 let tc = resolved_token_counter.clone().unwrap_or_else(|| {
-                    Arc::new(oneai_core::HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>
+                    Arc::new(oneai_core::TiktokenTokenCounter::new()) as Arc<dyn TokenCounter>
                 });
                 let cm = ContextManager::from_config(config, tc);
                 let cm = if let Some(r) = &resolved_resolver {

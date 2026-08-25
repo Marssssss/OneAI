@@ -51,6 +51,8 @@ pub fn cmd_run(
             .provider(Arc::from(provider))
             .noop_interaction_gate()
             .default_parser()
+            // gap P2 #13 — real BPE token counting for budget/compression.
+            .default_token_counter()
             .generation_config(config.generation.clone())
             .embedding_config(config.embedding.clone());
         // gap P1 #9 — permission-decision audit trail when configured.

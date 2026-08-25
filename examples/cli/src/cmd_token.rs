@@ -2,12 +2,17 @@
 
 use oneai_core::model_context::{builtin_lookup, ModelContextResolver, BUILTIN_MODEL_CONTEXT};
 use oneai_core::{ContextManager, ContextTrimmingStrategy};
-use oneai_core::{HeuristicTokenCounter, ProviderTokenizerType, TokenCounter};
+use oneai_core::{
+    HeuristicTokenCounter, ProviderTokenizerType, TiktokenTokenCounter, TokenCounter,
+};
 use std::sync::Arc;
 
 /// Count tokens in a text string for a specific model.
 pub fn run_token_count(text: &str, model: Option<&str>) -> i32 {
-    let counter = HeuristicTokenCounter::new();
+    // gap P2 #13 — real BPE tokenizer (tiktoken o200k); the heuristic is
+    // shown alongside for comparison.
+    let counter = TiktokenTokenCounter::new();
+    let heuristic = HeuristicTokenCounter::new();
     let model_name = model.unwrap_or("default");
 
     println!("╔══════════════════════════════════════════════════╗");
@@ -16,6 +21,7 @@ pub fn run_token_count(text: &str, model: Option<&str>) -> i32 {
     println!();
 
     let tokens = counter.count_tokens(text, model_name);
+    let heuristic_tokens = heuristic.count_tokens(text, model_name);
     let chars = text.chars().count();
     let language = oneai_core::token_counter::LanguageType::detect(text);
 
@@ -29,7 +35,8 @@ pub fn run_token_count(text: &str, model: Option<&str>) -> i32 {
             oneai_core::token_counter::LanguageType::Mixed => "Mixed",
         }
     );
-    println!("  Estimated tokens: {}", tokens);
+    println!("  Tokens (real BPE): {}", tokens);
+    println!("  Heuristic estimate: {}", heuristic_tokens);
     println!(
         "  Chars per token: {:.1}",
         if tokens > 0 {
@@ -246,7 +253,7 @@ pub fn run_token_compat(base_url: &str) -> i32 {
 
 /// Check if text fits within a model's context window.
 pub fn run_token_fits(text: &str, model: &str) -> i32 {
-    let counter = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
+    let counter = Arc::new(TiktokenTokenCounter::new()) as Arc<dyn TokenCounter>;
     let context_manager = ContextManager::new(counter.clone(), ContextTrimmingStrategy::default());
 
     // Create a sample conversation from the text
@@ -281,7 +288,7 @@ pub fn run_token_fits(text: &str, model: &str) -> i32 {
 
 /// Estimate tokens in a sample conversation.
 pub fn run_token_estimate(model: Option<&str>) -> i32 {
-    let counter = HeuristicTokenCounter::new();
+    let counter = TiktokenTokenCounter::new();
     let model_name = model.unwrap_or("gpt-4o");
 
     println!("╔══════════════════════════════════════════════════╗");

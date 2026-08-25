@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
-oneai-core = { workspace = true }
+oneai-core = { workspace = true, features = ["real-tokenizer"] }
 oneai-bus = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-agent = { workspace = true }

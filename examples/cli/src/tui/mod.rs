@@ -149,6 +149,8 @@ pub fn run_tui(
         let (builder, directive_rx) = AppBuilder::new()
             .default_parser()
             .default_rate_limiter()
+            // gap P2 #13 — real BPE token counting for budget/compression.
+            .default_token_counter()
             .engine_bus();
 
         let mut builder = builder.generation_config(generation.clone());

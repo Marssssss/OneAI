@@ -28,7 +28,7 @@ ratatui = { workspace = true, features = ["crossterm_0_28", "unstable"] }
 crossterm = { workspace = true, features = ["bracketed-paste"] }
 derive_more = { workspace = true }
 async-trait = { workspace = true }
-oneai-core = { workspace = true }
+oneai-core = { workspace = true, features = ["real-tokenizer"] }
 oneai-app = { workspace = true }
 oneai-tool = { workspace = true, features = ["modal", "daytona"] }
 oneai-memory = { workspace = true }

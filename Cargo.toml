@@ -161,6 +161,11 @@ ort = { version = "=2.0.0-rc.12", features = ["ndarray"] }
 ndarray = "0.17"
 usearch = "2.26"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# tiktoken-rs: real BPE tokenizer for token counting (gap-analysis P2 #13).
+# Bundles the OpenAI BPE encodings (cl100k/o200k/…) — no runtime download.
+# Used as the cross-provider approximation behind oneai-core's
+# `real-tokenizer` feature.
+tiktoken-rs = { version = "0.12" }
 # Force `time` to 0.3.54 (the version the P0 spike lockfile used and compiled
 # clean). Lower 0.3.4x versions trip an orphan-rule E0119: their
 # `impl From<HourBase> for <HourBase as ModifierValue>::Type` (gated by the

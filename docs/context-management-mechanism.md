@@ -111,7 +111,7 @@ OneAI 的上下文管理是一个 **「持久日志/瞬时装配分离 + 抗压�
 - `needs_compression(conv)`(:576)：用 `TokenCounter`（若配了）或压缩器启发式（~4 chars/token）估 token，超 `budget.total` 即需压缩；
 - `compress(conv)`(:597)：**三步管线**——
   1. `estimate_source_tokens`(:647) 按源估算；
-  2. 若 tool_results 超 allocation → `truncate_tool_results`(:688) **无损截断 tier**——每个 `ToolResult` 块按预算折算成字符上限截头 + 追加 `[...output truncated — use memory_search for the full output]` 指针，告诉模型去 `memory_search` 取全量（`budget.rs:705`）；
+  2. 若 tool_results 超 allocation → `truncate_tool_results` **无损截断 tier**——每个 `ToolResult` 块截头 + 追加 `[...output truncated — use memory_search for the full output]` 指针，告诉模型去 `memory_search` 取全量。裁切点：挂了 `TokenCounter`（session 默认挂真 BPE）时按 **token** 二分查找前缀上限；未挂时退回 `预算×4` 字符上限（gap P2 #13 后主路径不再走裸 `chars×4`）；
   3. `compressor.compress()` 摘要旧段；
   4. 若配了 `DiscardedSink`，把 `discarded_messages` 落库为原始转录快照（`budget.rs:616-623`，C2 兜底）——「压缩即不丢」。
 
@@ -156,15 +156,24 @@ OneAI 的上下文管理是一个 **「持久日志/瞬时装配分离 + 抗压�
 
 `count_conversation_tokens`(:572) 逐块计数 Text/ToolCall/ToolResult/Image(170)/Thinking/File(50) + per-msg overhead + system overhead。
 
-### 4.3 ContextFitResult（是否装得下）
+### 4.3 TiktokenTokenCounter（真 BPE，gap P2 #13）
+
+`tiktoken-rs 0.12` 内置 o200k_base（GPT-4o 代）BPE 数据（**无运行时下载**），`oneai-core` 的 `real-tokenizer` feature（oneai-app/CLI 默认开启）编译进 `TiktokenTokenCounter`：
+
+- `count_tokens` 走真 `encode_ordinary`——对代码/自然语言精确，CJK 不再被 ~2 chars/token 低估；多服务商场景以 o200k 作通用近似（预算/裁剪/路由决策用，非计费）。
+- 每消息/系统/工具定义 overhead 仍用 `HeuristicTokenCounter` 的服务商 profile；`context_window_size` 委托之（含 3 层 resolver）。
+- `AppBuilder::default_token_counter()` 与自动装配路径默认用它；`ContextBudgetManager.with_token_counter` 接入后 `truncate_tool_results` 按 **token** 二分裁切（不再裸 `chars×4`）。
+- `oneai token count` 同时展示真 BPE 与启发式估算。
+
+### 4.4 ContextFitResult（是否装得下）
 
 `token_counter.rs:90` ——装配检查结果：`fits`（是否 ≤ 窗口×阈值）、`total_tokens`、`context_window`、`remaining_tokens`、`overflow_tokens`、`utilization_pct`。阈值默认 0.8（留 20% 给新 token，:73-78）。供 SmartRouter 上下文感知路由与 ContextManager 裁剪用。
 
-### 4.4 ContextAccounting（逐类 token 分解）
+### 4.5 ContextAccounting（逐类 token 分解）
 
 `context_accounting.rs:31` ——把上下文窗口占用**按类别分解**：system prompt / user / assistant / tool_call / tool_result / thinking / image / file，各自 token + 占比 + 可视化条。供 TUI sidebar `📝~ctx N%` 与 `/context` 命令，**两者同源**用 `HeuristicTokenCounter` 保证一致（:9, :82-166）。`agent_loop.rs:1195-1200` 每轮用真实模型名（如 `glm-5.1` 而非 provider 类型名）算 accounting 喂给 observer。
 
-### 4.5 SmartRouter 的 token 计数
+### 4.6 SmartRouter 的 token 计数
 
 `HeuristicTokenCounter` 的 `context_window_size`(:629) 当挂了 resolver 时委托给它（L1→cache→L3，:634-636）。SmartRouter 用它判断「这模型装不装得下当前对话」做路由决策——context-aware routing。
 
