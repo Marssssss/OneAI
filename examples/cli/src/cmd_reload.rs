@@ -60,8 +60,6 @@ pub fn cmd_reload(
 
         let app = builder.build().await.expect("App build failed");
 
-        let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
-        app.skill_registry.register_builtin(skills).await.unwrap();
         let pack = domain_pack.unwrap();
         for tool in &pack.tools {
             app.register_tool(tool.clone()).await.unwrap();
@@ -69,7 +67,7 @@ pub fn cmd_reload(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        app.register_skill_tools().await.unwrap();
+        // Builtin skills + skill tools are wired by `AppBuilder::build()` (#38).
 
         let reloader = match app.data_layer_reloader() {
             Some(r) => r.clone(),

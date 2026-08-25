@@ -85,7 +85,7 @@ pub struct SkillMetadataStore { /* metadata.json + gz 轮转 + rollback */ }
 **运行期技能选择（每轮或按需）：**
 
 1. `discover_skills` 扫约定目录（全局 Trusted + 项目 Project，项目同名覆盖全局），`trust` 按目录盖戳。
-2. `SkillRegistry::register_builtin` + 发现的技能注册。
+2. 技能装载统一在 `AppBuilder::build()` 内完成(#38):先 `load_discovered` 注册发现技能,再按 merged pack 名 `register_builtin` 内置技能(同名内置覆盖发现;多 pack `a+b` 取两域并集;无 pack 回退 coding),最后 `register_skill_tools` 注册 `skill`/`skill_manage` 工具——CLI/TUI/sidecar(`serve`·`app-server`)/FFI/uniffi 全通路一次拉齐,入口不再各自接线;`AgentLoop` 侧纵深防御:工具表无 `skill` 时不注入技能菜单,菜单与工具永远成对。
 3. `SkillSelector` 按当前情境选技能：`deps_satisfied` 过滤依赖未满足的 → embedding 余弦 + 关键词混合打分（无服务降级纯关键词）→ `top_k`。
 4. `SkillTool` Tier1 菜单只列技能名给模型；模型选中某技能才注入其完整提示（渐进式披露）；`bump_use` 更新 `use_count`/`last_activity`。
 

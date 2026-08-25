@@ -104,20 +104,14 @@ async fn serve(
 
     let app = builder.build().await.expect("App build failed");
 
-    // Register built-in skills (domain + general) so the `skill` tool menu is
-    // populated and the model can invoke them.
-    let skills = oneai_skill::builtin::skills_for_domain(&domain_pack.name);
-    app.skill_registry.register_builtin(skills).await.unwrap();
-
-    // Register domain tools + a calculator + the skill tool (progressive
-    // disclosure Tier2/Tier3) — same set as `cmd_run`.
+    // Register domain tools + a calculator — same set as `cmd_run`. Builtin
+    // skills + skill tools are wired by `AppBuilder::build()` (#38).
     for tool in &domain_pack.tools {
         app.register_tool(tool.clone()).await.unwrap();
     }
     app.register_tool(Arc::new(CalculatorTool::new()))
         .await
         .unwrap();
-    app.register_skill_tools().await.unwrap();
 
     // ── Build a session (multi-turn conversation lives here) ──
     let session = app.create_session();

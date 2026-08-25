@@ -294,14 +294,12 @@ impl AppFactory for GatewayAppFactory {
 
         let app = builder.build().await.ok()?;
 
-        // Register skills + domain tools + calculator (same set as cmd_run).
-        let skills = oneai_skill::builtin::skills_for_domain(pack_name);
-        let _ = app.skill_registry.register_builtin(skills).await;
+        // Register domain tools + calculator (same set as cmd_run). Builtin
+        // skills + skill tools are wired by `AppBuilder::build()` (#38).
         for tool in &pack_tools {
             let _ = app.register_tool(tool.clone()).await;
         }
         let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
-        let _ = app.register_skill_tools().await;
         Some(app)
     }
 }

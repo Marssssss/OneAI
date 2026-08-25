@@ -4232,6 +4232,101 @@ async fn e2e_skill_menu_hides_archived_skill() {
     assert!(menu.contains("retire-me"));
 }
 
+/// Issue #38 defense-in-depth: the Tier1 skill menu instructs the model to
+/// "call the `skill` tool" — so it must only be injected when that tool is
+/// actually present in the loop's tool map. A hand-assembled loop (or any
+/// future engine path) that registers skills WITHOUT the `skill` tool must
+/// not advertise a tool the model cannot call.
+#[tokio::test]
+async fn e2e_skill_menu_gated_on_skill_tool_presence() {
+    use oneai_core::ContentBlock;
+    use oneai_core::SkillDescriptor;
+    use oneai_skill::SkillRegistry;
+
+    async fn registry_with_skill() -> Arc<SkillRegistry> {
+        let registry = Arc::new(SkillRegistry::new());
+        registry
+            .register(SkillDescriptor {
+                name: "menu-probe".into(),
+                description: "probe skill".into(),
+                prompt_template: "body".into(),
+                trigger_keywords: vec![],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        registry
+    }
+
+    async fn injected_system_text(
+        call_log: &Arc<tokio::sync::Mutex<Vec<crate::mock_provider::InferenceCallLog>>>,
+    ) -> String {
+        let logs = call_log.lock().await.clone();
+        let mut out = String::new();
+        for log in &logs {
+            for msg in &log.request.conversation.messages {
+                if msg.role == Role::System {
+                    for block in &msg.content {
+                        if let ContentBlock::Text { text } = block {
+                            out.push_str(text);
+                            out.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // Case 1 — skills registered but NO `skill` tool → no menu injected.
+    let provider = MockProvider::always_answers("done");
+    let call_log = provider.call_log_handle();
+    let loop_ = build_reflect_loop_with_tools(
+        provider,
+        Arc::new(ReflectFactory::new()),
+        AgentLoopConfig {
+            inject_skills: true,
+            hard_max_iterations: Some(5),
+            ..AgentLoopConfig::default()
+        },
+        memory_trio_tools(),
+    )
+    .with_skill_registry(registry_with_skill().await, None);
+    let _ = loop_.run("hello").await.unwrap();
+    let text = injected_system_text(&call_log).await;
+    assert!(
+        !text.contains("# Available skills"),
+        "skill menu must NOT be injected without the `skill` tool"
+    );
+
+    // Case 2 — same registry WITH the `skill` tool → menu injected.
+    let provider = MockProvider::always_answers("done");
+    let call_log = provider.call_log_handle();
+    let registry = registry_with_skill().await;
+    let mut tools = memory_trio_tools();
+    tools.push(Arc::new(crate::skill_tool::SkillTool::new(
+        registry.clone(),
+    )));
+    let loop_ = build_reflect_loop_with_tools(
+        provider,
+        Arc::new(ReflectFactory::new()),
+        AgentLoopConfig {
+            inject_skills: true,
+            hard_max_iterations: Some(5),
+            ..AgentLoopConfig::default()
+        },
+        tools,
+    )
+    .with_skill_registry(registry, None);
+    let _ = loop_.run("hello").await.unwrap();
+    let text = injected_system_text(&call_log).await;
+    assert!(
+        text.contains("# Available skills"),
+        "skill menu must be injected when the `skill` tool is registered"
+    );
+    assert!(text.contains("menu-probe"));
+}
+
 /// Stage C — cross-session cadence hydrate. Run 1 fires reflect mid-run (at
 /// the iter-2 cadence boundary) + on DirectAnswer, persisting
 /// `ReflectionFired` events to the working-state log with the *cumulative*

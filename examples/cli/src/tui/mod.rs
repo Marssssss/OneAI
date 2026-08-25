@@ -189,20 +189,13 @@ pub fn run_tui(
 
         let app = builder.build().await.expect("App build failed");
 
-        // The skill registry is shared between the AgentLoop (always-on skill
-        // menu), the `skill` tool (on-demand prompt loading), and the TUI.
-        // Register built-in skills onto it FIRST so the SkillTool sees them.
-        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
-        app.skill_registry.register_builtin(skills).await.unwrap();
-
         // CalculatorTool is a general-purpose tool not in any domain pack.
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        // Register the skill tools — gives the model a call path to load a
-        // skill's full prompt (progressive disclosure) + manage the lifecycle
-        // (Stage B attaches metadata store + curator).
-        app.register_skill_tools().await.unwrap();
+        // Builtin skills + the skill tools are wired by `AppBuilder::build()`
+        // (issue #38) — the registry is shared between the AgentLoop
+        // (always-on skill menu), the `skill` tool, and the TUI.
 
         let tool_names = app.tool_executor().list_tools().await;
         let session = app.create_session();

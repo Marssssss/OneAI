@@ -68,11 +68,6 @@ pub fn cmd_run(
 
         let app = builder.build().await.expect("App build failed");
 
-        // Register built-in skills (domain + general) so the `skill` tool menu
-        // is populated and the model can invoke them.
-        let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
-        app.skill_registry.register_builtin(skills).await.unwrap();
-
         // Register domain tools
         let pack = domain_pack.unwrap();
         for tool in &pack.tools {
@@ -81,9 +76,8 @@ pub fn cmd_run(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        // Register the skill tools (progressive disclosure + lifecycle
-        // management — Stage B attaches the metadata store + curator).
-        app.register_skill_tools().await.unwrap();
+        // Builtin skills + the skill tools are wired by `AppBuilder::build()`
+        // (issue #38) — no per-command registration needed.
 
         let mut session = app.create_session();
 

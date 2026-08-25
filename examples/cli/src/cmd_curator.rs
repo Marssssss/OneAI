@@ -43,10 +43,7 @@ async fn build_curator_app(config: &OneaiConfig, domain_override: Option<&str>) 
         .build()
         .await
         .expect("curator App build failed");
-    // Load the same skill library the agent sees: discovered convention-dir
-    // skills + builtin domain skills.
-    let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
-    app.skill_registry.register_builtin(skills).await.unwrap();
+    // Discovered + builtin skills are loaded by `AppBuilder::build()` (#38).
     app
 }
 
@@ -261,10 +258,8 @@ pub async fn cmd_curator_consolidate(config: &OneaiConfig, domain: Option<&str>)
         .await
         .expect("curator consolidate App build failed");
 
-    // Load the same skill library the agent sees.
-    let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
-    app.skill_registry.register_builtin(skills).await.unwrap();
-    app.register_skill_tools().await.unwrap();
+    // Discovered + builtin skills and the skill tools are wired by
+    // `AppBuilder::build()` (#38).
 
     let curator = match app.skill_curator.as_ref() {
         Some(c) => c,

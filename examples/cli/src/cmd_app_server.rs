@@ -1054,10 +1054,8 @@ pub(crate) async fn build_engine_server(
     builder = builder.domain_pack(domain_pack);
 
     let app = builder.build().await?;
-    let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
-    let _ = app.skill_registry.register_builtin(skills).await;
     let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
-    let _ = app.register_skill_tools().await;
+    // Builtin skills + skill tools are wired by `AppBuilder::build()` (#38).
 
     let session = app.create_session();
     let app = Arc::new(app);

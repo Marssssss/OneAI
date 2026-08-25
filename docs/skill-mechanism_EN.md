@@ -85,7 +85,7 @@ pub struct SkillMetadataStore { /* metadata.json + gz rotation + rollback */ }
 **Runtime skill selection (per turn or on demand):**
 
 1. `discover_skills` scans convention dirs (global Trusted + project Project, project overrides global); `trust` stamped by directory.
-2. `SkillRegistry::register_builtin` + discovered skills register.
+2. Skill loading is centralized in `AppBuilder::build()` (#38): first `load_discovered` registers discovered skills, then `register_builtin` adds the builtin set keyed off the merged pack name (same-named builtins upsert over discovered; multi-pack `a+b` unions both domains; pack-less falls back to coding), and finally `register_skill_tools` registers the `skill`/`skill_manage` tools — CLI/TUI/sidecar (`serve` · `app-server`)/FFI/uniffi all wired in one place, entry points no longer wire skills themselves; defense-in-depth in `AgentLoop`: the skill menu is NOT injected when the tool map lacks `skill`, so menu and tool always come as a pair.
 3. `SkillSelector` picks skills for the context: `deps_satisfied` filters unsatisfied → embedding cosine + keyword hybrid scoring (degrades to pure keyword without a service) → `top_k`.
 4. `SkillTool` Tier 1 menu lists only skill names; the model selects one to inject its full prompt (progressive disclosure); `bump_use` updates `use_count`/`last_activity`.
 

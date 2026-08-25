@@ -2596,9 +2596,34 @@ impl AppBuilder {
         // Discover skills from convention directories (.claude/skills/,
         // .agents/skills/, .opencode/skills/, .oneai/skills/ — project walked
         // up to the git root + global under home) so ecosystem skills are
-        // available every session. Domain builtin skills are registered on top
-        // by the caller (CLI/TUI) and add rather than replace these.
+        // available every session.
         self.skill_registry.load_discovered().await;
+
+        // Domain builtin skills (general + per-domain presets + the always-on
+        // `skill-creator`). Wired HERE — not by each engine entry point — so
+        // every consumer of `AppBuilder::build()` gets the same skill library
+        // (issue #38: the ad-hoc per-caller wiring left the FFI/c_facade and
+        // uniffi paths without skills). Registered AFTER `load_discovered`,
+        // preserving the established precedence that a builtin upserts over a
+        // same-named discovered skill. The domain comes from the merged pack
+        // name (multi-pack `"a+b"` unions both domains' builtin sets); a
+        // pack-less build falls back to `"coding"` — the same default the CLI
+        // commands use.
+        let skill_domain_name = merged_domain_pack
+            .as_ref()
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "coding".to_string());
+        let mut builtin_skills: Vec<oneai_core::SkillDescriptor> = Vec::new();
+        for part in skill_domain_name.split('+') {
+            for skill in oneai_skill::builtin::skills_for_domain(part) {
+                if !builtin_skills.iter().any(|s| s.name == skill.name) {
+                    builtin_skills.push(skill);
+                }
+            }
+        }
+        if let Err(e) = self.skill_registry.register_builtin(builtin_skills).await {
+            tracing::warn!("failed to register builtin skills: {e}");
+        }
 
         // Working-state store: compaction thresholds come from the domain's
         // `MemoryProfile.working_state.compaction` (CodingPack 200/50,
@@ -2688,7 +2713,7 @@ impl AppBuilder {
             ))
         });
 
-        Ok(App {
+        let app = App {
             provider,
             tool_registry: self.tool_registry,
             tool_executor,
@@ -2744,7 +2769,20 @@ impl AppBuilder {
             skill_curator,
             cron_scheduler: self.cron_scheduler,
             terminal_backend: self.terminal_backend,
-        })
+        };
+
+        // Skill tools (issue #38): the injected Tier1 skill menu tells the
+        // model to "call the `skill` tool" — registering the tool here (not
+        // per entry point) guarantees menu and tool always come as a pair on
+        // EVERY path that builds an App (CLI run/TUI, `serve`, `app-server`
+        // sidecar, FFI c_facade, uniffi mobile). Idempotent — registration is
+        // an upsert by tool name, so a caller invoking `register_skill_tools`
+        // again only replaces the same instances.
+        if let Err(e) = app.register_skill_tools().await {
+            tracing::warn!("failed to register skill tools: {e}");
+        }
+
+        Ok(app)
     }
 }
 
@@ -2995,8 +3033,11 @@ impl App {
     /// Register the skill tools (Phase 2.1 Stage B): the `skill` tool
     /// (progressive disclosure + use-count bumping + archive gate) and, when a
     /// curator is present, the `skill_manage` tool (model-driven lifecycle
-    /// control). Call after builtin skills are registered so the menu is
-    /// populated. Replaces the per-CLI `SkillTool::new(...)` wiring.
+    /// control).
+    ///
+    /// Called automatically by `AppBuilder::build()` (issue #38 — every engine
+    /// path gets the tools the injected skill menu refers to); exposed publicly
+    /// for bespoke wiring. Idempotent: both registrations upsert by tool name.
     pub async fn register_skill_tools(&self) -> Result<()> {
         let skill_tool = match &self.skill_metadata_store {
             Some(store) => oneai_agent::SkillTool::new(self.skill_registry.clone())
@@ -3148,6 +3189,96 @@ mod tests {
     use super::*;
     use oneai_core::platform::PlatformAdapter;
     use oneai_tool::CalculatorTool;
+
+    /// Issue #38: skill wiring lives in `AppBuilder::build()`, not in each
+    /// engine entry point. A bare build must register the builtin skills AND
+    /// the `skill` / `skill_manage` tools the injected skill menu refers to —
+    /// so the CLI, the sidecar (`serve` / `app-server`), the FFI c_facade and
+    /// the uniffi mobile path all get the same skill library for free.
+    #[tokio::test]
+    async fn test_build_wires_skills_and_skill_tools() {
+        let app = AppBuilder::new()
+            .noop_interaction_gate()
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // Builtin skills present — the always-on skill-creator plus the
+        // coding presets (pack-less builds fall back to the coding domain).
+        assert!(app
+            .skill_registry
+            .find_by_name("skill-creator")
+            .await
+            .is_some());
+        assert!(
+            app.skill_registry
+                .find_by_name("code-review")
+                .await
+                .is_some(),
+            "coding builtin skills must be wired by build()"
+        );
+
+        // The tools the skill menu tells the model to call are registered.
+        let tool_names = app.tool_executor().list_tools().await;
+        assert!(tool_names.contains(&"skill".to_string()));
+        assert!(tool_names.contains(&"skill_manage".to_string()));
+    }
+
+    /// Issue #38: the builtin skill set follows the domain pack — a research
+    /// pack gets the research presets, and a multi-pack merge (name `a+b`)
+    /// unions both domains' builtin skills. `$HOME` is pointed at an empty
+    /// dir for the duration so convention-directory discovery contributes
+    /// nothing and the assertions see only the builtin wiring (a dev machine
+    /// with skills in `~/.oneai/skills` would otherwise leak into the test).
+    #[tokio::test]
+    async fn test_build_builtin_skills_follow_domain_pack() {
+        let tmp_home =
+            std::env::temp_dir().join(format!("oneai-builder-home-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_home).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp_home);
+
+        let app = AppBuilder::new()
+            .noop_interaction_gate()
+            .domain_pack(oneai_domain::research_pack("."))
+            .build()
+            .await
+            .expect("Build should succeed");
+        let names = app.skill_registry.skill_names().await;
+        assert!(
+            names.iter().any(|n| n == "deep-research"),
+            "research pack must wire research builtin skills: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "skill-creator"));
+        assert!(
+            !names.iter().any(|n| n == "code-review"),
+            "research pack must not wire coding builtin skills: {names:?}"
+        );
+
+        let app = AppBuilder::new()
+            .noop_interaction_gate()
+            .domain_pack(oneai_domain::coding_pack("."))
+            .domain_pack(oneai_domain::research_pack("."))
+            .build()
+            .await
+            .expect("Build should succeed");
+        let names = app.skill_registry.skill_names().await;
+        assert!(
+            names.iter().any(|n| n == "code-review"),
+            "multi-pack merge must union coding skills: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "deep-research"),
+            "multi-pack merge must union research skills: {names:?}"
+        );
+
+        // Restore $HOME for other tests in this process.
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp_home);
+    }
 
     #[tokio::test]
     async fn test_app_builder_default_build() {

@@ -403,13 +403,11 @@ impl SupervisorRunner for SupervisorRunnerImpl {
             oneai_supervisor::SupervisorError::Instance(format!("app build failed: {e}"))
         })?;
 
-        let skills = oneai_skill::builtin::skills_for_domain(&domain_pack.name);
-        let _ = app.skill_registry.register_builtin(skills).await;
         for tool in &domain_pack.tools {
             let _ = app.register_tool(tool.clone()).await;
         }
         let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
-        let _ = app.register_skill_tools().await;
+        // Builtin skills + skill tools are wired by `AppBuilder::build()` (#38).
 
         let session = app.create_session();
         Ok(Arc::new(SupervisorInstanceHandle {

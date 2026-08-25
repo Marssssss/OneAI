@@ -6589,8 +6589,16 @@ impl AgentLoop {
             }
         }
         if self.config.inject_skills {
-            if let Some(menu) = self.build_skill_menu().await {
-                conv.add_message(Message::system(menu));
+            // Defense-in-depth (issue #38): the menu instructs the model to
+            // "call the `skill` tool" — only inject it when that tool is
+            // actually registered in this loop's tool map, so no engine
+            // configuration can advertise a tool the model cannot call.
+            // (`AppBuilder::build()` wires the tool everywhere an App is
+            // built; this gate protects hand-assembled AgentLoops.)
+            if self.tools.read().await.contains_key("skill") {
+                if let Some(menu) = self.build_skill_menu().await {
+                    conv.add_message(Message::system(menu));
+                }
             }
             if let Some(name) = &self.active_skill {
                 if let Some(skill) = self.skill_registry.find_by_name(name).await {

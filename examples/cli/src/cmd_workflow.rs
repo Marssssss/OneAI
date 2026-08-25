@@ -76,14 +76,12 @@ fn build_app_with_domain(
 
         let app = builder.build().await.expect("App build failed");
 
-        // Register the `skill` tool + calculator on top of the auto-registered
-        // domain tools (parity with cmd_run).
-        let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
-        app.skill_registry.register_builtin(skills).await.unwrap();
+        // Calculator on top of the auto-registered domain tools (parity with
+        // cmd_run). Builtin skills + skill tools are wired by
+        // `AppBuilder::build()` (#38).
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        app.register_skill_tools().await.unwrap();
 
         app
     })
