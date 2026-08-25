@@ -11,10 +11,13 @@
 //    from the header so it sits beside the mode + attach controls).
 //  - The metrics strip (turns/steps/first-token/tok-s/cache/in-out) sits
 //    between the attach button and the model switcher.
-//  - Slash commands: typing `/` surfaces a candidate popup; Enter on a known
-//    `/command` dispatches it instead of sending a message.
+//  - Slash commands (issue #39 — TUI-aligned scope): typing `/` surfaces a
+//    grouped candidate popup (↑↓ select · Tab fill · Enter run); a command
+//    with subcommands (`/session`, `/init`) opens a second level once fully
+//    typed + a space. Enter on a known `/command` dispatches it instead of
+//    sending a message; an unknown `/…` surfaces a note (never sent raw).
 
-import { useMemo, useRef, useLayoutEffect, useState } from 'react'
+import { useRef, useLayoutEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BusParadigmKind, ContentBlock } from '../rpc/types'
 import type { SessionMetrics } from '../store/projection'
@@ -25,19 +28,13 @@ import { EffortChip } from './EffortChip'
 import { MetricsBar } from './MetricsBar'
 import { WorkspaceDropdown } from '../workspace/WorkspaceDropdown'
 import { Tooltip } from '../components/Tooltip'
+import {
+  getSuggestions,
+  parseSlash,
+  type CommandGroup,
+  type SlashInvocation,
+} from './slashCommands'
 import styles from './Composer.module.css'
-
-export type SlashCommand =
-  | 'plan'
-  | 'clear'
-  | 'compact'
-  | 'scenario'
-  | 'newScenario'
-  | 'editScenario'
-  | 'trajectory'
-  | 'settings'
-  | 'skills'
-  | 'domainpack'
 
 /** The 3-state interaction mode — mirrors the TUI's `InteractionMode`
  * (Normal → AutoAccept → Plan → Normal). The composer cycles on click. */
@@ -83,7 +80,11 @@ interface ComposerProps {
   onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
   onCycleMode: () => void
-  onSlash: (cmd: SlashCommand) => void
+  /** Dispatch a parsed, known slash command (issue #39 registry). */
+  onSlash: (invocation: SlashInvocation) => void
+  /** A `/…` line whose first token matches no registered command — App
+   *  surfaces an "unknown command" note (TUI parity: never sent to the model). */
+  onUnknownSlash: (label: string) => void
   onWorkspaceClick: () => void
   /** Workspace dropdown (popover) state — rendered inside the chips row when
    *  open, anchored under the chip. The dropdown self-closes via onClose
@@ -153,6 +154,7 @@ export function Composer({
   onStop,
   onCycleMode,
   onSlash,
+  onUnknownSlash,
   onWorkspaceClick,
   workspaceDropdownOpen,
   onCloseWorkspaceDropdown,
@@ -185,31 +187,37 @@ export function Composer({
     ta.style.height = `${next}px`
   }, [text, images])
 
-  const commands = useMemo(
-    () => [
-      { cmd: 'plan' as const, label: '/plan', desc: t('command.plan') },
-      { cmd: 'clear' as const, label: '/clear', desc: t('command.clear') },
-      { cmd: 'compact' as const, label: '/compact', desc: t('command.compact') },
-      { cmd: 'scenario' as const, label: '/scenario', desc: t('command.scenario') },
-      { cmd: 'newScenario' as const, label: '/new-scenario', desc: t('command.newScenario') },
-      { cmd: 'editScenario' as const, label: '/edit-scenario', desc: t('command.editScenario') },
-      { cmd: 'trajectory' as const, label: '/trajectory', desc: t('command.trajectory') },
-      { cmd: 'settings' as const, label: '/settings', desc: t('command.settings') },
-      { cmd: 'skills' as const, label: '/skills', desc: t('command.skills') },
-      { cmd: 'domainpack' as const, label: '/domainpack', desc: t('command.domainpack') },
-    ],
-    [t],
-  )
-
+  // ── Slash command palette (issue #39) ──────────────────────────────────────
+  // The registry + two-level filtering live in `slashCommands.ts` (pure, unit
+  // tested). `sel` is the keyboard-selected row; it clamps when the list
+  // shrinks mid-typing and resets to the top whenever the input changes.
+  const [selIndex, setSelIndex] = useState(0)
   const isSlash = text.startsWith('/')
-  const filtered = isSlash
-    ? commands.filter((c) => c.label.startsWith(text))
-    : []
+  const suggestions = isSlash ? getSuggestions(text) : []
+  const sel = suggestions.length > 0 ? Math.min(selIndex, suggestions.length - 1) : 0
+
+  /** Accept one suggestion. `run` = Enter/click: execute immediately when the
+   *  entry is a complete command, otherwise fill the input (a folder command
+   *  opens its second level; a takesArg subcommand makes room for its arg).
+   *  `fill` = Tab: never executes, only completes the input line. */
+  const acceptSuggestion = (idx: number, run: boolean) => {
+    const s = suggestions[idx]
+    if (s === undefined) return
+    if (run && s.invocation !== null) {
+      onSlash(s.invocation)
+      setText('')
+    } else {
+      setText(s.insert)
+    }
+    setSelIndex(0)
+    taRef.current?.focus()
+  }
 
   const runSlash = (raw: string): boolean => {
-    const match = commands.find((c) => c.label === raw.trim())
-    if (match === undefined) return false
-    onSlash(match.cmd)
+    const parsed = parseSlash(raw)
+    if (parsed === null) return false
+    if (parsed.kind === 'command') onSlash(parsed.invocation)
+    else onUnknownSlash(parsed.label)
     setText('')
     return true
   }
@@ -337,21 +345,41 @@ export function Composer({
       </div>
 
       <div className={styles.inputRow}>
-        {isSlash && filtered.length > 0 && (
-          <div className={styles.slashPopup}>
-            {filtered.map((c) => (
-              <button
-                key={c.cmd}
-                className={styles.slashItem}
-                onClick={() => {
-                  onSlash(c.cmd)
-                  setText('')
-                }}
-              >
-                <span className={styles.slashLabel}>{c.label}</span>
-                <span className={styles.slashDesc}>{c.desc}</span>
-              </button>
-            ))}
+        {isSlash && suggestions.length > 0 && (
+          <div className={styles.slashPopup} role="listbox" aria-label={t('command.hint')}>
+            {(() => {
+              // Group headers render only when the visible entries span more
+              // than one group — the second level always belongs to a single
+              // command, so it stays header-free.
+              const showHeaders = new Set(suggestions.map((s) => s.group)).size > 1
+              const rows: ReactNode[] = []
+              let lastGroup: CommandGroup | null = null
+              suggestions.forEach((s, i) => {
+                if (showHeaders && s.group !== lastGroup) {
+                  lastGroup = s.group
+                  rows.push(
+                    <div key={`group-${s.group}`} className={styles.slashGroupHeader}>
+                      {t(`command.group.${s.group}`)}
+                    </div>,
+                  )
+                }
+                rows.push(
+                  <button
+                    key={s.display}
+                    role="option"
+                    aria-selected={i === sel}
+                    className={`${styles.slashItem} ${i === sel ? styles.slashItemSelected : ''}`}
+                    onMouseEnter={() => setSelIndex(i)}
+                    onClick={() => acceptSuggestion(i, true)}
+                  >
+                    <span className={styles.slashLabel}>{s.display}</span>
+                    <span className={styles.slashDesc}>{t(s.descKey)}</span>
+                  </button>,
+                )
+              })
+              return rows
+            })()}
+            <div className={styles.slashHint}>{t('slash.keys')}</div>
           </div>
         )}
         <textarea
@@ -359,10 +387,35 @@ export function Composer({
           className={styles.input}
           placeholder={placeholder}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value)
+            setSelIndex(0)
+          }}
           onKeyDown={(e) => {
+            // Palette navigation while suggestions are visible (issue #39
+            // two-level flow mirrors the TUI's #30 autocomplete: ↑↓ move,
+            // Tab fills the line, Enter runs it / opens the next level).
+            if (suggestions.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault()
+              setSelIndex((prev) => {
+                const cur = Math.min(prev, suggestions.length - 1)
+                return e.key === 'ArrowDown'
+                  ? (cur + 1) % suggestions.length
+                  : (cur - 1 + suggestions.length) % suggestions.length
+              })
+              return
+            }
+            if (suggestions.length > 0 && e.key === 'Tab') {
+              e.preventDefault()
+              acceptSuggestion(sel, false)
+              return
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
+              if (suggestions.length > 0) {
+                acceptSuggestion(sel, true)
+                return
+              }
               submit()
             }
           }}

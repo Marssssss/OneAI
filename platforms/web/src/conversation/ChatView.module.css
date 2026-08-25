@@ -200,6 +200,22 @@
   border: 1px solid var(--oneai-red);
 }
 
+/* Client-local system note (slash-command feedback, issue #39) — a muted
+ * full-width block, distinct from both chat bubbles and the red error banner. */
+.systemNote {
+  max-width: 100%;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--oneai-radius);
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text-secondary);
+  border: 1px solid var(--oneai-border);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── W4: user-bubble attachment thumbnails ──────────────────────────────── */
 
 .attachments {

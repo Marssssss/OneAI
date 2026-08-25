@@ -165,8 +165,29 @@
   flex-direction: column;
   min-width: 340px;
   max-width: 92vw;
+  max-height: 340px;
+  overflow-y: auto;
   z-index: 10;
-  overflow: hidden;
+}
+
+/* Functional group header (issue #39: commands classified by what they do). */
+.slashGroupHeader {
+  padding: 8px 12px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--oneai-text-tertiary);
+  user-select: none;
+}
+
+/* Keyboard-navigation hint footer. */
+.slashHint {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  border-top: 1px solid var(--oneai-border);
+  user-select: none;
 }
 
 .slashItem {
@@ -183,10 +204,11 @@
   color: var(--oneai-text);
   min-width: 0;
 }
-.slashItem:last-child {
+.slashItem:last-of-type {
   border-bottom: none;
 }
-.slashItem:hover {
+.slashItem:hover,
+.slashItemSelected {
   background: var(--oneai-bg-subtle);
 }
 

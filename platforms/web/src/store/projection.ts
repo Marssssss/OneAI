@@ -58,6 +58,10 @@ export type NodeKind =
   | 'error'
   | 'tool'
   | 'plan'
+  /** Client-local system note (slash-command feedback — /help text,
+   *  `/session list` output, unknown-command notice). Never sent to the
+   *  engine; gone on reload, like the TUI's `ChatRole::System` lines. */
+  | 'note'
 export type NodeState = 'streaming' | 'done' | 'error'
 
 export type ToolState = 'pending' | 'done' | 'error'
@@ -648,6 +652,25 @@ export class ProjectionStore {
         turnId: null,
         state: 'done',
         attachments,
+      },
+    ]
+    this.emitNow()
+  }
+
+  /** Append a client-local system note (slash-command feedback — issue #39).
+   * Purely presentational: never submitted to the engine, cleared with the
+   * session, gone on reload — the web mirror of the TUI's system messages. */
+  addSystemNote(text: string): void {
+    this.state.nodes = [
+      ...this.state.nodes,
+      {
+        id: nextNodeId(),
+        role: 'system',
+        kind: 'note',
+        text,
+        speaker: null,
+        turnId: null,
+        state: 'done',
       },
     ]
     this.emitNow()
@@ -1617,6 +1640,23 @@ export class ProjectionStore {
       this.state.lastError = e instanceof Error ? e.message : String(e)
       this.emitNow()
     }
+  }
+
+  /** Generate a project-instruction file (`/init` — TUI parity). Blocking-ack
+   * RPC: resolves with the engine's `InitResult.message` once the probe +
+   * (optional) LLM synthesis finishes. Unlike the swallow-and-banner actions
+   * above, this THROWS on failure so the slash handler can surface the error
+   * as an in-conversation note (the TUI prints `/init` failures inline too). */
+  async projectInit(
+    format?: string,
+    force = false,
+    noLlm = false,
+  ): Promise<string> {
+    const res = await this.rpc.call<
+      { format?: string; force?: boolean; no_llm?: boolean },
+      { message?: string }
+    >('project/init', { format, force, no_llm: noLlm })
+    return res?.message ?? ''
   }
 
   // ── W3 actions: scenario group chat ───────────────────────────────────────

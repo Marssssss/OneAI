@@ -252,6 +252,15 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
       </div>
     )
   }
+  if (node.kind === 'note') {
+    // Client-local system note (slash-command feedback, issue #39) — a muted
+    // full-width block, mirroring the TUI's ChatRole::System messages.
+    return (
+      <div className={styles.row}>
+        <div className={styles.systemNote}>{node.text}</div>
+      </div>
+    )
+  }
   if (node.kind === 'thinking') {
     return (
       <div className={styles.row}>

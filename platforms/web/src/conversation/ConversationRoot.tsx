@@ -17,7 +17,8 @@ import type { ScenarioEntry } from '../scenario/scenarioStore'
 import type { InteractionResponse } from '../rpc/types'
 import { ChatView } from './ChatView'
 import { BackgroundTasksBar } from './BackgroundTasksBar'
-import { Composer, type SlashCommand, type InteractionMode } from './Composer'
+import { Composer, type InteractionMode } from './Composer'
+import type { SlashInvocation } from './slashCommands'
 import { ApprovalPanel } from './ApprovalPanel'
 import { GoalBar } from './GoalBar'
 import type { SettingsStore } from '../settings/settingsStore'
@@ -56,7 +57,9 @@ interface ConversationRootProps {
   onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
   onCycleMode: () => void
-  onSlash: (cmd: SlashCommand) => void
+  /** Slash dispatch (issue #39 TUI-aligned registry — see slashCommands.ts). */
+  onSlash: (invocation: SlashInvocation) => void
+  onUnknownSlash: (label: string) => void
   onSelectTool: (nodeId: string) => void
   onRespondApproval: (requestId: string, response: InteractionResponse) => void
   /** §B5 — persist a host admission cross-session ("always") via `host/allow`,
@@ -106,6 +109,7 @@ export function ConversationRoot({
   onStop,
   onCycleMode,
   onSlash,
+  onUnknownSlash,
   onSelectTool,
   onRespondApproval,
   onAllowAlways,
@@ -184,6 +188,7 @@ export function ConversationRoot({
       onStop={onStop}
       onCycleMode={onCycleMode}
       onSlash={onSlash}
+      onUnknownSlash={onUnknownSlash}
       onWorkspaceClick={onWorkspaceClick}
       workspaceDropdownOpen={workspaceDropdownOpen}
       onCloseWorkspaceDropdown={onCloseWorkspaceDropdown}

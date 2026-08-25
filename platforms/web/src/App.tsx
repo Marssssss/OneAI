@@ -19,7 +19,12 @@ import {
 import type { BusLocale, BusScenario, InteractionResponse } from './rpc/types'
 import { AppFrame } from './layout/AppFrame'
 import { ConversationRoot } from './conversation/ConversationRoot'
-import { type SlashCommand, type InteractionMode, nextMode } from './conversation/Composer'
+import { type InteractionMode, nextMode } from './conversation/Composer'
+import {
+  COMMAND_GROUPS,
+  SLASH_COMMANDS,
+  type SlashInvocation,
+} from './conversation/slashCommands'
 import { DetailsPanel, type DetailsTab } from './details/DetailsPanel'
 import { SidebarRoot } from './sidebar/SidebarRoot'
 import {
@@ -358,34 +363,136 @@ export default function App(): React.ReactNode {
     applyMode(nextMode(interactionMode))
   }
 
-  const handleSlash = (cmd: SlashCommand) => {
-    if (cmd === 'plan') {
-      applyMode(interactionMode === 'plan' ? 'normal' : 'plan')
-    } else if (cmd === 'clear') {
-      projection.exitScenario()
-      void projection.clearSession()
-    } else if (cmd === 'compact') {
-      void projection.compact(10)
-    } else if (cmd === 'scenario') {
-      setModal({ kind: 'picker' })
-    } else if (cmd === 'newScenario') {
-      setModal({ kind: 'editor', scenario: null })
-    } else if (cmd === 'editScenario') {
-      if (snap.currentScenario !== null) {
-        setModal({ kind: 'editor', scenario: snap.currentScenario })
-      } else {
-        setModal({ kind: 'picker' })
+  // ── Slash commands (issue #39 — scope aligned with the TUI's; scenario/
+  //    settings/plan/trajectory entries were dropped: scenario + settings live
+  //    in the sidebar/menus, plan mode in the mode chip, and the trajectory
+  //    rail opens via its TUI-aligned name /usage) ─────────────────────────
+  const INIT_FORMATS = ['oneai', 'agents', 'claude']
+  const INIT_FILENAMES: Record<string, string> = {
+    oneai: 'ONEAI.md',
+    agents: 'AGENTS.md',
+    claude: 'CLAUDE.md',
+  }
+
+  /** The /help note, grouped like the palette — derived from the same
+   *  registry, so help text can never drift from what's actually supported. */
+  const buildHelpText = (): string => {
+    const lines: string[] = [t('slash.help.title')]
+    for (const g of COMMAND_GROUPS) {
+      lines.push(`【${t(`command.group.${g}`)}】`)
+      for (const c of SLASH_COMMANDS.filter((cmd) => cmd.group === g)) {
+        lines.push(`  ${c.label} — ${t(c.descKey)}`)
       }
-    } else if (cmd === 'trajectory') {
-      setDetailsTab('trajectory')
-      setPrefs({ ...prefs, detailsOpen: true })
-    } else if (cmd === 'settings') {
-      setModal({ kind: 'settings' })
-    } else if (cmd === 'skills') {
-      setModal({ kind: 'skills' })
-    } else if (cmd === 'domainpack') {
-      setModal({ kind: 'domainpack' })
     }
+    lines.push('')
+    lines.push(t('slash.help.footer'))
+    return lines.join('\n')
+  }
+
+  /** `/init [oneai|agents|claude] [--force] [--no-llm]` — TUI parity. */
+  const handleInitCmd = async (inv: SlashInvocation) => {
+    const tokens = (inv.arg ?? '').split(/\s+/).filter((s) => s.length > 0)
+    let force = false
+    let noLlm = false
+    for (const tok of tokens) {
+      if (tok === '--force' || tok === '-f') force = true
+      else if (tok === '--no-llm') noLlm = true
+    }
+    if (inv.sub !== null && !INIT_FORMATS.includes(inv.sub)) {
+      projection.addSystemNote(t('slash.init.usage'))
+      return
+    }
+    const filename = inv.sub !== null ? INIT_FILENAMES[inv.sub] : 'ONEAI.md'
+    projection.addSystemNote(t('slash.init.progress').replace('{file}', filename))
+    try {
+      const message = await projection.projectInit(inv.sub ?? undefined, force, noLlm)
+      projection.addSystemNote(message.length > 0 ? message : `✅ ${filename}`)
+    } catch (e) {
+      projection.addSystemNote(
+        t('slash.init.failed').replace(
+          '{err}',
+          e instanceof Error ? e.message : String(e),
+        ),
+      )
+    }
+  }
+
+  /** `/session` subcommands — bare prints usage (the TUI prints session info;
+   * the web surfaces the same facts in the header/MetricsBar). */
+  const handleSessionCmd = (inv: SlashInvocation) => {
+    if (inv.sub === 'list') {
+      if (sessions.length === 0) {
+        projection.addSystemNote(t('slash.session.none'))
+        return
+      }
+      const sorted = [...sessions].sort((a, b) => b.updated_at_ms - a.updated_at_ms)
+      const lines = sorted.map((s) => {
+        const when = new Date(s.updated_at_ms).toLocaleString()
+        const title = s.title.length > 0 ? `  ${s.title}` : ''
+        return `  ${s.id}  [${s.message_count} msgs]  ${when}${title}`
+      })
+      projection.addSystemNote(`${t('slash.session.listTitle')}\n${lines.join('\n')}`)
+      return
+    }
+    if (inv.sub === 'resume') {
+      const idRaw = (inv.arg ?? '').trim()
+      if (idRaw.length === 0) {
+        projection.addSystemNote(t('slash.session.usage'))
+        return
+      }
+      // Full id or unique short prefix — the TUI resolves prefixes the same
+      // way (issue #23); an ambiguous prefix asks for more characters.
+      const matches = sessions.filter((s) => s.id === idRaw || s.id.startsWith(idRaw))
+      if (matches.length === 0) {
+        projection.addSystemNote(t('slash.session.notFound').replace('{id}', idRaw))
+      } else if (matches.length > 1) {
+        projection.addSystemNote(t('slash.session.ambiguous').replace('{id}', idRaw))
+      } else {
+        handlePickSession(matches[0].id)
+      }
+      return
+    }
+    projection.addSystemNote(t('slash.session.usage'))
+  }
+
+  const handleSlash = (inv: SlashInvocation) => {
+    switch (inv.cmd) {
+      case 'help':
+        projection.addSystemNote(buildHelpText())
+        break
+      case 'new':
+        void handleNewSession()
+        break
+      case 'clear':
+        projection.exitScenario()
+        void projection.clearSession()
+        break
+      case 'compact':
+        void projection.compact(10)
+        break
+      case 'usage':
+        // The TUI's /usage prints token usage; the web's closest analog is
+        // the details rail (usage + turn timings + trajectory ledger).
+        setDetailsTab('trajectory')
+        setPrefs({ ...prefs, detailsOpen: true })
+        break
+      case 'skills':
+        setModal({ kind: 'skills' })
+        break
+      case 'domain':
+        setModal({ kind: 'domainpack' })
+        break
+      case 'init':
+        void handleInitCmd(inv)
+        break
+      case 'session':
+        handleSessionCmd(inv)
+        break
+    }
+  }
+
+  const handleUnknownSlash = (label: string) => {
+    projection.addSystemNote(t('slash.unknown').replace('{cmd}', label))
   }
 
   const handleRespondApproval = (requestId: string, response: InteractionResponse) => {
@@ -468,6 +575,7 @@ export default function App(): React.ReactNode {
             onStop={() => void projection.cancelTurn()}
             onCycleMode={handleCycleMode}
             onSlash={handleSlash}
+            onUnknownSlash={handleUnknownSlash}
             onSelectTool={handleSelectTool}
             onRespondApproval={handleRespondApproval}
             onAllowAlways={handleAllowAlways}

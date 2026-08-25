@@ -8,8 +8,10 @@ test('host allowlist lists + removes a host (B5)', async ({ page }) => {
   await page.goto('/')
 
   // Open the Settings modal via the sidebar footer button (aria-label = 设置,
-  // the default zh locale).
-  await page.getByRole('button', { name: '设置' }).click()
+  // the default zh locale). `exact` — the first-run onboarding banner (issue
+  // #33) also renders a "去设置" button on the empty page, and Playwright's
+  // default substring name match would resolve both.
+  await page.getByRole('button', { name: '设置', exact: true }).click()
 
   // The Settings modal has a left rail; click the Network section.
   const rail = page.locator('nav button', { hasText: '网络授权' })
