@@ -139,7 +139,8 @@ DAG 路径更直接：`WorkflowExecutor::execute` 按 `level` 逐层 join，层�
 | `GraphState`（`conversation`/`variables`/`parsed_decision`/`active_paradigm`/`iteration_count`/`budget`）| `crates/oneai-workflow/src/state_graph.rs:384` |
 | `GraphActionExecutor` trait | `crates/oneai-workflow/src/state_executor.rs:152` |
 | `DirectProviderActionExecutor`（回退）| `crates/oneai-workflow/src/state_executor.rs:215` |
-| `StateGraphExecutor` + frontier 并行 | `crates/oneai-workflow/src/state_executor.rs:503`（`execute:623`，`execute_frontier_parallel` 多 walker + `BTreeSet` 合并）|
+| `StateGraphExecutor` + frontier 并行 | `crates/oneai-workflow/src/state_executor.rs:503`（`execute`，`execute_frontier_parallel` 多 walker + `BTreeSet` 合并）|
+| `GraphCheckpoint`/`GraphCheckpointStore` + InMemory/File 存储（gap P2 #14 resume）| `crates/oneai-workflow/src/checkpoint.rs` + `state_executor.rs`（`execute_with_checkpoints`/`resume`）|
 | `WorkflowExecutor`/`StepResult`/`WorkflowResult`/`WorkflowContext` | `crates/oneai-workflow/src/executor.rs:161,45,67,114` |
 | `interpolate_template`（`{{var}}`）| `crates/oneai-workflow/src/executor.rs:693` + `state_executor.rs:1162` |
 | `ValidationCode`（7 码）+ `ValidationIssue`/`Severity` | `crates/oneai-workflow/src/validator.rs:40,15,31` |
@@ -151,7 +152,7 @@ DAG 路径更直接：`WorkflowExecutor::execute` 按 `level` 逐层 join，层�
 | 系统 | 模型 | OneAI 取舍 |
 |---|---|---|
 | **Temporal / Airflow** | DAG 工作流引擎，强可靠/可观测 | OneAI DAG 是它们的子集（拓扑/层级/重试/超时）但**面向 Agent**：节点是 LLM 推理或工具调用而非任务函数；可靠性让位于 agentic 灵活度 |
-| **LangGraph** | 有环 StateGraph + 条件边 + checkpoint | OneAI StateGraph 是同类设计（节点+条件出边+有环），差异在**与 AgentLoop 闭环**：图节点可内联升级为完整 AgentLoop 管线，而非仅"调一次 LLM"；`parsed_decision` 结构化路由也比字符串匹配稳 |
+| **LangGraph** | 有环 StateGraph + 条件边 + checkpoint | OneAI StateGraph 是同类设计（节点+条件出边+有环 + **检查点续跑**），差异在**与 AgentLoop 闭环**：图节点可内联升级为完整 AgentLoop 管线，而非仅"调一次 LLM"；`parsed_decision` 结构化路由也比字符串匹配稳 |
 | **AutoGen / CrewAI** | 对话式多 agent 编排 | OneAI 的多 agent 走 `Delegate` 节点 + `oneai-agent` 的 SubAgent（见 [multi-agent](multi-agent-mechanism.md)）；工作流是**声明式图**，对话式编排归 multi-agent 机制，职责分离 |
 | **n8n / Zapier** | 触发+动作 DAG，无 LLM 推理节点 | OneAI 节点一等支持 `LlmInfer`（含工具装配/思考预算/范式切换），是为 agentic 而非为集成而设 |
 
@@ -161,6 +162,7 @@ OneAI 的独特点在于"图节点 = AgentLoop 管线"——经 `GraphActionExec
 
 - **声明工作流**：JSON `WorkflowConfig`（`from_json`/`to_json`）或 DomainPack 第⑥层 `Workflow+StateGraph`。
 - **选执行器**：`StateGraphExecutor::with_defaults(action_executor)` 用注入的 `GraphActionExecutor`；`with_direct_provider_defaults` 用轻量回退。
+- **检查点续跑（durable execution 第一步，gap P2 #14）**：`execute_with_checkpoints(graph, state, run_id, store)` 在**每个迭代边界**把走查状态（frontier、iterations、完整 `GraphState`）存进 `GraphCheckpointStore`（`InMemoryCheckpointStore` 测试用 / `FileCheckpointStore` 每 run 一个 JSON、跨进程重启）；中断/崩溃后 `executor.resume(graph, run_id, store)` 校验图名、清中断标志、从保存点续走；完成即删 checkpoint。run_id 经清洗防路径穿越。
 - **加节点动作**：`NodeAction` 是 `#[non_exhaustive]`，新变体经枚举扩展（需同步 `GraphActionExecutor` 实现 + 校验 + 渲染）。
 - **范式切换**：图内 `SwitchParadigm` 节点，或模型在 AgentLoop 内 `switch_paradigm` 元工具——两条入口汇到同一 `apply_paradigm_switch`。
 - **CLI**：`oneai workflow list/show/run`、`oneai graph list/show/run` 子命令 + 对话内 `/wf *` 斜杠命令（详见 [cli-reference](cli-reference.md)）；Studio Web UI 可视化编辑（[studio-mechanism](studio-mechanism.md)）。

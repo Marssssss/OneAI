@@ -23,6 +23,7 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
+pub mod checkpoint;
 pub mod compiler;
 pub mod config;
 pub mod dag;
@@ -32,6 +33,7 @@ pub mod state_executor;
 pub mod state_graph;
 pub mod validator;
 
+pub use checkpoint::*;
 pub use compiler::*;
 pub use config::*;
 pub use dag::*;

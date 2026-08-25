@@ -133,7 +133,8 @@ The DAG path is more direct: `WorkflowExecutor::execute` joins level by level, p
 | `GraphState` (`conversation`/`variables`/`parsed_decision`/`active_paradigm`/`iteration_count`/`budget`) | `crates/oneai-workflow/src/state_graph.rs:384` |
 | `GraphActionExecutor` trait | `crates/oneai-workflow/src/state_executor.rs:152` |
 | `DirectProviderActionExecutor` (fallback) | `crates/oneai-workflow/src/state_executor.rs:215` |
-| `StateGraphExecutor` + frontier-parallel routing | `crates/oneai-workflow/src/state_executor.rs:503` (`execute:623`, multi-walker merge P4.6) |
+| `StateGraphExecutor` + frontier-parallel routing | `crates/oneai-workflow/src/state_executor.rs:503` (`execute`, multi-walker merge P4.6) |
+| `GraphCheckpoint`/`GraphCheckpointStore` + InMemory/File stores (gap P2 #14 resume) | `crates/oneai-workflow/src/checkpoint.rs` + `state_executor.rs` (`execute_with_checkpoints`/`resume`) |
 | `WorkflowExecutor`/`StepResult`/`WorkflowResult`/`WorkflowContext` | `crates/oneai-workflow/src/executor.rs:161,45,67,114` |
 | `interpolate_template` (`{{var}}`) | `crates/oneai-workflow/src/executor.rs:693` + `state_executor.rs:1162` |
 | `ValidationCode` (7 codes) + `ValidationIssue`/`Severity` | `crates/oneai-workflow/src/validator.rs:40,15,31` |
@@ -145,7 +146,7 @@ The DAG path is more direct: `WorkflowExecutor::execute` joins level by level, p
 | System | Model | OneAI's trade-off |
 |---|---|---|
 | **Temporal / Airflow** | DAG workflow engines, strong reliability/observability | OneAI DAG is a subset (topo/levels/retry/timeout) but **agent-facing**: nodes are LLM inference or tool calls, not task functions; reliability cedes to agentic flexibility |
-| **LangGraph** | Cyclic StateGraph + conditional edges + checkpoints | OneAI StateGraph is the same design (nodes + conditional edges + cycles); the difference is the **closed loop with the AgentLoop**: a node can inline-upgrade to the full AgentLoop pipeline rather than just "call an LLM once"; `parsed_decision` structured routing beats string matching |
+| **LangGraph** | Cyclic StateGraph + conditional edges + checkpoints | OneAI StateGraph is the same design (nodes + conditional edges + cycles + **checkpoint-resume**); the difference is the **closed loop with the AgentLoop**: a node can inline-upgrade to the full AgentLoop pipeline rather than just "call an LLM once"; `parsed_decision` structured routing beats string matching |
 | **AutoGen / CrewAI** | Conversational multi-agent orchestration | OneAI's multi-agent goes through `Delegate` nodes + `oneai-agent`'s SubAgent (see [multi-agent](multi-agent-mechanism_EN.md)); workflows are **declarative graphs**, conversational orchestration belongs to the multi-agent mechanism — a clean separation |
 | **n8n / Zapier** | Trigger+action DAG, no LLM-inference nodes | OneAI nodes first-class support `LlmInfer` (with tool assembly/thinking budget/paradigm switching), built for agentic not integration |
 
@@ -155,6 +156,7 @@ OneAI's distinct point: **graph nodes = AgentLoop pipeline** (via `GraphActionEx
 
 - **Declare a workflow**: JSON `WorkflowConfig` (`from_json`/`to_json`) or DomainPack layer 6 `Workflow+StateGraph`.
 - **Choose executor**: `StateGraphExecutor::with_defaults(action_executor)` uses the injected `GraphActionExecutor`; `with_direct_provider_defaults` uses the lightweight fallback.
+- **Checkpoint-resume (first durable-execution step, gap P2 #14)**: `execute_with_checkpoints(graph, state, run_id, store)` persists the walk state (frontier, iterations, full `GraphState`) into a `GraphCheckpointStore` (`InMemoryCheckpointStore` for tests / `FileCheckpointStore` — one JSON per run, survives process restarts) at **every iteration boundary**; after an interruption/crash, `executor.resume(graph, run_id, store)` validates the graph name, clears the interruption flags, and continues from the saved point; completed runs delete their checkpoint. run_id is sanitized against path traversal.
 - **Add a node action**: `NodeAction` is `#[non_exhaustive]`; new variants extend the enum (sync `GraphActionExecutor` impls + validation + rendering).
 - **Paradigm switch**: a `SwitchParadigm` node in the graph, or the model's `switch_paradigm` meta-tool in the AgentLoop — both converge on `apply_paradigm_switch`.
 - **CLI**: `oneai workflow list/show/run`, `oneai graph list/show/run` subcommands + in-conversation `/wf *` slash commands (see [cli-reference](cli-reference_EN.md)); Studio Web UI visual editing (see [studio-mechanism](studio-mechanism_EN.md)).

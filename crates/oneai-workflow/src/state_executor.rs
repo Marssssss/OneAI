@@ -625,14 +625,116 @@ impl StateGraphExecutor {
         graph: &StateGraph,
         initial_state: GraphState,
     ) -> Result<GraphExecutionResult> {
-        let mut state = initial_state;
         // BTreeSet, not HashSet: deterministic iteration order so terminal
         // pick, merge order, and next-frontier composition are reproducible
         // across runs (戒律 #6 — invariants, not frozen values).
-        let mut frontier: BTreeSet<String> = std::iter::once(graph.entry_point.clone()).collect();
-        let mut iterations = 0;
-        let mut interrupt_checkpoints = Vec::new();
+        let frontier: BTreeSet<String> = std::iter::once(graph.entry_point.clone()).collect();
+        self.run_walk(graph, initial_state, frontier, 0, Vec::new(), None)
+            .await
+    }
 
+    /// Execute a StateGraph with durable checkpointing (gap-analysis P2 #14).
+    ///
+    /// The walk state (frontier, iterations, [`GraphState`]) is persisted to
+    /// `store` under `run_id` before the first node and after every iteration
+    /// boundary. If the process dies mid-walk, [`Self::resume`] continues
+    /// from the last checkpoint. Completed runs delete their checkpoint.
+    pub async fn execute_with_checkpoints(
+        &self,
+        graph: &StateGraph,
+        initial_state: GraphState,
+        run_id: impl Into<String>,
+        store: Arc<dyn crate::checkpoint::GraphCheckpointStore>,
+    ) -> Result<GraphExecutionResult> {
+        let run_id = run_id.into();
+        let frontier: BTreeSet<String> = std::iter::once(graph.entry_point.clone()).collect();
+        store.save(&crate::checkpoint::GraphCheckpoint {
+            run_id: run_id.clone(),
+            graph_name: graph.name.clone(),
+            frontier: frontier.clone(),
+            iterations: 0,
+            state: initial_state.clone(),
+            interrupt_checkpoints: Vec::new(),
+            completed: false,
+            saved_at: chrono::Utc::now().to_rfc3339(),
+        })?;
+        self.run_walk(
+            graph,
+            initial_state,
+            frontier,
+            0,
+            Vec::new(),
+            Some((run_id, store)),
+        )
+        .await
+    }
+
+    /// Resume a checkpointed StateGraph walk (gap-analysis P2 #14).
+    ///
+    /// Loads the checkpoint saved under `run_id`, validates it belongs to
+    /// `graph`, and continues the walk from the saved frontier/iteration
+    /// count with the saved [`GraphState`]. A checkpoint already marked
+    /// `completed` returns its state without re-running. Errors when no
+    /// checkpoint exists or the graph name mismatches.
+    pub async fn resume(
+        &self,
+        graph: &StateGraph,
+        run_id: &str,
+        store: Arc<dyn crate::checkpoint::GraphCheckpointStore>,
+    ) -> Result<GraphExecutionResult> {
+        let checkpoint = store.load(run_id)?.ok_or_else(|| {
+            OneAIError::Workflow(format!(
+                "No checkpoint found for graph run '{}' — nothing to resume",
+                run_id
+            ))
+        })?;
+        if checkpoint.graph_name != graph.name {
+            return Err(OneAIError::Workflow(format!(
+                "Checkpoint '{}' belongs to graph '{}' but resume was requested on '{}'",
+                run_id, checkpoint.graph_name, graph.name
+            )));
+        }
+        if checkpoint.completed {
+            return Ok(GraphExecutionResult {
+                name: graph.name.clone(),
+                final_state: checkpoint.state,
+                completed: true,
+                terminal_node: None,
+                iterations: checkpoint.iterations,
+                interrupt_checkpoints: checkpoint.interrupt_checkpoints,
+            });
+        }
+        // Resuming is an explicit "try again" — clear the interruption flags
+        // the failed walk left behind (interrupt denial sets
+        // `should_terminate` + `last_error`; keeping them would re-terminate
+        // the walk instantly on resume).
+        let mut state = checkpoint.state;
+        state.should_terminate = false;
+        state.last_error = None;
+        self.run_walk(
+            graph,
+            state,
+            checkpoint.frontier,
+            checkpoint.iterations,
+            checkpoint.interrupt_checkpoints,
+            Some((run_id.to_string(), store)),
+        )
+        .await
+    }
+
+    /// The shared frontier walk used by [`Self::execute`],
+    /// [`Self::execute_with_checkpoints`] and [`Self::resume`]. When
+    /// `checkpoint` is `Some((run_id, store))`, the walk state is persisted
+    /// after every iteration boundary and cleaned up (or finalized) on exit.
+    async fn run_walk(
+        &self,
+        graph: &StateGraph,
+        mut state: GraphState,
+        mut frontier: BTreeSet<String>,
+        mut iterations: usize,
+        mut interrupt_checkpoints: Vec<String>,
+        checkpoint: Option<(String, Arc<dyn crate::checkpoint::GraphCheckpointStore>)>,
+    ) -> Result<GraphExecutionResult> {
         while iterations < self.max_iterations {
             iterations += 1;
             state.iteration_count = iterations;
@@ -659,6 +761,13 @@ impl StateGraphExecutor {
                 let action_result = self.execute_node_action(&node.action, &mut state).await?;
                 state.last_result = Some(action_result.output.clone());
                 state.last_error = action_result.error.clone();
+
+                // Completed — the checkpoint (if any) has served its purpose.
+                if let Some((run_id, store)) = &checkpoint {
+                    if let Err(e) = store.delete(run_id) {
+                        tracing::warn!("failed to delete completed checkpoint '{}': {}", run_id, e);
+                    }
+                }
 
                 return Ok(GraphExecutionResult {
                     name: graph.name.clone(),
@@ -703,6 +812,21 @@ impl StateGraphExecutor {
             }
 
             frontier = next_targets.into_iter().collect();
+
+            // Durable execution (gap P2 #14): persist the walk state at the
+            // iteration boundary so a crash/restart resumes from here.
+            if let Some((run_id, store)) = &checkpoint {
+                store.save(&crate::checkpoint::GraphCheckpoint {
+                    run_id: run_id.clone(),
+                    graph_name: graph.name.clone(),
+                    frontier: frontier.clone(),
+                    iterations,
+                    state: state.clone(),
+                    interrupt_checkpoints: interrupt_checkpoints.clone(),
+                    completed: false,
+                    saved_at: chrono::Utc::now().to_rfc3339(),
+                })?;
+            }
         }
 
         // Did we exceed max_iterations or terminate without reaching a terminal node?
@@ -715,14 +839,38 @@ impl StateGraphExecutor {
             );
         }
 
-        Ok(GraphExecutionResult {
+        let result = GraphExecutionResult {
             name: graph.name.clone(),
             final_state: state,
             completed: !should_terminate,
             terminal_node: None,
             iterations,
             interrupt_checkpoints,
-        })
+        };
+
+        // Checkpoint finalization: completed walks drop their checkpoint;
+        // interrupted/budget-exhausted walks persist the final state so a
+        // later `resume` sees how far the walk got.
+        if let Some((run_id, store)) = &checkpoint {
+            if result.completed {
+                if let Err(e) = store.delete(run_id) {
+                    tracing::warn!("failed to delete completed checkpoint '{}': {}", run_id, e);
+                }
+            } else {
+                store.save(&crate::checkpoint::GraphCheckpoint {
+                    run_id: run_id.clone(),
+                    graph_name: graph.name.clone(),
+                    frontier: frontier.clone(),
+                    iterations: result.iterations,
+                    state: result.final_state.clone(),
+                    interrupt_checkpoints: result.interrupt_checkpoints.clone(),
+                    completed: false,
+                    saved_at: chrono::Utc::now().to_rfc3339(),
+                })?;
+            }
+        }
+
+        Ok(result)
     }
 
     /// Execute a frontier sequentially on the shared state.
@@ -1172,6 +1320,7 @@ pub fn interpolate_graph_template(template: &str, variables: &HashMap<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::GraphCheckpointStore;
     use crate::state_graph::{GraphNode, StateGraph};
 
     #[allow(dead_code)] // test fixture retained for future executor coverage
@@ -1832,5 +1981,225 @@ mod tests {
             .map(|m| m.text_content())
             .collect();
         assert_eq!(texts, vec![delegate_msg("S"), delegate_msg("J")]);
+    }
+
+    // ─── Checkpoint + resume (gap P2 #14) ───────────────────────────────
+
+    /// Interaction gate with a scripted ToolApproval answer — lets tests
+    /// interrupt (Abort) or pass (Proceed) a StateGraph interrupt node.
+    struct ScriptedApprovalGate {
+        approve: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl InteractionGate for ScriptedApprovalGate {
+        async fn request(
+            &self,
+            _req: oneai_core::InteractionRequest,
+        ) -> Result<oneai_core::InteractionResponse> {
+            if self.approve {
+                Ok(oneai_core::InteractionResponse::Proceed)
+            } else {
+                Ok(oneai_core::InteractionResponse::Abort {
+                    reason: "denied for test".to_string(),
+                })
+            }
+        }
+
+        fn enabled(&self, _point: oneai_core::InteractionPoint) -> bool {
+            true
+        }
+    }
+
+    fn make_executor_with_gate(
+        gate: Arc<dyn InteractionGate>,
+        max_iterations: usize,
+    ) -> StateGraphExecutor {
+        StateGraphExecutor::new(
+            Arc::new(NullGraphActionExecutor),
+            Arc::new(RecordingDelegateFactory),
+            gate,
+            max_iterations,
+        )
+    }
+
+    /// entry(S) → gate(G, interrupt) → join(J, terminal).
+    fn make_interrupt_graph() -> StateGraph {
+        let mut graph = StateGraph::new("interrupt-graph", "entry");
+        for (id, kind, interrupt) in [
+            ("entry", "S", false),
+            ("gate", "G", true),
+            ("join", "J", false),
+        ] {
+            graph.add_node(GraphNode {
+                id: id.to_string(),
+                action: NodeAction::Delegate {
+                    agent_kind: kind.to_string(),
+                    task_template: "t".to_string(),
+                },
+                interrupt,
+                metadata: HashMap::new(),
+            });
+        }
+        graph.add_edge(GraphEdge {
+            from: "entry".to_string(),
+            to: "gate".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_edge(GraphEdge {
+            from: "gate".to_string(),
+            to: "join".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_terminal("join");
+        graph
+    }
+
+    #[tokio::test]
+    async fn interrupted_walk_persists_checkpoint_and_resumes_to_completion() {
+        // Durable execution (gap P2 #14): an interrupt denial stops the walk
+        // mid-graph; the walk state is checkpointed; a later resume (approve
+        // gate) continues from the saved frontier and reaches the terminal.
+        let store = Arc::new(crate::checkpoint::InMemoryCheckpointStore::new());
+        let graph = make_interrupt_graph();
+
+        // Run 1 — interrupt denied → walk stops at the gate node.
+        let exec_abort =
+            make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: false }), 50);
+        let result = exec_abort
+            .execute_with_checkpoints(&graph, GraphState::new(), "run-1", store.clone())
+            .await
+            .unwrap();
+        assert!(!result.completed, "aborted interrupt must not complete");
+        assert_eq!(result.iterations, 2, "entry + gate(interrupt) ran");
+        // Only entry's message landed — the gate node never executed.
+        let texts: Vec<String> = result
+            .final_state
+            .conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect();
+        assert_eq!(texts, vec![delegate_msg("S")]);
+        // Checkpoint persisted (walk incomplete).
+        assert_eq!(store.len(), 1);
+        let cp = store.load("run-1").unwrap().expect("checkpoint saved");
+        assert_eq!(cp.graph_name, "interrupt-graph");
+        assert!(cp.frontier.contains("gate"));
+
+        // Run 2 — resume with an approving gate (a "later process").
+        let exec_ok = make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: true }), 50);
+        let resumed = exec_ok
+            .resume(&graph, "run-1", store.clone())
+            .await
+            .unwrap();
+        assert!(resumed.completed);
+        assert_eq!(resumed.terminal_node.as_deref(), Some("join"));
+        // entry's message survived the restart; gate + join ran on resume —
+        // each exactly once (no re-execution of the already-done entry).
+        let texts: Vec<String> = resumed
+            .final_state
+            .conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![delegate_msg("S"), delegate_msg("G"), delegate_msg("J")]
+        );
+        // Completed run deletes its checkpoint.
+        assert!(store.is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_survives_store_instance_restart() {
+        // FileCheckpointStore simulates a process restart: the checkpoint
+        // written by one store instance is resumed through a fresh one.
+        let dir =
+            std::env::temp_dir().join(format!("oneai-graph-resume-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let graph = make_interrupt_graph();
+
+        {
+            let store = Arc::new(crate::checkpoint::FileCheckpointStore::new(&dir).unwrap());
+            let exec_abort =
+                make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: false }), 50);
+            let result = exec_abort
+                .execute_with_checkpoints(&graph, GraphState::new(), "run-file", store)
+                .await
+                .unwrap();
+            assert!(!result.completed);
+        }
+
+        // "Restart": a brand-new store instance over the same directory.
+        let store2 = Arc::new(crate::checkpoint::FileCheckpointStore::new(&dir).unwrap());
+        assert!(
+            store2.load("run-file").unwrap().is_some(),
+            "checkpoint must survive the restart"
+        );
+        let exec_ok = make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: true }), 50);
+        let resumed = exec_ok
+            .resume(&graph, "run-file", store2.clone())
+            .await
+            .unwrap();
+        assert!(resumed.completed);
+        assert_eq!(resumed.terminal_node.as_deref(), Some("join"));
+        // Completed → checkpoint file removed.
+        assert!(store2.load("run-file").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn completed_walk_leaves_no_checkpoint() {
+        let store = Arc::new(crate::checkpoint::InMemoryCheckpointStore::new());
+        let graph = make_interrupt_graph();
+        let exec_ok = make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: true }), 50);
+        let result = exec_ok
+            .execute_with_checkpoints(&graph, GraphState::new(), "run-c", store.clone())
+            .await
+            .unwrap();
+        assert!(result.completed);
+        assert!(store.is_empty(), "completed runs delete their checkpoint");
+    }
+
+    #[tokio::test]
+    async fn resume_errors_on_missing_checkpoint_or_graph_mismatch() {
+        let store = Arc::new(crate::checkpoint::InMemoryCheckpointStore::new());
+        let graph = make_interrupt_graph();
+        let exec_ok = make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: true }), 50);
+
+        // No checkpoint at all.
+        let err = exec_ok
+            .resume(&graph, "never-ran", store.clone())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No checkpoint"));
+
+        // Checkpoint for one graph, resumed against another.
+        let mut other = StateGraph::new("other-graph", "entry");
+        other.add_node(GraphNode {
+            id: "entry".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: "X".to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        other.add_terminal("entry");
+        let exec_abort =
+            make_executor_with_gate(Arc::new(ScriptedApprovalGate { approve: false }), 50);
+        exec_abort
+            .execute_with_checkpoints(&graph, GraphState::new(), "run-m", store.clone())
+            .await
+            .unwrap();
+        let err = exec_ok
+            .resume(&other, "run-m", store.clone())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("belongs to graph"));
     }
 }
