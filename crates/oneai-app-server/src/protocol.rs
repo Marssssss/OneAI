@@ -69,6 +69,12 @@ pub mod method {
     /// Params: `{id, archived: bool}`; returns `{ok: true}` or `-32603` when
     /// not found.
     pub const SESSION_ARCHIVE: &str = "session/archive";
+    /// Load one session's persisted bus-event log (issue #40 trajectory
+    /// replay). Params: `{id}`. Returns `{ok, events: [<serialized
+    /// EngineYield>...]}` — trajectory-relevant yields in append order;
+    /// empty when the session has no log. `ok:false` when no
+    /// `SessionEventStore` is wired.
+    pub const SESSION_TRAJECTORY: &str = "session/trajectory";
 
     /// Open the native OS directory picker (deepseek-harness parity). The
     /// sidecar — a local process — shells out to the platform's folder-chooser

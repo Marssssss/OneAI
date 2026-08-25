@@ -241,6 +241,18 @@ pub struct BackgroundTaskOpResult {
     pub error: Option<String>,
 }
 
+/// Result of `session/trajectory` (issue #40) — the persisted bus-event log
+/// of one session, replayed by the frontend to rebuild a historical
+/// trajectory. `events` are the raw serialized `EngineYield` JSON lines in
+/// append order; empty when the session has no log (or no store is wired).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SessionTrajectoryResult {
+    pub ok: bool,
+    pub events: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// The app-probe trait. Object-safe via `#[async_trait]`; the production impl
 /// (in `cmd_app_server`) wraps `Arc<oneai_app::App>`.
 #[async_trait]
@@ -298,6 +310,10 @@ pub trait AppProbe: Send + Sync {
     async fn cancel_background_task(&self, task_id: &str) -> BackgroundTaskOpResult;
     /// Cancel all in-flight background sub-agents (e.g. a "stop all" button).
     async fn cancel_all_background(&self) -> BackgroundTaskOpResult;
+    /// Load the persisted bus-event log of one session (issue #40 trajectory
+    /// replay). `ok:false` when no `SessionEventStore` is wired; empty
+    /// `events` with `ok:true` when the session simply has no log yet.
+    async fn session_trajectory(&self, session_id: &str) -> SessionTrajectoryResult;
 }
 
 /// Shared, thread-safe handle threaded through `serve_all` → transports →
@@ -390,6 +406,13 @@ impl AppProbe for NullAppProbe {
             ok: false,
             cancelled_count: Some(0),
             error: Some("background cancel not supported by this probe".to_string()),
+        }
+    }
+    async fn session_trajectory(&self, _session_id: &str) -> SessionTrajectoryResult {
+        SessionTrajectoryResult {
+            ok: false,
+            events: Vec::new(),
+            error: Some("session trajectory not supported by this probe".to_string()),
         }
     }
 }

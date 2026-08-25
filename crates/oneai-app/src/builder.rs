@@ -269,6 +269,10 @@ pub struct AppBuilder {
     /// decisions/blockers to per-task append-only event logs — enabling crash
     /// recovery and cross-session task continuation.
     working_state_root: Option<std::path::PathBuf>,
+    /// Explicit session-event store override (issue #40 trajectory replay).
+    /// When `None` and `working_state_root` is set, build() derives a
+    /// `FileSessionEventStore` from the same root (`<root>/events/*.jsonl`).
+    session_event_store: Option<Arc<dyn oneai_core::traits::SessionEventStore>>,
     /// Optional durable cron scheduler (Phase 3.2). Held on `App` so future
     /// agent tools can query schedules; the CLI drives the lifecycle
     /// (`cron serve` / `supervisor serve --with-cron`). The trait seam lives
@@ -378,6 +382,7 @@ impl AppBuilder {
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             reflection_cadence: None,
             working_state_root: None,
+            session_event_store: None,
             cron_scheduler: None,
             terminal_backend: None,
             code_working_dir: None,
@@ -1521,6 +1526,21 @@ impl AppBuilder {
         self
     }
 
+    /// Override the session-event store (issue #40 trajectory replay).
+    ///
+    /// By default the store is derived from [`working_state`](Self::working_state)'s
+    /// root (`FileSessionEventStore` at `<root>/events/`); call this to inject
+    /// a custom backend (e.g. an in-memory store in tests). The tap that feeds
+    /// it is spawned at [`build`](Self::build) time whenever an engine bus is
+    /// wired.
+    pub fn session_event_store(
+        mut self,
+        store: Arc<dyn oneai_core::traits::SessionEventStore>,
+    ) -> Self {
+        self.session_event_store = Some(store);
+        self
+    }
+
     // ─── Cron Scheduler (Phase 3.2) ───────────────────────────────────────────
 
     /// Inject a durable cron scheduler (Phase 3.2). The scheduler is *held*
@@ -2644,6 +2664,20 @@ impl AppBuilder {
             ) as std::sync::Arc<dyn oneai_core::traits::WorkingStateStore>
         });
 
+        // Session event log (issue #40 trajectory replay): explicit override
+        // wins; otherwise derive a file store from the working-state root so
+        // the trajectory log lives beside the task event logs it complements.
+        let session_event_store: Option<Arc<dyn oneai_core::traits::SessionEventStore>> =
+            self.session_event_store.clone().or_else(|| {
+                self.working_state_root.as_ref().map(|root| {
+                    Arc::new(oneai_persistence::FileSessionEventStore::new(root.clone()))
+                        as Arc<dyn oneai_core::traits::SessionEventStore>
+                })
+            });
+        // The tap needs the bus handle after `self.engine_bus` moves into the
+        // App literal below.
+        let bus_for_event_tap = self.engine_bus.clone();
+
         // Skill lifecycle store + curator (Phase 2.1 Stage B). Built from the
         // merged pack's `skill_lifecycle` policy (CodingPack 30d/90d,
         // assistant 60d/180d) — or the `coding()` default when no pack is
@@ -2765,11 +2799,19 @@ impl AppBuilder {
             constrained_output_policy: self.constrained_output_policy,
             reflection_cadence: self.reflection_cadence,
             working_state_store,
+            session_event_store,
             skill_metadata_store,
             skill_curator,
             cron_scheduler: self.cron_scheduler,
             terminal_backend: self.terminal_backend,
         };
+
+        // Spawn the session-event tap (issue #40): persist trajectory-relevant
+        // yields per session so a historical session can replay its timeline.
+        // Bus-gated like everything event-stream-shaped.
+        if let (Some(bus), Some(store)) = (bus_for_event_tap, app.session_event_store.clone()) {
+            crate::session_event_log::spawn_session_event_tap(bus, store);
+        }
 
         // Skill tools (issue #38): the injected Tier1 skill menu tells the
         // model to "call the `skill` tool" — registering the tool here (not
@@ -2912,6 +2954,12 @@ pub struct App {
     /// continue an unfinished task from a previous session. See
     /// `AppBuilder::working_state`.
     pub working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
+    /// Per-session bus-event log (issue #40 trajectory replay) — tap-fed at
+    /// build time when an engine bus is wired. Read path: the
+    /// `session/trajectory` RPC (via `AppProbe`) replays a historical
+    /// session's timeline. `None` when neither an override nor a
+    /// working-state root was configured.
+    pub session_event_store: Option<Arc<dyn oneai_core::traits::SessionEventStore>>,
     /// Skill lifecycle metadata store (Phase 2.1 Stage B) — the durable
     /// per-skill `use_count` / `state` / `pinned` index + backup snapshots.
     /// `None` when no DomainPack is loaded (no `skill_lifecycle` policy).

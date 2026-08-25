@@ -345,6 +345,19 @@ async fn handle_request(
                 Response::err(id, RpcError::internal(format!("session not found: {sid}")))
             }
         }
+        // session/trajectory — issue #40: replay a historical session's
+        // execution timeline. Params: {id}. Returns the persisted bus-event
+        // log (trajectory-relevant yields, append order); the frontend feeds
+        // the lines through its projection in replay-only mode. No bus
+        // round-trip — reads the probe's SessionEventStore directly.
+        method::SESSION_TRAJECTORY => {
+            let sid = match field::<String>(&params, "id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.session_trajectory(&sid).await;
+            Response::ok(id, json!(res))
+        }
         // dialog/pick_directory — open the native OS folder picker (macOS
         // `osascript choose folder` / Linux zenity·kdialog / Windows
         // FolderBrowserDialog) and return the chosen absolute path. The local
@@ -1301,5 +1314,199 @@ mod tests {
 
         let list = session_response(store, "session/list", json!({})).await;
         assert_eq!(list.result.unwrap()["sessions"][0]["archived"], json!(true));
+    }
+
+    // ─── session/trajectory (issue #40) ─────────────────────────────────────
+
+    /// Probe that serves a canned trajectory for one session; everything else
+    /// delegates to `NullAppProbe`.
+    struct TrajectoryProbe {
+        session_id: String,
+        events: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::probe::AppProbe for TrajectoryProbe {
+        async fn session_trajectory(
+            &self,
+            session_id: &str,
+        ) -> crate::probe::SessionTrajectoryResult {
+            if session_id == self.session_id {
+                crate::probe::SessionTrajectoryResult {
+                    ok: true,
+                    events: self.events.clone(),
+                    error: None,
+                }
+            } else {
+                crate::probe::SessionTrajectoryResult {
+                    ok: true,
+                    events: Vec::new(),
+                    error: None,
+                }
+            }
+        }
+        async fn config(&self) -> crate::probe::AppConfigSnapshot {
+            Default::default()
+        }
+        async fn providers(&self) -> Vec<crate::probe::ProviderInfo> {
+            Vec::new()
+        }
+        async fn domainpacks(&self) -> crate::probe::DomainPackList {
+            Default::default()
+        }
+        async fn skills(&self) -> Vec<crate::probe::SkillInfo> {
+            Vec::new()
+        }
+        async fn skill_pin(&self, _: &str) -> crate::probe::SkillOpResult {
+            crate::probe::SkillOpResult {
+                ok: false,
+                skill: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn skill_unpin(&self, _: &str) -> crate::probe::SkillOpResult {
+            crate::probe::SkillOpResult {
+                ok: false,
+                skill: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn skill_archive(&self, _: &str) -> crate::probe::SkillOpResult {
+            crate::probe::SkillOpResult {
+                ok: false,
+                skill: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn skill_restore(&self, _: &str) -> crate::probe::SkillOpResult {
+            crate::probe::SkillOpResult {
+                ok: false,
+                skill: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_add(
+            &self,
+            _: crate::probe::ProviderEntryDto,
+        ) -> crate::probe::ProviderOpResult {
+            crate::probe::ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_delete(&self, _: &str) -> crate::probe::ProviderOpResult {
+            crate::probe::ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_set_active(&self, _: &str) -> crate::probe::ProviderOpResult {
+            crate::probe::ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_models(
+            &self,
+            _: crate::probe::ProviderModelsQuery,
+        ) -> crate::probe::ProviderModelsResult {
+            crate::probe::ProviderModelsResult {
+                ok: false,
+                models: Vec::new(),
+                error: Some("test probe".into()),
+            }
+        }
+        async fn config_read(&self) -> crate::probe::ConfigFileView {
+            crate::probe::ConfigFileView {
+                path: String::new(),
+                content: String::new(),
+            }
+        }
+        async fn thinking_effort(&self) -> oneai_core::ThinkingEffort {
+            oneai_core::ThinkingEffort::Medium
+        }
+        async fn set_thinking_effort(&self, _: oneai_core::ThinkingEffort) {}
+        async fn list_background_tasks(&self) -> Vec<crate::probe::BackgroundTaskInfoDto> {
+            Vec::new()
+        }
+        async fn cancel_background_task(&self, _: &str) -> crate::probe::BackgroundTaskOpResult {
+            crate::probe::BackgroundTaskOpResult {
+                ok: false,
+                cancelled_count: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn cancel_all_background(&self) -> crate::probe::BackgroundTaskOpResult {
+            crate::probe::BackgroundTaskOpResult {
+                ok: false,
+                cancelled_count: Some(0),
+                error: Some("test probe".into()),
+            }
+        }
+    }
+
+    async fn trajectory_response(probe: SharedAppProbe, params: Value) -> Response {
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let dispatcher = Dispatcher::default();
+        let scenario_store: SharedScenarioStore =
+            Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let store: SharedConversationStore =
+            Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let feedback_store: SharedFeedbackStore =
+            Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let host_allowlist_rpc: SharedHostAllowlistRpc =
+            Arc::new(crate::host_allowlist::InMemoryHostAllowlistRpc::new());
+        let req = crate::protocol::Request::new(json!(9), "session/trajectory", params);
+        handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            store,
+            feedback_store,
+            host_allowlist_rpc,
+            probe,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn session_trajectory_returns_persisted_events() {
+        let probe: SharedAppProbe = Arc::new(TrajectoryProbe {
+            session_id: "s1".into(),
+            events: vec![
+                r#"{"kind":"turn_start","turn_id":"t1","task":"hi"}"#.to_string(),
+                r#"{"kind":"turn_complete","turn_id":"t1"}"#.to_string(),
+            ],
+        });
+        let resp = trajectory_response(probe, json!({"id": "s1"})).await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(true));
+        let events = res["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].as_str().unwrap().contains("turn_start"));
+    }
+
+    #[tokio::test]
+    async fn session_trajectory_missing_id_is_invalid_params() {
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let resp = trajectory_response(probe, json!({})).await;
+        let err = resp.error.expect("error response");
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn session_trajectory_null_probe_reports_not_supported() {
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let resp = trajectory_response(probe, json!({"id": "s1"})).await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("not supported"));
     }
 }

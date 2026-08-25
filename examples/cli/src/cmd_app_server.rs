@@ -23,8 +23,8 @@ use oneai_app_server::{
     default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError,
     BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView, DomainPackInfo, DomainPackList,
     FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo, ProviderModelsQuery,
-    ProviderModelsResult, ProviderOpResult, SharedAppProbe, SharedScenarioStore, SkillInfo,
-    SkillOpResult,
+    ProviderModelsResult, ProviderOpResult, SessionTrajectoryResult, SharedAppProbe,
+    SharedScenarioStore, SkillInfo, SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
@@ -670,6 +670,31 @@ impl AppProbe for AppProbeImpl {
             ok: true,
             cancelled_count: Some(running),
             error: None,
+        }
+    }
+
+    async fn session_trajectory(&self, session_id: &str) -> SessionTrajectoryResult {
+        // Issue #40: replay a historical session's trajectory from the
+        // persisted bus-event log. No store wired ⇒ `ok:false` (the frontend
+        // falls back to the live-only ledger with a hint).
+        let Some(store) = &self.app.session_event_store else {
+            return SessionTrajectoryResult {
+                ok: false,
+                events: Vec::new(),
+                error: Some("session event log is not enabled".to_string()),
+            };
+        };
+        match store.load(session_id).await {
+            Ok(events) => SessionTrajectoryResult {
+                ok: true,
+                events,
+                error: None,
+            },
+            Err(e) => SessionTrajectoryResult {
+                ok: false,
+                events: Vec::new(),
+                error: Some(format!("load session event log: {e}")),
+            },
         }
     }
 

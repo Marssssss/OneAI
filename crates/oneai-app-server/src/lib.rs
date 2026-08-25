@@ -66,8 +66,8 @@ pub use http::serve_web;
 pub use probe::{
     AppConfigSnapshot, AppProbe, BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView,
     DomainPackInfo, DomainPackList, NullAppProbe, ProviderEntryDto, ProviderInfo,
-    ProviderModelsQuery, ProviderModelsResult, ProviderOpResult, SharedAppProbe, SkillInfo,
-    SkillOpResult,
+    ProviderModelsQuery, ProviderModelsResult, ProviderOpResult, SessionTrajectoryResult,
+    SharedAppProbe, SkillInfo, SkillOpResult,
 };
 pub use protocol::{Notification, Request, Response, RpcError};
 pub use scenario::{

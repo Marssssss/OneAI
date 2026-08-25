@@ -803,6 +803,31 @@ pub trait WorkingStateStore: Send + Sync {
     async fn archive_task(&self, task_id: &str) -> Result<()>;
 }
 
+// ─── SessionEventStore ───────────────────────────────────────────────────────
+
+/// Durable per-session log of bus yield events (issue #40 trajectory replay).
+///
+/// The engine's live event stream (`EngineYield`) is broadcast-only — a
+/// frontend connected mid-session (or loading a historical session) has no
+/// way to rebuild the execution trajectory. This store taps the stream and
+/// persists a **whitelisted** subset of events (trajectory-relevant kinds;
+/// high-volume content events like stream chunks stay out — their content
+/// lives in the persisted conversation) as an append-only JSONL log, one file
+/// per session. Loading a session replays its log through the same projection
+/// path the live events use.
+///
+/// Lines are opaque JSON strings at this layer so the trait stays free of any
+/// dependency on the bus crate — the producer serializes, the consumer parses.
+#[async_trait]
+pub trait SessionEventStore: Send + Sync {
+    /// Append one serialized yield event to the session's log.
+    async fn append(&self, session_id: &str, line: &str) -> Result<()>;
+
+    /// Load all event lines for a session, in append order. Absent session ⇒
+    /// empty vec. Corrupt trailing lines (a crash mid-write) are skipped.
+    async fn load(&self, session_id: &str) -> Result<Vec<String>>;
+}
+
 // ─── AgentState / CheckpointInfo ──────────────────────────────────────────────
 
 /// The full state of an agent session, for checkpointing.

@@ -22,6 +22,7 @@ pub mod builder;
 pub mod directive_pump;
 pub mod reloader;
 pub mod session;
+pub mod session_event_log;
 
 pub use builder::*;
 pub use directive_pump::{spawn_directive_pump, DirectiveRuntime};
