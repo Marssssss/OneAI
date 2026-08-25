@@ -70,6 +70,18 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called when the model delegates to a sub-agent.
     fn on_delegate(&self, id: &str, task: &str, agent_type: &SubAgentKind);
 
+    /// Richer delegation callback carrying the full [`DelegateTask`] —
+    /// including `depends_on` (DAG delegation edges, issue #40 trajectory
+    /// timeline). The default implementation forwards to [`on_delegate`]
+    /// (dropping `depends_on`) so every existing observer keeps compiling and
+    /// firing unchanged; observers that want the DAG edges (the bus observer)
+    /// override this and ignore `on_delegate`.
+    ///
+    /// [`on_delegate`]: AgentLoopObserver::on_delegate
+    fn on_delegate_full(&self, task: &DelegateTask) {
+        self.on_delegate(&task.id, &task.task, &task.agent_type);
+    }
+
     /// Called when a delegated sub-agent finishes and its summary is fed back
     /// into the parent conversation. Pairs with `on_delegate` so the UI can
     /// show the full sub-agent lifecycle (start → completion) instead of only
@@ -134,6 +146,20 @@ pub trait AgentLoopObserver: Send + Sync {
     /// conversation (system prompt, tool defs, context sources, messages),
     /// not just the bare session conversation.
     fn on_context_accounting(&self, _accounting: &oneai_core::ContextAccounting) {}
+
+    /// Called after the context for an iteration is fully assembled (durable
+    /// log + context sources + pinned blocks + tool definitions), with a
+    /// sectioned snapshot of what the model is about to see (issue #40
+    /// trajectory panel). Sections are hash-deduped within the turn — see
+    /// [`oneai_core::ContextSection`]. Default no-op.
+    fn on_context_assembled(&self, _snapshot: &oneai_core::ContextSnapshot) {}
+
+    /// Called when the durable working state changes (task created, step
+    /// status synced, decision settled). Carries a materialized
+    /// [`oneai_core::TaskEventPayload::Snapshot`] of the re-derived
+    /// projection so observers (the bus → trajectory timeline, goal bar) see
+    /// goal/steps/decisions/blockers live. Default no-op.
+    fn on_working_state(&self, _event: &oneai_core::TaskEventPayload) {}
 
     /// Called when the loop is interrupted (paused at an iteration boundary).
     /// The UI can display the interrupt reason and await human feedback.
@@ -687,6 +713,12 @@ pub struct LoopState {
     /// context assembly. `Some(names)` when a tool batch surfaced new tools,
     /// cleared after injection so the nudge doesn't repeat.
     pub pending_new_tools_note: Option<Vec<String>>,
+    /// Content hash per context-section cache key emitted this run (issue
+    /// #40). A section whose hash is unchanged from the previous iteration is
+    /// sent with `content: None` — the consumer keeps its cached content. The
+    /// map is per-run, so the first iteration of every turn re-sends every
+    /// section's full content (a fresh consumer always gets a baseline).
+    pub ctx_hashes: std::collections::HashMap<String, u64>,
 }
 
 impl LoopState {
@@ -722,6 +754,7 @@ impl LoopState {
             cadence_baseline: 0,
             prev_active_tool_names: None,
             pending_new_tools_note: None,
+            ctx_hashes: std::collections::HashMap::new(),
         }
     }
 
@@ -775,6 +808,7 @@ impl LoopState {
             cadence_baseline: 0,
             prev_active_tool_names: None,
             pending_new_tools_note: None,
+            ctx_hashes: std::collections::HashMap::new(),
         }
     }
 
@@ -851,6 +885,17 @@ fn paradigm_name(kind: &ParadigmKind) -> &'static str {
         ParadigmKind::ReAct => "ReAct",
         ParadigmKind::Reflect => "Reflect",
         ParadigmKind::Explore => "Explore",
+    }
+}
+
+/// Surface a materialized working-state snapshot to the observer (issue #40 —
+/// goal/steps/decisions/blockers belong on the trajectory timeline, and the
+/// webUI GoalBar reads this event family). Called at every point the loop
+/// re-derives `state.working_state` from the durable event log; no-op when no
+/// working state is bound (no `WorkingStateStore` configured).
+fn emit_working_state_snapshot(observer: &dyn AgentLoopObserver, state: &LoopState) {
+    if let Some(ws) = &state.working_state {
+        observer.on_working_state(&oneai_core::TaskEventPayload::Snapshot { state: ws.clone() });
     }
 }
 
@@ -2129,6 +2174,24 @@ impl AgentLoop {
             );
             observer.on_context_accounting(&accounting);
 
+            // 3d. Sectioned snapshot of the fully-assembled context (issue
+            // #40 trajectory panel) — what the model is about to see, split
+            // into base prompt / context sources / pinned blocks / tool defs
+            // / latest user question. Hash-deduped within the turn
+            // (`state.ctx_hashes` is per-run, so every turn's first iteration
+            // re-sends the full baseline).
+            {
+                let snapshot = crate::context_assembler::build_context_snapshot(
+                    state.iterations,
+                    model_name_for_accounting,
+                    &request.conversation,
+                    &request.tools,
+                    &accounting,
+                    &mut state.ctx_hashes,
+                );
+                observer.on_context_assembled(&snapshot);
+            }
+
             // 4. Run inference
             // ─── Trace: start LLM span for inference ──────────────────
             let infer_span_id = if let Some(ctx) = &self.config.trace_context {
@@ -2865,6 +2928,7 @@ impl AgentLoop {
                                     self.set_plan_mode(false);
                                     self.ensure_working_state_task(&mut state, &steps, &plan_text)
                                         .await;
+                                    emit_working_state_snapshot(observer, &state);
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: "Plan approved — proceeding with execution. \
@@ -2891,6 +2955,7 @@ impl AgentLoop {
                                             &mut state, &new_steps, &new_plan,
                                         )
                                         .await;
+                                        emit_working_state_snapshot(observer, &state);
                                         oneai_core::ToolOutput {
                                             success: true,
                                             content: format!(
@@ -2905,6 +2970,7 @@ impl AgentLoop {
                                             &mut state, &steps, &plan_text,
                                         )
                                         .await;
+                                        emit_working_state_snapshot(observer, &state);
                                         oneai_core::ToolOutput {
                                             success: true,
                                             content: "Plan approved — proceeding with execution."
@@ -3078,6 +3144,7 @@ impl AgentLoop {
                                         if let Ok(Some(ws)) = store.get_task(&task_id).await {
                                             state.working_state = Some(ws);
                                         }
+                                        emit_working_state_snapshot(observer, &state);
                                     }
                                     oneai_core::ToolOutput {
                                         success: true,
@@ -3116,6 +3183,7 @@ impl AgentLoop {
                         // durable working-state event log + re-derive the
                         // in-memory projection. No-op when no store is bound.
                         self.sync_step_status_to_working_state(&mut state).await;
+                        emit_working_state_snapshot(observer, &state);
                         // Now add the single tool_result message and notify the panel.
                         state.conversation.add_message(Message::tool_result(
                             call.id.clone(),
@@ -3526,11 +3594,13 @@ impl AgentLoop {
                     );
                 }
                 AgentDecision::Delegate { tasks } => {
-                    // One `on_delegate` per task so the UI shows each sub-agent's
-                    // lifecycle (start → completion) even when several are
-                    // delegated in the same turn.
+                    // One delegation event per task so the UI shows each
+                    // sub-agent's lifecycle (start → completion) even when
+                    // several are delegated in the same turn. `on_delegate_full`
+                    // carries `depends_on` (DAG edges for the trajectory
+                    // timeline); its default forwards to `on_delegate`.
                     for task in &tasks {
-                        observer.on_delegate(&task.id, &task.task, &task.agent_type);
+                        observer.on_delegate_full(task);
                     }
 
                     // ─── Trace: log delegation batch event ──────────────
@@ -3644,7 +3714,7 @@ impl AgentLoop {
                     // submits each task to the AsyncTaskRunner and returns
                     // immediately — the loop does NOT wait for the sub-agents.
                     for task in &tasks {
-                        observer.on_delegate(&task.id, &task.task, &task.agent_type);
+                        observer.on_delegate_full(task);
                     }
                     if let Some(ctx) = &self.config.trace_context {
                         ctx.log_event(

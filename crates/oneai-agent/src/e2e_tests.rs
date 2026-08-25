@@ -120,6 +120,12 @@ enum TestEvent {
     Thinking(String),
     Reflection(String),
     ToolsAdded(Vec<String>),
+    /// Issue #40: `on_delegate_full` — task + `depends_on` DAG edges.
+    DelegateFull(String, Vec<String>),
+    /// Issue #40: `on_context_assembled` — iteration + sectioned snapshot.
+    ContextAssembled(usize, Vec<oneai_core::ContextSection>),
+    /// Issue #40: `on_working_state` — materialized snapshot events.
+    WorkingState(oneai_core::TaskEventPayload),
 }
 
 impl AgentLoopObserver for TestObserver {
@@ -216,6 +222,31 @@ impl AgentLoopObserver for TestObserver {
             .lock()
             .unwrap()
             .push(TestEvent::ToolsAdded(names.to_vec()));
+    }
+    fn on_delegate_full(&self, task: &crate::agent_loop::DelegateTask) {
+        // Mirror the trait default (forward to `on_delegate`) so legacy
+        // assertions on `TestEvent::Delegate` keep passing, and record the
+        // richer DAG payload for the issue #40 assertions.
+        self.on_delegate(&task.id, &task.task, &task.agent_type);
+        self.events.lock().unwrap().push(TestEvent::DelegateFull(
+            task.task.clone(),
+            task.depends_on.clone(),
+        ));
+    }
+    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::ContextAssembled(
+                snapshot.iteration,
+                snapshot.sections.clone(),
+            ));
+    }
+    fn on_working_state(&self, event: &oneai_core::TaskEventPayload) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::WorkingState(event.clone()));
     }
 }
 
@@ -1242,6 +1273,187 @@ async fn e2e_dependency_delegation() {
         "B's task must be prefixed with A's summary; got: {}",
         runs[1].1
     );
+}
+
+// ─── Issue #40: trajectory event coverage ────────────────────────────────────
+
+/// Delegation events must carry the DAG edges (`depends_on`) so a trajectory
+/// timeline can draw serial vs. parallel forks (the richer `on_delegate_full`
+/// path replaces the old 3-field callback at the spawn sites).
+#[tokio::test]
+async fn e2e_trajectory_delegate_full_carries_depends_on() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("a", "explore the auth module", "Explore"),
+            DelegateSpec::new("b", "implement login using findings", "Code").depends_on(&["a"]),
+        ]),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .run_with_observer("explore then implement", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let events = observer.events.lock().unwrap();
+    let full: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            TestEvent::DelegateFull(task, deps) => Some((task.clone(), deps.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(full.len(), 2, "one DelegateFull event per task");
+    let (task_a, deps_a) = full.iter().find(|(t, _)| t.contains("explore")).unwrap();
+    let (task_b, deps_b) = full.iter().find(|(t, _)| t.contains("implement")).unwrap();
+    let _ = task_a;
+    let _ = task_b;
+    assert!(deps_a.is_empty(), "independent task has no deps");
+    assert_eq!(deps_b, &vec!["a".to_string()], "serial edge surfaced");
+}
+
+/// Every iteration must emit a sectioned context snapshot; within a turn
+/// unchanged sections are hash-deduped (`content: None` from iteration 2 on).
+#[tokio::test]
+async fn e2e_trajectory_context_assembled_emitted_and_deduped() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("grep", serde_json::json!({"pattern": "x"})),
+        ScriptedResponse::direct_answer("found it"),
+    ]);
+    let mut tools_map: HashMap<String, Arc<dyn oneai_core::traits::Tool>> = HashMap::new();
+    let grep = Arc::new(MockTool::grep_mock()) as Arc<dyn oneai_core::traits::Tool>;
+    tools_map.insert("grep".to_string(), grep);
+    let loop_ = AgentLoop::new(
+        Arc::new(provider),
+        Arc::new(tokio::sync::RwLock::new(tools_map)),
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        AgentLoopConfig {
+            use_streaming: false,
+            inject_skills: false,
+            ..AgentLoopConfig::default()
+        },
+    );
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = loop_
+        .run_with_observer("search for x", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let events = observer.events.lock().unwrap();
+    let snaps: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            TestEvent::ContextAssembled(iter, sections) => Some((*iter, sections.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snaps.len(), 2, "one snapshot per iteration");
+    assert_eq!(snaps[0].0, 1);
+    assert_eq!(snaps[1].0, 2);
+
+    // Iteration 1: baseline — every section carries content, and the
+    // issue-mandated parts are present (base prompt + latest user + history).
+    use oneai_core::ContextKey;
+    let keys1: Vec<ContextKey> = snaps[0].1.iter().map(|s| s.key.clone()).collect();
+    assert!(keys1.contains(&ContextKey::BasePrompt));
+    assert!(keys1.contains(&ContextKey::LatestUser));
+    assert!(keys1.contains(&ContextKey::History));
+    assert!(snaps[0].1.iter().all(|s| s.content.is_some()));
+
+    // Iteration 2: nothing changed → stable sections deduped. The Tools
+    // section (no registered tools in this loop's schema beyond the routed
+    // grep) and history counts may differ; assert at least BasePrompt deduped.
+    let base2 = snaps[1]
+        .1
+        .iter()
+        .find(|s| s.key == ContextKey::BasePrompt)
+        .unwrap();
+    assert!(
+        base2.content.is_none(),
+        "unchanged base prompt must be deduped on iteration 2"
+    );
+}
+
+/// Working-state mutations (plan submission + step status sync) must surface
+/// as `Snapshot` events to the observer — the trajectory timeline's
+/// goal/steps/decisions coverage (and what lights the webUI GoalBar).
+#[tokio::test]
+async fn e2e_trajectory_working_state_snapshots_emitted() {
+    use oneai_core::traits::WorkingStateStore;
+    use oneai_persistence::FileWorkingStateStore;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let store: Arc<dyn WorkingStateStore> =
+        Arc::new(FileWorkingStateStore::new(tmp.path().to_path_buf()));
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "ship feature X",
+                "steps": [
+                    {"id": "1", "description": "write code"},
+                    {"id": "2", "description": "write tests"},
+                ]
+            }),
+        ),
+        ScriptedResponse::tool_call(
+            "task_update",
+            serde_json::json!({"task_id": "1", "status": "completed"}),
+        ),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let gate = Arc::new(MockInteractionGate::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_plan_mode_loop(provider, gate.clone())
+        .with_working_state_store(store.clone())
+        .run_with_observer("ship feature X", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let events = observer.events.lock().unwrap();
+    let snapshots: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            TestEvent::WorkingState(oneai_core::TaskEventPayload::Snapshot { state }) => {
+                Some(state.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        snapshots.len() >= 2,
+        "plan submission + step-status sync must each emit a snapshot (got {})",
+        snapshots.len()
+    );
+    // The last snapshot reflects the final durable state.
+    let last = snapshots.last().unwrap();
+    assert_eq!(last.goal, "ship feature X");
+    let s1 = last.steps.iter().find(|s| s.id == "1").unwrap();
+    assert_eq!(s1.status, oneai_core::StepStatus::Completed);
 }
 
 /// A dependency cycle among delegations must surface as an error rather than

@@ -188,6 +188,20 @@ impl AgentLoopObserver for BusObserver {
             task: task.to_string(),
             agent_kind: BusSubAgentKind::from(agent_type),
             speaker: None,
+            depends_on: Vec::new(),
+        });
+    }
+
+    fn on_delegate_full(&self, task: &crate::agent_loop::DelegateTask) {
+        // Richer path used by the loop's spawn sites — carries `depends_on`
+        // so a trajectory timeline can draw the delegation DAG.
+        self.emit(EngineYield::Delegate {
+            turn_id: self.turn_id.clone(),
+            task_id: task.id.clone(),
+            task: task.task.clone(),
+            agent_kind: BusSubAgentKind::from(&task.agent_type),
+            speaker: None,
+            depends_on: task.depends_on.clone(),
         });
     }
 
@@ -283,6 +297,50 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::ContextAccounting {
             turn_id: self.turn_id.clone(),
             accounting: accounting.clone(),
+        });
+    }
+
+    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot) {
+        self.emit(EngineYield::ContextAssembled {
+            turn_id: self.turn_id.clone(),
+            iteration: snapshot.iteration,
+            sections: snapshot.sections.clone(),
+        });
+    }
+
+    fn on_working_state(&self, event: &oneai_core::TaskEventPayload) {
+        self.emit(EngineYield::WorkingState {
+            event: event.clone(),
+        });
+    }
+
+    fn on_interrupt(&self, point: &oneai_core::InterruptPoint) {
+        use oneai_core::InterruptReason;
+        let (reason, label) = match &point.reason {
+            InterruptReason::HumanApprovalNeeded { tool_name, .. } => (
+                format!("approval needed for tool `{tool_name}`"),
+                "human_approval",
+            ),
+            InterruptReason::HumanFeedbackRequested { question } => {
+                (format!("feedback requested: {question}"), "human_feedback")
+            }
+            InterruptReason::ParadigmBoundary { from, to } => (
+                format!("paradigm boundary {from} → {to}"),
+                "paradigm_boundary",
+            ),
+            InterruptReason::Custom { reason } => (reason.clone(), "custom"),
+        };
+        self.emit(EngineYield::Interrupted {
+            turn_id: self.turn_id.clone(),
+            reason,
+            point: label.to_string(),
+        });
+    }
+
+    fn on_reflection(&self, summary: &str) {
+        self.emit(EngineYield::Reflection {
+            turn_id: self.turn_id.clone(),
+            summary: summary.to_string(),
         });
     }
 
@@ -387,6 +445,124 @@ mod tests {
                 assert_eq!(summary.active_paradigm, BusParadigmKind::ReAct);
             }
             other => panic!("expected TurnComplete, got {other:?}"),
+        }
+    }
+
+    // ─── Issue #40 trajectory events ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delegate_full_carries_depends_on() {
+        let (bus, engine_bus) = observed_bus();
+        let mut sub = bus.subscribe_yields();
+        let obs = BusObserver::new(engine_bus, "t_1");
+        let task = crate::agent_loop::DelegateTask {
+            id: "d2".to_string(),
+            task: "step two".to_string(),
+            agent_type: crate::sub_agent::SubAgentKind::Code,
+            budget: oneai_core::budget::TokenBudget::new(1000),
+            depends_on: vec!["d1".to_string()],
+            call_id: "call_d2".to_string(),
+            custom_role: None,
+            system_prompt_override: None,
+            tools_override: None,
+            inherit_context: false,
+            inherit_last_n: 0,
+            seed_messages: None,
+        };
+        obs.on_delegate_full(&task);
+        match sub.recv().await.unwrap() {
+            EngineYield::Delegate {
+                task_id,
+                depends_on,
+                ..
+            } => {
+                assert_eq!(task_id, "d2");
+                assert_eq!(depends_on, vec!["d1".to_string()]);
+            }
+            other => panic!("expected Delegate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_assembled_emits_sections() {
+        let (bus, engine_bus) = observed_bus();
+        let mut sub = bus.subscribe_yields();
+        let obs = BusObserver::new(engine_bus, "t_1");
+        let snapshot = oneai_core::ContextSnapshot {
+            iteration: 1,
+            sections: vec![oneai_core::ContextSection {
+                key: oneai_core::ContextKey::BasePrompt,
+                label: "system prompt".to_string(),
+                tokens: 10,
+                content_hash: 1,
+                content: Some("you are OneAI".to_string()),
+            }],
+        };
+        obs.on_context_assembled(&snapshot);
+        match sub.recv().await.unwrap() {
+            EngineYield::ContextAssembled {
+                turn_id,
+                iteration,
+                sections,
+            } => {
+                assert_eq!(turn_id, "t_1");
+                assert_eq!(iteration, 1);
+                assert_eq!(sections.len(), 1);
+                assert_eq!(sections[0].key, oneai_core::ContextKey::BasePrompt);
+            }
+            other => panic!("expected ContextAssembled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn working_state_snapshot_emits() {
+        let (bus, engine_bus) = observed_bus();
+        let mut sub = bus.subscribe_yields();
+        let obs = BusObserver::new(engine_bus, "t_1");
+        let ws = oneai_core::WorkingState {
+            task_id: "task-1".to_string(),
+            goal: "ship it".to_string(),
+            ..Default::default()
+        };
+        obs.on_working_state(&oneai_core::TaskEventPayload::Snapshot { state: ws });
+        match sub.recv().await.unwrap() {
+            EngineYield::WorkingState { event } => match event {
+                oneai_core::TaskEventPayload::Snapshot { state } => {
+                    assert_eq!(state.goal, "ship it");
+                }
+                other => panic!("expected Snapshot payload, got {other:?}"),
+            },
+            other => panic!("expected WorkingState, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_and_reflection_emit() {
+        let (bus, engine_bus) = observed_bus();
+        let mut sub = bus.subscribe_yields();
+        let obs = BusObserver::new(engine_bus, "t_1");
+        obs.on_interrupt(&oneai_core::InterruptPoint {
+            id: "i1".to_string(),
+            iteration: 2,
+            reason: oneai_core::InterruptReason::Custom {
+                reason: "rate limit".to_string(),
+            },
+            checkpoint_id: None,
+        });
+        match sub.recv().await.unwrap() {
+            EngineYield::Interrupted { reason, point, .. } => {
+                assert_eq!(reason, "rate limit");
+                assert_eq!(point, "custom");
+            }
+            other => panic!("expected Interrupted, got {other:?}"),
+        }
+
+        obs.on_reflection("reconsider the approach");
+        match sub.recv().await.unwrap() {
+            EngineYield::Reflection { summary, .. } => {
+                assert_eq!(summary, "reconsider the approach");
+            }
+            other => panic!("expected Reflection, got {other:?}"),
         }
     }
 

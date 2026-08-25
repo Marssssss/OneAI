@@ -245,6 +245,144 @@ impl Default for ContextAssembler {
     }
 }
 
+/// Build the sectioned context snapshot for one iteration (issue #40
+/// trajectory panel).
+///
+/// Walks the fully-assembled request conversation and splits it into labeled
+/// [`oneai_core::ContextSection`]s: the base system prompt, every
+/// `[Context: key]` source block (env sensing, memory recall), the pinned
+/// blocks (task anchor / plan / decisions / blockers / skill menu / …), the
+/// tool definitions, the latest user message, and a history summary. Each
+/// section's content is hash-deduped against `hashes` (keyed by
+/// [`oneai_core::ContextKey::cache_key`]) — unchanged sections are emitted
+/// with `content: None` so the wire stays small across iterations; the
+/// caller clears `hashes` per turn so the first iteration re-sends the full
+/// baseline.
+pub fn build_context_snapshot(
+    iteration: usize,
+    model: &str,
+    conversation: &Conversation,
+    tools: &[oneai_core::ToolDefinition],
+    accounting: &oneai_core::ContextAccounting,
+    hashes: &mut HashMap<String, u64>,
+) -> oneai_core::ContextSnapshot {
+    use oneai_core::token_counter::TokenCounter;
+    use oneai_core::{ContextKey, ContextSection, ContextSnapshot, Role};
+    use std::hash::{Hash, Hasher};
+
+    let counter = oneai_core::token_counter::HeuristicTokenCounter::new();
+
+    // ── Classify messages ──────────────────────────────────────────────
+    let mut base_parts: Vec<String> = Vec::new();
+    let mut sections: Vec<(ContextKey, String)> = Vec::new();
+    let mut latest_user: Option<String> = None;
+    let (mut n_user, mut n_assistant, mut n_tool) = (0usize, 0usize, 0usize);
+
+    for msg in &conversation.messages {
+        match msg.role {
+            Role::System => {
+                let text = msg.text_content();
+                let key = if let Some(rest) = text.strip_prefix("[Context: ") {
+                    let source_key = rest.split(']').next().unwrap_or("").to_string();
+                    ContextKey::Context(source_key)
+                } else if text.starts_with("[Task Anchor]") {
+                    ContextKey::TaskAnchor
+                } else if text.starts_with("[Plan & Progress]") {
+                    ContextKey::PlanProgress
+                } else if text.starts_with("[Decisions Made]") {
+                    ContextKey::Decisions
+                } else if text.starts_with("[Blockers]") {
+                    ContextKey::Blockers
+                } else if text.starts_with("# Available skills") {
+                    ContextKey::SkillMenu
+                } else if text.starts_with("# Active skill") {
+                    ContextKey::ActiveSkill
+                } else if text.starts_with("# Newly available tools") {
+                    ContextKey::NewTools
+                } else if text.starts_with("[Background tasks]") {
+                    ContextKey::BackgroundTasks
+                } else {
+                    base_parts.push(text);
+                    continue;
+                };
+                sections.push((key, text));
+            }
+            Role::User => {
+                n_user += 1;
+                latest_user = Some(msg.text_content());
+            }
+            Role::Assistant => n_assistant += 1,
+            Role::Tool => n_tool += 1,
+            _ => {}
+        }
+    }
+
+    // ── Assemble the section list (fixed, documented order) ────────────
+    let mut ordered: Vec<(ContextKey, String, u64)> = Vec::new();
+    if !base_parts.is_empty() {
+        let content = base_parts.join("\n\n");
+        let tokens = counter.count_tokens(&content, model) as u64;
+        ordered.push((ContextKey::BasePrompt, content, tokens));
+    }
+    for (key, text) in sections {
+        let tokens = counter.count_tokens(&text, model) as u64;
+        ordered.push((key, text, tokens));
+    }
+    if !tools.is_empty() {
+        // Compact JSON: name + description + schema (what the provider sends).
+        let content = serde_json::to_string(tools).unwrap_or_default();
+        ordered.push((
+            ContextKey::Tools,
+            content,
+            accounting.tool_call_tokens as u64,
+        ));
+    }
+    if let Some(text) = latest_user.clone() {
+        let tokens = counter.count_tokens(&text, model) as u64;
+        ordered.push((ContextKey::LatestUser, text, tokens));
+    }
+    // History summary — everything that isn't a section above. The message
+    // counts exclude the latest user message (it has its own section) and
+    // system messages (classified). Token share is the residual of the
+    // accounting total minus every named section.
+    let history_messages = n_user.saturating_sub(1) + n_assistant + n_tool;
+    let named_tokens: u64 = ordered.iter().map(|(_, _, t)| *t).sum();
+    let history_tokens = (accounting.total_tokens as u64).saturating_sub(named_tokens);
+    ordered.push((
+        ContextKey::History,
+        format!(
+            "{history_messages} messages ({n_user} user total, {n_assistant} assistant, {n_tool} tool results)"
+        ),
+        history_tokens,
+    ));
+
+    // ── Hash-dedup content within the turn ─────────────────────────────
+    let mut out_sections: Vec<ContextSection> = Vec::with_capacity(ordered.len());
+    for (key, content, tokens) in ordered {
+        let cache_key = key.cache_key();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        let content_hash = hasher.finish();
+        let unchanged = hashes.get(&cache_key) == Some(&content_hash);
+        if !unchanged {
+            hashes.insert(cache_key, content_hash);
+        }
+        let label = key.label().to_string();
+        out_sections.push(ContextSection {
+            key,
+            label,
+            tokens,
+            content_hash,
+            content: if unchanged { None } else { Some(content) },
+        });
+    }
+
+    ContextSnapshot {
+        iteration,
+        sections: out_sections,
+    }
+}
+
 /// Build the pinned `[Task Anchor]` block injected every iteration.
 ///
 /// The original user task is the most important context to preserve — if it
@@ -774,6 +912,154 @@ mod tests {
         for m in &conv.messages {
             assert_eq!(tool_content(m).len(), 5000, "≤4 tool results → all full");
         }
+    }
+
+    // ─── Issue #40 context snapshot (build_context_snapshot) ──────────────
+
+    use oneai_core::{ContextKey, Message};
+
+    fn accounting(total: u32) -> oneai_core::ContextAccounting {
+        let mut a = oneai_core::ContextAccounting::default();
+        a.total_tokens = total;
+        a.tool_call_tokens = 50;
+        a
+    }
+
+    #[test]
+    fn snapshot_classifies_all_section_kinds() {
+        let mut conv = Conversation::with_id("c".into());
+        conv.add_message(Message::system("You are OneAI."));
+        conv.add_message(Message::user("first question"));
+        conv.add_message(Message::assistant("an answer"));
+        conv.add_message(Message::system("[Context: git_status] M src/main.rs"));
+        conv.add_message(Message::system("[Context: core_memory] user likes rust"));
+        conv.add_message(Message::system(
+            "[Task Anchor] (do not compress)\n原始任务: first question",
+        ));
+        conv.add_message(Message::system(
+            "[Plan & Progress] (do not compress)\n目标: x",
+        ));
+        conv.add_message(Message::system(
+            "[Decisions Made] (do not compress)\n• a → b",
+        ));
+        conv.add_message(Message::system("[Blockers] (do not compress)\n⚠ b1: stuck"));
+        conv.add_message(Message::system(
+            "# Available skills\n- skill-creator: creates skills",
+        ));
+        conv.add_message(Message::system(
+            "[Background tasks] (live)\n- `t1` (Code, Running): x",
+        ));
+        conv.add_message(Message::user("latest question"));
+
+        let tools = vec![oneai_core::ToolDefinition {
+            name: "shell".into(),
+            description: "run a command".into(),
+            parameters_schema: serde_json::json!({"type":"object"}),
+        }];
+        let mut hashes = std::collections::HashMap::new();
+        let snap = build_context_snapshot(
+            1,
+            "test-model",
+            &conv,
+            &tools,
+            &accounting(1000),
+            &mut hashes,
+        );
+
+        let keys: Vec<&ContextKey> = snap.sections.iter().map(|s| &s.key).collect();
+        assert!(keys.contains(&&ContextKey::BasePrompt));
+        assert!(keys.contains(&&ContextKey::Context("git_status".into())));
+        assert!(keys.contains(&&ContextKey::Context("core_memory".into())));
+        assert!(keys.contains(&&ContextKey::TaskAnchor));
+        assert!(keys.contains(&&ContextKey::PlanProgress));
+        assert!(keys.contains(&&ContextKey::Decisions));
+        assert!(keys.contains(&&ContextKey::Blockers));
+        assert!(keys.contains(&&ContextKey::SkillMenu));
+        assert!(keys.contains(&&ContextKey::BackgroundTasks));
+        assert!(keys.contains(&&ContextKey::Tools));
+        assert!(keys.contains(&&ContextKey::LatestUser));
+        assert!(keys.contains(&&ContextKey::History));
+
+        // First iteration: every section carries full content.
+        assert!(snap.sections.iter().all(|s| s.content.is_some()));
+        // Latest user message is the LAST user message, not the first.
+        let latest = snap
+            .sections
+            .iter()
+            .find(|s| s.key == ContextKey::LatestUser)
+            .unwrap();
+        assert_eq!(latest.content.as_deref(), Some("latest question"));
+        // Base prompt is the un-prefixed system message.
+        let base = snap
+            .sections
+            .iter()
+            .find(|s| s.key == ContextKey::BasePrompt)
+            .unwrap();
+        assert_eq!(base.content.as_deref(), Some("You are OneAI."));
+    }
+
+    #[test]
+    fn snapshot_dedups_unchanged_sections_within_turn() {
+        let mut conv = Conversation::with_id("c".into());
+        conv.add_message(Message::system("You are OneAI."));
+        conv.add_message(Message::user("q"));
+
+        let mut hashes = std::collections::HashMap::new();
+        let snap1 = build_context_snapshot(1, "m", &conv, &[], &accounting(100), &mut hashes);
+        // Second iteration, identical assembly → every section deduped.
+        let snap2 = build_context_snapshot(2, "m", &conv, &[], &accounting(100), &mut hashes);
+        assert!(snap1.sections.iter().all(|s| s.content.is_some()));
+        assert!(
+            snap2.sections.iter().all(|s| s.content.is_none()),
+            "unchanged sections must omit content on later iterations"
+        );
+
+        // Mutate the user message → only LatestUser (+ History count) resend.
+        conv.add_message(Message::assistant("a"));
+        conv.add_message(Message::user("q2"));
+        let snap3 = build_context_snapshot(3, "m", &conv, &[], &accounting(120), &mut hashes);
+        let with_content: Vec<&ContextKey> = snap3
+            .sections
+            .iter()
+            .filter(|s| s.content.is_some())
+            .map(|s| &s.key)
+            .collect();
+        assert!(with_content.contains(&&ContextKey::LatestUser));
+        assert!(with_content.contains(&&ContextKey::History));
+        assert!(!with_content.contains(&&ContextKey::BasePrompt));
+    }
+
+    #[test]
+    fn snapshot_tokens_use_accounting_for_tools() {
+        let mut conv = Conversation::with_id("c".into());
+        conv.add_message(Message::system("sys"));
+        conv.add_message(Message::user("q"));
+        let tools = vec![oneai_core::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            parameters_schema: serde_json::json!({}),
+        }];
+        let mut hashes = std::collections::HashMap::new();
+        let snap = build_context_snapshot(1, "m", &conv, &tools, &accounting(900), &mut hashes);
+        let tools_sec = snap
+            .sections
+            .iter()
+            .find(|s| s.key == ContextKey::Tools)
+            .unwrap();
+        assert_eq!(tools_sec.tokens, 50); // accounting.tool_call_tokens
+        let history = snap
+            .sections
+            .iter()
+            .find(|s| s.key == ContextKey::History)
+            .unwrap();
+        // Residual: total − named sections (saturating, never negative).
+        let named: u64 = snap
+            .sections
+            .iter()
+            .filter(|s| s.key != ContextKey::History)
+            .map(|s| s.tokens)
+            .sum();
+        assert_eq!(history.tokens, (900u64).saturating_sub(named));
     }
 
     #[test]

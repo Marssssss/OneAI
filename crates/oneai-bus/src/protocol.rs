@@ -11,8 +11,8 @@
 //! projections are defined here; `oneai-agent` provides the `From` conversions.
 
 use oneai_core::{
-    ContentBlock, InteractionRequest, InteractionResponse, InterruptReason, TaskEventPayload,
-    ToolOutput,
+    ContentBlock, ContextSection, InteractionRequest, InteractionResponse, InterruptReason,
+    TaskEventPayload, ToolOutput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -792,13 +792,18 @@ pub enum EngineYield {
         output: ToolOutput,
         speaker: Option<String>,
     },
-    /// Model delegated to a sub-agent. ← `on_delegate`.
+    /// Model delegated to a sub-agent. ← `on_delegate_full`.
+    /// `depends_on` lists the sibling task ids this task waits for (DAG
+    /// delegation) — empty for independent/parallel tasks. `#[serde(default)]`
+    /// keeps older producers (without the field) deserializable.
     Delegate {
         turn_id: String,
         task_id: String,
         task: String,
         agent_kind: BusSubAgentKind,
         speaker: Option<String>,
+        #[serde(default)]
+        depends_on: Vec<String>,
     },
     /// A delegated sub-agent finished. ← `on_delegate_complete`. Also emitted
     /// by the background-completion sink so a background sub-agent's card is
@@ -845,6 +850,26 @@ pub enum EngineYield {
         turn_id: String,
         accounting: oneai_core::ContextAccounting,
     },
+    /// Sectioned snapshot of the fully-assembled inference context for one
+    /// iteration (issue #40 trajectory panel). ← `on_context_assembled`.
+    /// Sections whose content is unchanged from the previous iteration of the
+    /// same turn carry `content: None` (hash-dedup — see `ContextSection`).
+    ContextAssembled {
+        turn_id: String,
+        iteration: usize,
+        sections: Vec<ContextSection>,
+    },
+    /// The loop paused at an interrupt point (rate-limit, cancel, …).
+    /// ← `on_interrupt`. `point` is a short machine label, `reason` the
+    /// human-readable cause.
+    Interrupted {
+        turn_id: String,
+        reason: String,
+        point: String,
+    },
+    /// A cadence-fired `Reflect` sub-agent finished (its summary is NOT fed
+    /// back into the conversation). ← `on_reflection`.
+    Reflection { turn_id: String, summary: String },
     /// Plan-state snapshot changed (task created/updated/cleared).
     /// ← `on_plan_update`. `oneai_agent::PlanState` lives in a crate the bus
     /// doesn't depend on, so it's carried as its `serde_json::Value` form
@@ -1004,6 +1029,7 @@ mod tests {
                 task: "".into(),
                 agent_kind: BusSubAgentKind::Plan,
                 speaker: None,
+                depends_on: vec![],
             },
             EngineYield::DelegateComplete {
                 turn_id: "t".into(),
@@ -1385,5 +1411,114 @@ mod tests {
         assert_eq!(back.members[0].id, "coach");
         assert_eq!(back.topic_fields.as_ref().unwrap()[0].label, "应聘岗位");
         assert_eq!(back.debrief.unwrap().debrief_member_id, "coach");
+    }
+
+    // ─── Issue #40 trajectory variants ──────────────────────────────────────
+
+    #[test]
+    fn delegate_depends_on_defaults_empty_for_old_producers() {
+        // A producer predating the field serializes without `depends_on`;
+        // deserialization must default it to empty (wire back-compat).
+        let line = r#"{"kind":"delegate","turn_id":"t1","task_id":"d1","task":"do it",
+                       "agent_kind":"code","speaker":null}"#;
+        match serde_json::from_str::<EngineYield>(line).unwrap() {
+            EngineYield::Delegate { depends_on, .. } => assert!(depends_on.is_empty()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegate_depends_on_round_trips() {
+        let y = EngineYield::Delegate {
+            turn_id: "t1".into(),
+            task_id: "d2".into(),
+            task: "step 2".into(),
+            agent_kind: BusSubAgentKind::Code,
+            speaker: None,
+            depends_on: vec!["d1".into()],
+        };
+        match rt_yield(&y) {
+            EngineYield::Delegate {
+                depends_on,
+                task_id,
+                ..
+            } => {
+                assert_eq!(task_id, "d2");
+                assert_eq!(depends_on, vec!["d1".to_string()]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn context_assembled_round_trips_with_deduped_sections() {
+        let y = EngineYield::ContextAssembled {
+            turn_id: "t1".into(),
+            iteration: 2,
+            sections: vec![
+                oneai_core::ContextSection {
+                    key: oneai_core::ContextKey::BasePrompt,
+                    label: "system prompt".into(),
+                    tokens: 100,
+                    content_hash: 7,
+                    content: Some("you are OneAI".into()),
+                },
+                oneai_core::ContextSection {
+                    key: oneai_core::ContextKey::Tools,
+                    label: "tool definitions".into(),
+                    tokens: 400,
+                    content_hash: 9,
+                    content: None, // unchanged since iteration 1
+                },
+            ],
+        };
+        let line = serde_json::to_string(&y).unwrap();
+        assert!(line.contains(r#""kind":"context_assembled""#));
+        match rt_yield(&y) {
+            EngineYield::ContextAssembled {
+                iteration,
+                sections,
+                ..
+            } => {
+                assert_eq!(iteration, 2);
+                assert_eq!(sections.len(), 2);
+                assert_eq!(sections[0].content.as_deref(), Some("you are OneAI"));
+                assert!(sections[1].content.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn interrupted_and_reflection_round_trip() {
+        let i = EngineYield::Interrupted {
+            turn_id: "t1".into(),
+            reason: "rate limited".into(),
+            point: "pre_infer".into(),
+        };
+        assert!(serde_json::to_string(&i)
+            .unwrap()
+            .contains(r#""kind":"interrupted""#));
+        match rt_yield(&i) {
+            EngineYield::Interrupted { reason, point, .. } => {
+                assert_eq!(reason, "rate limited");
+                assert_eq!(point, "pre_infer");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let r = EngineYield::Reflection {
+            turn_id: "t1".into(),
+            summary: "reconsider the approach".into(),
+        };
+        assert!(serde_json::to_string(&r)
+            .unwrap()
+            .contains(r#""kind":"reflection""#));
+        match rt_yield(&r) {
+            EngineYield::Reflection { summary, .. } => {
+                assert_eq!(summary, "reconsider the approach")
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
