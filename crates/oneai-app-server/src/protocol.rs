@@ -127,6 +127,9 @@ pub mod method {
     pub const PROVIDER_ADD: &str = "provider/add";
     pub const PROVIDER_DELETE: &str = "provider/delete";
     pub const PROVIDER_SET_ACTIVE: &str = "provider/set_active";
+    /// List the models an endpoint serves (kind/api_key/base_url query — the
+    /// add-provider form's model dropdown data source, issue #37).
+    pub const PROVIDER_MODELS: &str = "provider/models";
     pub const DOMAINPACK_LIST: &str = "domainpack/list";
     pub const THINKING_GET: &str = "thinking/get";
     pub const THINKING_SET: &str = "thinking/set";

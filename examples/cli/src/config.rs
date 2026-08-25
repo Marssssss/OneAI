@@ -224,12 +224,21 @@ impl OneaiConfig {
     }
 
     /// Save config to the default path, creating the directory if needed.
+    ///
+    /// Writes atomically (temp file + `rename`) so a crash or a concurrent
+    /// process can never observe a half-written `config.toml`. This matters
+    /// because several OneAI processes share this file (the `oneai web`
+    /// server, the macOS/Windows sidecars, and `provider/*` RPC writers); a
+    /// torn `fs::write` corrupts the TOML, and the next `load_or_default`
+    /// then silently discards every configured provider.
     pub fn save(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let path = Self::default_path();
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir)?;
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(path)
     }
 
@@ -358,20 +367,61 @@ impl OneaiConfig {
     }
 }
 
-/// Map a `ProviderEntryConfig` to a `ModelConfig`. `kind` resolves to a
-/// `CloudProviderKind` (openai/anthropic/gemini) — unknown/absent ⇒ OpenAI-
-/// compatible. Env vars fill in missing `api_key`/`base_url`/`model`.
+/// Resolve a `kind` string to `(provider_type, cloud_kind)` — the shared
+/// mapping behind both the launch pool build (`entry_to_model_config`) and
+/// the live `provider/add`·`provider/models` paths
+/// (`cmd_app_server::entry_to_model_config_strict`).
+///
+/// openai/anthropic/gemini set the cloud kind explicitly; `ollama` (or
+/// `local`) forces `ProviderType::Local` so the factory picks the Ollama
+/// family regardless of host (a remote Ollama box must NOT auto-detect as
+/// OpenAI-compatible — issue #37). Absent/unknown kind leaves the cloud kind
+/// unset so `ProviderFactory::resolve_provider` still auto-detects from the
+/// base-URL host (legacy behavior for hand-edited configs).
+pub fn resolve_provider_kind(
+    kind: Option<&str>,
+) -> (
+    oneai_core::ProviderType,
+    Option<oneai_core::CloudProviderKind>,
+) {
+    use oneai_core::{CloudProviderKind, ProviderType};
+    match kind.map(|k| k.trim().to_lowercase()).as_deref() {
+        Some("openai") => (ProviderType::Cloud, Some(CloudProviderKind::OpenAI)),
+        Some("anthropic") => (ProviderType::Cloud, Some(CloudProviderKind::Anthropic)),
+        Some("gemini") => (ProviderType::Cloud, Some(CloudProviderKind::Gemini)),
+        Some("ollama") | Some("local") => (ProviderType::Local, None),
+        _ => (ProviderType::Cloud, None),
+    }
+}
+
+/// The canonical endpoint per provider family — fills a missing `base_url`
+/// (issue #37: an entry with only kind + api_key must still work; the
+/// factory's `resolved_url()` returns "" when base_url/port are both unset,
+/// which is a dead entry). Matches the `ModelConfig::openai/anthropic/
+/// gemini/ollama` constructors.
+pub fn default_base_url_for(
+    provider_type: oneai_core::ProviderType,
+    cloud_kind: Option<oneai_core::CloudProviderKind>,
+) -> Option<&'static str> {
+    use oneai_core::{CloudProviderKind, ProviderType};
+    match cloud_kind {
+        Some(CloudProviderKind::OpenAI) => Some("https://api.openai.com/v1"),
+        Some(CloudProviderKind::Anthropic) => Some("https://api.anthropic.com/v1"),
+        Some(CloudProviderKind::Gemini) => Some("https://generativelanguage.googleapis.com/v1beta"),
+        None => match provider_type {
+            ProviderType::Local => Some("http://localhost:11434"),
+            _ => None, // unknown family — host auto-detect needs a URL anyway
+        },
+    }
+}
+
+/// Map a `ProviderEntryConfig` to a `ModelConfig`. `kind` resolves via
+/// [`resolve_provider_kind`]. Env vars fill in missing `api_key`/`base_url`/
+/// `model`; a still-missing `base_url` falls back to the family's canonical
+/// endpoint ([`default_base_url_for`]).
 fn entry_to_model_config(e: &ProviderEntryConfig) -> oneai_core::ModelConfig {
-    use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
-    let cloud_kind = e
-        .kind
-        .as_deref()
-        .and_then(|k| match k.to_lowercase().as_str() {
-            "openai" => Some(CloudProviderKind::OpenAI),
-            "anthropic" => Some(CloudProviderKind::Anthropic),
-            "gemini" => Some(CloudProviderKind::Gemini),
-            _ => None,
-        });
+    use oneai_core::ModelConfig;
+    let (provider_type, cloud_kind) = resolve_provider_kind(e.kind.as_deref());
     let api_key = e
         .api_key
         .clone()
@@ -379,13 +429,14 @@ fn entry_to_model_config(e: &ProviderEntryConfig) -> oneai_core::ModelConfig {
     let base_url = e
         .base_url
         .clone()
-        .or_else(|| std::env::var("ONEAI_BASE_URL").ok());
+        .or_else(|| std::env::var("ONEAI_BASE_URL").ok())
+        .or_else(|| default_base_url_for(provider_type, cloud_kind).map(|s| s.to_string()));
     let model = e
         .model
         .clone()
         .or_else(|| std::env::var("ONEAI_MODEL").ok());
     ModelConfig {
-        provider_type: ProviderType::Cloud,
+        provider_type,
         cloud_kind,
         api_key,
         base_url,
@@ -434,5 +485,147 @@ fallback = "openai"
         let cfg: OneaiConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.embedding.provider, oneai_core::EmbeddingProvider::Auto);
         assert!(cfg.embedding.api_key.is_none());
+    }
+
+    // ── issue #37: kind resolution + base_url defaults ─────────────────────
+
+    #[test]
+    fn resolve_kind_maps_known_families() {
+        use oneai_core::{CloudProviderKind, ProviderType};
+        assert_eq!(
+            resolve_provider_kind(Some("openai")),
+            (ProviderType::Cloud, Some(CloudProviderKind::OpenAI))
+        );
+        assert_eq!(
+            resolve_provider_kind(Some("Anthropic")),
+            (ProviderType::Cloud, Some(CloudProviderKind::Anthropic))
+        );
+        assert_eq!(
+            resolve_provider_kind(Some("gemini")),
+            (ProviderType::Cloud, Some(CloudProviderKind::Gemini))
+        );
+        // ollama forces Local regardless of host (remote Ollama must not
+        // auto-detect as OpenAI-compatible).
+        assert_eq!(
+            resolve_provider_kind(Some("ollama")),
+            (ProviderType::Local, None)
+        );
+        assert_eq!(
+            resolve_provider_kind(Some("local")),
+            (ProviderType::Local, None)
+        );
+        assert_eq!(
+            resolve_provider_kind(Some(" ollama ")),
+            (ProviderType::Local, None)
+        );
+        // Unknown/absent → Cloud + auto-detect from host.
+        assert_eq!(resolve_provider_kind(None), (ProviderType::Cloud, None));
+        assert_eq!(
+            resolve_provider_kind(Some("mystery")),
+            (ProviderType::Cloud, None)
+        );
+    }
+
+    #[test]
+    fn default_base_url_per_family() {
+        use oneai_core::{CloudProviderKind, ProviderType};
+        assert_eq!(
+            default_base_url_for(ProviderType::Cloud, Some(CloudProviderKind::OpenAI)),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            default_base_url_for(ProviderType::Cloud, Some(CloudProviderKind::Anthropic)),
+            Some("https://api.anthropic.com/v1")
+        );
+        assert_eq!(
+            default_base_url_for(ProviderType::Cloud, Some(CloudProviderKind::Gemini)),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
+        assert_eq!(
+            default_base_url_for(ProviderType::Local, None),
+            Some("http://localhost:11434")
+        );
+        assert_eq!(default_base_url_for(ProviderType::Cloud, None), None);
+    }
+
+    #[test]
+    fn entry_config_kind_and_default_base_url_flow_into_model_config() {
+        use oneai_core::{CloudProviderKind, ProviderType};
+        // ollama entry without base_url → Local + Ollama's canonical endpoint
+        // (env vars must not leak into this test).
+        std::env::remove_var("ONEAI_BASE_URL");
+        std::env::remove_var("ONEAI_API_KEY");
+        std::env::remove_var("ONEAI_MODEL");
+        let mc = entry_to_model_config(&ProviderEntryConfig {
+            name: "local-box".into(),
+            kind: Some("ollama".into()),
+            api_key: None,
+            base_url: None,
+            model: Some("qwen2.5:7b".into()),
+        });
+        assert_eq!(mc.provider_type, ProviderType::Local);
+        assert_eq!(mc.cloud_kind, None);
+        assert_eq!(mc.base_url.as_deref(), Some("http://localhost:11434"));
+        // An explicit base_url always wins.
+        let mc = entry_to_model_config(&ProviderEntryConfig {
+            name: "remote-box".into(),
+            kind: Some("ollama".into()),
+            api_key: None,
+            base_url: Some("http://192.168.1.10:11434".into()),
+            model: None,
+        });
+        assert_eq!(mc.provider_type, ProviderType::Local);
+        assert_eq!(mc.base_url.as_deref(), Some("http://192.168.1.10:11434"));
+        // kind=openai without base_url → canonical OpenAI endpoint.
+        let mc = entry_to_model_config(&ProviderEntryConfig {
+            name: "oai".into(),
+            kind: Some("openai".into()),
+            api_key: Some("sk".into()),
+            base_url: None,
+            model: None,
+        });
+        assert_eq!(mc.cloud_kind, Some(CloudProviderKind::OpenAI));
+        assert_eq!(mc.base_url.as_deref(), Some("https://api.openai.com/v1"));
+    }
+
+    // ── config.toml round-trip integrity ────────────────────────────────────
+    // `provider/add` · `/delete` · `/set_active` all `save()` the whole config.
+    // A save that emits un-parseable TOML silently wipes every provider on the
+    // next load (load_or_default → Default), so the round-trip MUST be lossless.
+
+    #[test]
+    fn default_config_round_trips_through_pretty_toml() {
+        let s = toml::to_string_pretty(&OneaiConfig::default()).unwrap();
+        let _: OneaiConfig = toml::from_str(&s).unwrap_or_else(|e| {
+            panic!("default config re-parse failed: {e}\n--- emitted ---\n{s}")
+        });
+    }
+
+    #[test]
+    fn populated_config_round_trips_through_pretty_toml() {
+        let mut cfg = OneaiConfig::default();
+        cfg.add_provider(ProviderEntryConfig {
+            name: "bailian".into(),
+            kind: Some("openai".into()),
+            api_key: Some("sk-x".into()),
+            base_url: Some("https://example.com/v1".into()),
+            model: Some("qwen3-max".into()),
+        });
+        cfg.add_provider(ProviderEntryConfig {
+            name: "local".into(),
+            kind: Some("ollama".into()),
+            api_key: None,
+            base_url: None,
+            model: None,
+        });
+        cfg.set_active_provider("bailian");
+        // Exercise the exact add → set_active → delete → save sequence the
+        // app-server probe runs.
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: OneaiConfig = toml::from_str(&s).unwrap_or_else(|e| {
+            panic!("populated config re-parse failed: {e}\n--- emitted ---\n{s}")
+        });
+        assert_eq!(back.providers.len(), 2);
+        assert_eq!(back.active_provider.as_deref(), Some("bailian"));
     }
 }

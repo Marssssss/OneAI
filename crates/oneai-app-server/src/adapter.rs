@@ -34,7 +34,7 @@ use oneai_bus::{
 use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo};
 
 use crate::dispatcher::Dispatcher;
-use crate::probe::{ProviderEntryDto, SharedAppProbe};
+use crate::probe::{ProviderEntryDto, ProviderModelsQuery, SharedAppProbe};
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
 use crate::{
     SharedConversationStore, SharedFeedbackStore, SharedHostAllowlistRpc, SharedScenarioStore,
@@ -634,6 +634,20 @@ async fn handle_request(
                 serde_json::to_value(res).unwrap_or(json!({"ok": false})),
             )
         }
+        method::PROVIDER_MODELS => {
+            // All three fields optional — unset ones inherit the engine env
+            // (CLI impl), mirroring `provider/add`.
+            let query = ProviderModelsQuery {
+                kind: opt_field(&params, "kind"),
+                api_key: opt_field(&params, "api_key"),
+                base_url: opt_field(&params, "base_url"),
+            };
+            let res = probe.provider_models(query).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
         method::CONFIG_READ => {
             let view = probe.config_read().await;
             Response::ok(id, serde_json::to_value(view).unwrap_or(json!({})))
@@ -1001,6 +1015,29 @@ mod tests {
     async fn provider_delete_missing_name_is_invalid_params() {
         let resp = probe_response("provider/delete", json!({})).await;
         assert_eq!(resp.error.unwrap().code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn provider_models_routes_and_returns_shape() {
+        // All params optional — an empty query still routes (NullAppProbe
+        // answers ok:false; this asserts routing + the `{ok, models}` shape).
+        let resp = probe_response(
+            "provider/models",
+            json!({"kind": "openai", "api_key": "sk-x", "base_url": "https://api.openai.com/v1"}),
+        )
+        .await;
+        assert!(resp.error.is_none(), "provider/models should not RPC-error");
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["models"].is_array());
+        assert!(res["error"].as_str().unwrap().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn provider_models_empty_params_ok() {
+        let resp = probe_response("provider/models", json!({})).await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["models"].is_array());
     }
 
     #[tokio::test]

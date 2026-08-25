@@ -262,6 +262,26 @@ impl ProviderPool {
         self.entries.read().expect("entries lock poisoned").clone()
     }
 
+    /// Inference order for the no-smart-router path: lead with the user-
+    /// selected active entry (issue #37 — `provider/set_active` must survive
+    /// inference), then the remaining entries in priority order for fallback.
+    /// Without leading with the active entry, the chain always starts at
+    /// priority-order index 0 and the success handler snaps `active_index`
+    /// back there, silently undoing the manual selection.
+    fn active_first_indices(&self, entries: &[ProviderEntry]) -> Vec<usize> {
+        let active = self.active_index.load(Ordering::Relaxed) as usize;
+        let mut indices: Vec<usize> = Vec::with_capacity(entries.len());
+        if active < entries.len() {
+            indices.push(active);
+        }
+        for idx in 0..entries.len() {
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
+        indices
+    }
+
     /// Live-switch the active provider by name (atomic `active_index` store).
     /// No `App.provider` swap — the pool IS the provider; it routes to the
     /// active entry. Returns Err if the name isn't in the pool.
@@ -702,8 +722,9 @@ impl ProviderPool {
 
             indices
         } else {
-            // Default: use priority order (entries are sorted by priority)
-            (0..entries.len()).collect()
+            // Default: lead with the active entry (issue #37), then fall back
+            // through the remaining entries in priority order.
+            self.active_first_indices(&entries)
         };
 
         for idx in ordered_indices {
@@ -891,7 +912,9 @@ impl ProviderPool {
 
             indices
         } else {
-            (0..entries.len()).collect()
+            // Default: lead with the active entry (issue #37), then fall back
+            // through the remaining entries in priority order.
+            self.active_first_indices(&entries)
         };
 
         for idx in ordered_indices {
@@ -1102,6 +1125,19 @@ impl LlmProvider for ProviderPool {
                 max_output_tokens: 4096,
             }
         }
+    }
+
+    /// List the models available at the ACTIVE entry's endpoint (delegates to
+    /// the entry's own `list_models`). Empty when the pool has no entries.
+    async fn list_models(&self) -> Vec<String> {
+        let entries = self.entries_snapshot();
+        let idx = self.active_index.load(Ordering::Relaxed) as usize;
+        let entry = if idx < entries.len() {
+            &entries[idx]
+        } else {
+            return Vec::new();
+        };
+        entry.provider.list_models().await
     }
 
     /// Get the model config of the currently active provider.
@@ -1956,5 +1992,68 @@ mod tests {
         pool.remove_entry("anthropic");
         assert_eq!(pool.provider_names().len(), 1);
         assert_eq!(pool.active_provider_name(), "openai");
+    }
+
+    // ── issue #37: a manual `set_active` must survive inference ────────────
+    //
+    // Regression: without a smart router the fallback chain used to lead with
+    // priority-order entry 0 unconditionally, and the success handler snapped
+    // `active_index` back there — so a provider selected via `provider/
+    // set_active` reverted after the first inference.
+
+    /// `two_entry_pool` has openai at priority/index 0 and anthropic at 1.
+    /// Selecting anthropic then inferring must keep anthropic active (and the
+    /// response must actually come from it), not snap back to openai.
+    #[tokio::test]
+    async fn set_active_survives_inference() {
+        let pool = two_entry_pool();
+        assert_eq!(pool.active_provider_name(), "openai");
+        pool.set_active_by_name("anthropic").expect("switch");
+        assert_eq!(pool.active_provider_name(), "anthropic");
+
+        let response = pool.infer(test_request()).await.unwrap();
+        // Active stays on the manually-selected provider…
+        assert_eq!(pool.active_provider_name(), "anthropic");
+        // …and the inference really ran on it (anthropic's model is "claude").
+        assert_eq!(response.model, "claude");
+        // No fallback happened — the active provider answered first try.
+        assert_eq!(pool.fallback_log_count(), 0);
+    }
+
+    /// Streaming counterpart of the same guarantee.
+    #[tokio::test]
+    async fn set_active_survives_streaming_inference() {
+        use futures::StreamExt;
+        let pool = two_entry_pool();
+        pool.set_active_by_name("anthropic").expect("switch");
+
+        let mut stream = pool.infer_stream(test_request()).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(pool.active_provider_name(), "anthropic");
+        assert_eq!(pool.fallback_log_count(), 0);
+    }
+
+    /// Fallback is preserved: if the manually-selected active provider fails,
+    /// inference still falls back to the next entry and tracks the survivor.
+    #[tokio::test]
+    async fn set_active_provider_failing_still_falls_back() {
+        // Active entry "anthropic" fails; "openai" (index 0) is the fallback.
+        let failing = TestProvider::new("anthropic", "claude");
+        failing.set_failing(true);
+        let pool = ProviderPool::new(
+            vec![
+                ProviderEntry::new("openai", openai_test_provider(), 0),
+                ProviderEntry::new("anthropic", Arc::new(failing), 1),
+            ],
+            ProviderPoolConfig::default(),
+        );
+        pool.set_active_by_name("anthropic").expect("switch");
+        assert_eq!(pool.active_provider_name(), "anthropic");
+
+        let response = pool.infer(test_request()).await.unwrap();
+        // Fell back to openai and tracks it now.
+        assert_eq!(response.model, "gpt-4o");
+        assert_eq!(pool.active_provider_name(), "openai");
+        assert_eq!(pool.fallback_log_count(), 1);
     }
 }

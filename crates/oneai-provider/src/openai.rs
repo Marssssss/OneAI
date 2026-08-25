@@ -893,6 +893,34 @@ impl LlmProvider for OpenAIProvider {
         parse_openai_context_window(&json)
     }
 
+    /// List the models served by this OpenAI-compatible endpoint (`GET /models`).
+    ///
+    /// Powers the settings UI's model dropdown (`provider/models` RPC).
+    /// Best-effort: any network/auth/parse failure returns an empty list.
+    async fn list_models(&self) -> Vec<String> {
+        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        let base = self.config.resolved_url();
+        let url = format!("{}/models", base.trim_end_matches('/'));
+
+        let mut req = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10));
+        if !api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let Some(resp) = req.send().await.ok() else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(json) = resp.json::<Value>().await else {
+            return Vec::new();
+        };
+        parse_openai_model_list(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
     }
@@ -1059,6 +1087,27 @@ pub fn parse_openai_context_window(json: &Value) -> Option<u32> {
     None
 }
 
+/// Parse model ids from an OpenAI-compatible `GET /models` response.
+///
+/// Response shape: `{"object":"list","data":[{"id":"gpt-4o","object":"model",...},...]}`.
+/// Returns the `id` of every entry, sorted + deduped for a stable dropdown.
+/// Works for OpenAI proper and every OpenAI-compatible gateway that
+/// implements the listing endpoint (DeepSeek, 智谱, vLLM, LM Studio, …).
+pub fn parse_openai_model_list(json: &Value) -> Vec<String> {
+    let Some(data) = json.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;
@@ -1081,6 +1130,33 @@ mod probe_tests {
         // OpenAI proper — no context-window key.
         let resp = json!({ "id": "gpt-4o", "object": "model", "owned_by": "openai" });
         assert_eq!(parse_openai_context_window(&resp), None);
+    }
+
+    #[test]
+    fn test_parse_openai_model_list() {
+        let resp = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o-mini", "object": "model", "owned_by": "system" },
+                { "id": "gpt-4o", "object": "model", "owned_by": "system" },
+                { "id": "", "object": "model" },
+                { "object": "model" }
+            ]
+        });
+        // Sorted, empty/missing ids dropped.
+        assert_eq!(
+            parse_openai_model_list(&resp),
+            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_openai_model_list_empty_or_malformed() {
+        assert_eq!(parse_openai_model_list(&json!({})), Vec::<String>::new());
+        assert_eq!(
+            parse_openai_model_list(&json!({"data": "nope"})),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

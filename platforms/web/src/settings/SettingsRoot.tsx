@@ -169,6 +169,10 @@ function GeneralSection({
   )
 }
 
+/** The fixed protocol kinds the engine understands (issue #37 — a dropdown,
+ *  not free text). `ollama` maps to `ProviderType::Local` server-side. */
+const PROVIDER_KINDS = ['openai', 'anthropic', 'gemini', 'ollama'] as const
+
 function ModelsSection({
   store,
   snap,
@@ -180,18 +184,53 @@ function ModelsSection({
   const [showAdd, setShowAdd] = useState(false)
   const [draft, setDraft] = useState({ name: '', kind: 'openai', api_key: '', base_url: '', model: '' })
   const [showConfig, setShowConfig] = useState(false)
+  // Issue #37 — model dropdown data: fetched from the endpoint via
+  // `provider/models`; manual entry stays possible (the input keeps working
+  // when the list is unavailable).
+  const [modelOptions, setModelOptions] = useState<string[]>([])
+  const [modelsFetching, setModelsFetching] = useState(false)
+  const [modelsError, setModelsError] = useState<string | null>(null)
+
+  /** Pull the endpoint's model list for the given kind/key/url (the draft's
+   *  fields). Unset fields inherit the engine env server-side. */
+  const fetchModels = async (kind: string, apiKey: string, baseUrl: string) => {
+    setModelsFetching(true)
+    setModelsError(null)
+    const res = await store.providerModels({
+      kind,
+      api_key: apiKey.trim().length > 0 ? apiKey.trim() : undefined,
+      base_url: baseUrl.trim().length > 0 ? baseUrl.trim() : undefined,
+    })
+    setModelsFetching(false)
+    if (res.ok) {
+      setModelOptions(res.models)
+    } else {
+      setModelOptions([])
+      setModelsError(res.error ?? 'provider/models failed')
+    }
+  }
+
+  /** Protocol kind is form-wide state — switching it invalidates the fetched
+   *  model list (different protocol ⇒ different catalog). */
+  const changeKind = (kind: string) => {
+    setDraft({ ...draft, kind, model: '' })
+    setModelOptions([])
+    setModelsError(null)
+  }
 
   const submit = async () => {
     if (draft.name.trim().length === 0) return
     const ok = await store.providerAdd({
       name: draft.name.trim(),
-      kind: draft.kind.trim().length > 0 ? draft.kind.trim() : undefined,
+      kind: draft.kind,
       api_key: draft.api_key.trim().length > 0 ? draft.api_key.trim() : undefined,
       base_url: draft.base_url.trim().length > 0 ? draft.base_url.trim() : undefined,
       model: draft.model.trim().length > 0 ? draft.model.trim() : undefined,
     })
     if (ok) {
       setDraft({ name: '', kind: 'openai', api_key: '', base_url: '', model: '' })
+      setModelOptions([])
+      setModelsError(null)
       setShowAdd(false)
     }
   }
@@ -230,10 +269,13 @@ function ModelsSection({
       {snap.providers.length === 0 && (
         <div className={styles.empty}>{t('settings.noProvider')}</div>
       )}
-      {snap.providers.map((p, i) => (
-        <div key={i} className={`${styles.card} ${p.active ? styles.cardActive : ''}`}>
+      {snap.providers.map((p) => (
+        <div key={p.name} className={`${styles.card} ${p.active ? styles.cardActive : ''}`}>
           <div className={styles.packHead}>
-            <code className={styles.code}>{p.kind}</code>
+            {/* name is the entry's unique key (set_active/delete operate on it
+                — issue #37); kind rides along as a secondary badge. */}
+            <code className={styles.code}>{p.name}</code>
+            <span className={styles.providerKind}>{p.kind}</span>
             {p.active && <span className={styles.activeBadge}>{t('settings.active')}</span>}
             <span className={styles.providerModel}>{p.model || t('settings.inherited')}</span>
           </div>
@@ -243,14 +285,14 @@ function ModelsSection({
           <div className={styles.skillActions}>
             <button
               className={styles.miniBtn}
-              onClick={() => void store.providerSetActive(p.kind)}
+              onClick={() => void store.providerSetActive(p.name)}
               disabled={p.active}
             >
               {t('settings.setActive')}
             </button>
             <button
               className={`${styles.miniBtn} ${styles.danger}`}
-              onClick={() => void store.providerDelete(p.kind)}
+              onClick={() => void store.providerDelete(p.name)}
               disabled={snap.providers.length <= 1}
             >
               {t('settings.delete')}
@@ -269,12 +311,19 @@ function ModelsSection({
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             />
-            <input
-              className={styles.input}
-              placeholder={t('settings.fldKind')}
+            {/* Protocol kind is a fixed dropdown, not free text (issue #37). */}
+            <select
+              className={styles.select}
+              aria-label={t('settings.fldKind')}
               value={draft.kind}
-              onChange={(e) => setDraft({ ...draft, kind: e.target.value })}
-            />
+              onChange={(e) => changeKind(e.target.value)}
+            >
+              {PROVIDER_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
           </div>
           <input
             className={styles.input}
@@ -288,12 +337,30 @@ function ModelsSection({
             value={draft.base_url}
             onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
           />
-          <input
-            className={styles.input}
-            placeholder={t('settings.fldModel')}
-            value={draft.model}
-            onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-          />
+          {/* Model name: pick from the endpoint's fetched catalog (datalist
+              keeps manual entry as a fallback — issue #37). */}
+          <div className={styles.modelRow}>
+            <input
+              className={styles.input}
+              placeholder={t('settings.fldModel')}
+              value={draft.model}
+              list="oneai-settings-model-options"
+              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+            />
+            <button
+              className={styles.miniBtn}
+              disabled={modelsFetching}
+              onClick={() => void fetchModels(draft.kind, draft.api_key, draft.base_url)}
+            >
+              {modelsFetching ? t('settings.fetchingModels') : t('settings.fetchModels')}
+            </button>
+          </div>
+          <datalist id="oneai-settings-model-options">
+            {modelOptions.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+          {modelsError !== null && <div className={styles.hint}>{modelsError}</div>}
           <div className={styles.skillActions}>
             <button className={styles.miniBtn} onClick={() => void submit()}>
               {t('settings.save')}

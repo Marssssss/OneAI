@@ -259,6 +259,13 @@
   margin-left: auto;
 }
 
+/* Protocol kind badge next to the entry name (issue #37). */
+.providerKind {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+  font-family: var(--oneai-font-mono);
+}
+
 .configFile {
   border: 1px solid var(--oneai-border);
   border-radius: var(--oneai-radius);
@@ -338,6 +345,28 @@
 }
 .input:focus {
   border-color: var(--oneai-brand-500);
+}
+
+/* Protocol-kind dropdown (issue #37 — fixed choices, not free text). */
+.select {
+  font: inherit;
+  font-size: 13px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  color: var(--oneai-text);
+  padding: 6px 8px;
+  border-radius: var(--oneai-radius-sm);
+  outline: none;
+}
+.select:focus {
+  border-color: var(--oneai-brand-500);
+}
+
+/* Model input + "fetch models" button on one row (issue #37). */
+.modelRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
 }
 
 .addToggle {

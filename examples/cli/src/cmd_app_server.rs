@@ -22,8 +22,9 @@ use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
     default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError,
     BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView, DomainPackInfo, DomainPackList,
-    FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo, ProviderOpResult,
-    SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
+    FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo, ProviderModelsQuery,
+    ProviderModelsResult, ProviderOpResult, SharedAppProbe, SharedScenarioStore, SkillInfo,
+    SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
@@ -808,6 +809,50 @@ impl AppProbe for AppProbeImpl {
         }
     }
 
+    async fn provider_models(&self, query: ProviderModelsQuery) -> ProviderModelsResult {
+        // Reuse the add-path mapping so the query inherits env (`ONEAI_API_KEY`
+        // / `ONEAI_BASE_URL`) exactly like `provider/add` would, and the same
+        // kind resolution (incl. ollama → Local) applies.
+        let dto = ProviderEntryDto {
+            name: String::new(),
+            kind: query.kind,
+            api_key: query.api_key,
+            base_url: query.base_url,
+            model: None,
+        };
+        let mc = entry_to_model_config_strict(&dto);
+        // Cloud endpoints authenticate the listing call; fail early with an
+        // actionable message instead of hitting the endpoint keyless. Local
+        // (Ollama) needs no key.
+        if mc.api_key.is_none() && matches!(mc.provider_type, ProviderType::Cloud) {
+            return ProviderModelsResult {
+                ok: false,
+                models: Vec::new(),
+                error: Some(
+                    "listing models needs an API key (fill it in, or set ONEAI_API_KEY)"
+                        .to_string(),
+                ),
+            };
+        }
+        let provider = ProviderFactory::create(mc);
+        let models = provider.list_models().await;
+        if models.is_empty() {
+            ProviderModelsResult {
+                ok: false,
+                models: Vec::new(),
+                error: Some(
+                    "endpoint returned no models (check the kind / API key / base URL)".to_string(),
+                ),
+            }
+        } else {
+            ProviderModelsResult {
+                ok: true,
+                models,
+                error: None,
+            }
+        }
+    }
+
     async fn config_read(&self) -> ConfigFileView {
         let path = OneaiConfig::default_path();
         let content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -858,7 +903,8 @@ impl AppProbeImpl {
 
     /// Sync helper: build the `ProviderInfo` list from the live pool (or the
     /// launch config fallback). Shared by `providers()` and the provider op
-    /// results so both stay consistent.
+    /// results so both stay consistent. The entry `name` is the pool entry's
+    /// name — the key `set_active`/`delete` operate on (issue #37).
     fn provider_list(&self) -> Vec<ProviderInfo> {
         let active_name = self.pool.as_ref().map(|p| p.active_provider_name());
         let pool_entries: Vec<(String, ModelConfig)> = self
@@ -870,6 +916,7 @@ impl AppProbeImpl {
             return pool_entries
                 .into_iter()
                 .map(|(name, mc)| ProviderInfo {
+                    name: name.clone(),
                     kind: provider_kind_str(&mc).unwrap_or_else(|| name.clone()),
                     model: mc.model_name.clone().unwrap_or_default(),
                     base_url: mc.base_url.clone(),
@@ -877,9 +924,14 @@ impl AppProbeImpl {
                 })
                 .collect();
         }
+        // No pool (launch without any provider) — surface the env/`--model`
+        // config as a single synthetic entry. Name matches the single-entry
+        // pool name `build_engine_server` would use ("default") so ops stay
+        // addressable.
         self.provider_config
             .as_ref()
             .map(|mc| ProviderInfo {
+                name: "default".to_string(),
                 kind: provider_kind_str(mc).unwrap_or_default(),
                 model: mc.model_name.clone().unwrap_or_default(),
                 base_url: mc.base_url.clone(),
@@ -903,18 +955,12 @@ fn dto_to_entry_config(dto: &ProviderEntryDto) -> ProviderEntryConfig {
 
 /// Map a probe DTO to a `ModelConfig` for live pool entry construction. Env
 /// vars (`ONEAI_API_KEY`/`BASE_URL`/`MODEL`) only fill in unset fields, so a
-/// fully-specified entry is self-contained.
+/// fully-specified entry is self-contained; a still-missing `base_url` falls
+/// back to the family's canonical endpoint (`default_base_url_for`). Kind
+/// resolution (incl. the `ollama` → Local fix) is shared with the launch
+/// path via `crate::config::resolve_provider_kind` (issue #37).
 fn entry_to_model_config_strict(dto: &ProviderEntryDto) -> ModelConfig {
-    use oneai_core::{CloudProviderKind, ProviderType};
-    let cloud_kind = dto
-        .kind
-        .as_deref()
-        .and_then(|k| match k.to_lowercase().as_str() {
-            "openai" => Some(CloudProviderKind::OpenAI),
-            "anthropic" => Some(CloudProviderKind::Anthropic),
-            "gemini" => Some(CloudProviderKind::Gemini),
-            _ => None,
-        });
+    let (provider_type, cloud_kind) = crate::config::resolve_provider_kind(dto.kind.as_deref());
     let api_key = dto
         .api_key
         .clone()
@@ -922,13 +968,16 @@ fn entry_to_model_config_strict(dto: &ProviderEntryDto) -> ModelConfig {
     let base_url = dto
         .base_url
         .clone()
-        .or_else(|| std::env::var("ONEAI_BASE_URL").ok());
+        .or_else(|| std::env::var("ONEAI_BASE_URL").ok())
+        .or_else(|| {
+            crate::config::default_base_url_for(provider_type, cloud_kind).map(|s| s.to_string())
+        });
     let model = dto
         .model
         .clone()
         .or_else(|| std::env::var("ONEAI_MODEL").ok());
     ModelConfig {
-        provider_type: ProviderType::Cloud,
+        provider_type,
         cloud_kind,
         api_key,
         base_url,

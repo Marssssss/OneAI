@@ -837,6 +837,10 @@ export interface BackgroundListResult {
 }
 
 export interface ProviderInfo {
+  /** Unique entry name — the key `provider/set_active` / `provider/delete`
+   *  operate on (issue #37: entries are addressed by name, never by kind —
+   *  two entries may share a kind). */
+  name: string
   kind: string
   model: string
   base_url?: string
@@ -901,6 +905,25 @@ export interface ProviderOpResult {
   ok: boolean
   /** Post-op provider list (the UI updates without a re-list). */
   providers?: ProviderInfo[]
+  error?: string
+}
+
+/** `provider/models` params (issue #37 — the add-provider form's model
+ *  dropdown). All optional: unset fields inherit the engine env server-side
+ *  (`ONEAI_API_KEY` / `ONEAI_BASE_URL`), mirroring `provider/add`. */
+export interface ProviderModelsParams {
+  /** Protocol kind ("openai"/"anthropic"/"gemini"/"ollama"). */
+  kind?: string
+  api_key?: string
+  base_url?: string
+}
+
+/** `provider/models` result. `ok:false` + `error` is a normal result (the UI
+ *  shows a hint and leaves manual model-name entry), NOT a JSON-RPC error. */
+export interface ProviderModelsResult {
+  ok: boolean
+  /** Model ids the endpoint serves (sorted). Empty on failure. */
+  models: string[]
   error?: string
 }
 

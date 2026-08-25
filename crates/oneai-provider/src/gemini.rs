@@ -702,6 +702,34 @@ impl LlmProvider for GeminiProvider {
         parse_gemini_context_window(&json)
     }
 
+    /// List the models served by this Gemini endpoint (`GET /models`).
+    ///
+    /// Powers the settings UI's model dropdown (`provider/models` RPC).
+    /// Best-effort: any network/auth/parse failure returns an empty list.
+    async fn list_models(&self) -> Vec<String> {
+        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        let base = self.config.resolved_url();
+        let url = format!("{}/models", base.trim_end_matches('/'));
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("key", api_key), ("pageSize", "1000")])
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        let Ok(resp) = resp else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(json) = resp.json::<Value>().await else {
+            return Vec::new();
+        };
+        parse_gemini_model_list(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
     }
@@ -719,6 +747,40 @@ pub fn parse_gemini_context_window(json: &Value) -> Option<u32> {
     }
 }
 
+/// Parse model ids from a Gemini `GET /models` (list) response.
+///
+/// Response shape: `{"models":[{"name":"models/gemini-2.5-pro","displayName":"...","supportedGenerationMethods":["generateContent",...]},...]}`.
+/// Strips the `models/` name prefix (the id the generate endpoints take),
+/// keeps only entries usable for chat (those listing `generateContent` in
+/// `supportedGenerationMethods`; entries without the field are kept — some
+/// gateways omit it), and sorts for a stable dropdown.
+pub fn parse_gemini_model_list(json: &Value) -> Vec<String> {
+    let Some(models) = json.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = models
+        .iter()
+        .filter(|m| {
+            let Some(methods) = m
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+            else {
+                return true; // field absent — keep (gateway may not report it)
+            };
+            methods
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|s| s == "generateContent")
+        })
+        .filter_map(|m| m.get("name").and_then(Value::as_str))
+        .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;
@@ -732,6 +794,42 @@ mod probe_tests {
             "outputTokenLimit": 8192,
         });
         assert_eq!(parse_gemini_context_window(&resp), Some(1_048_576));
+    }
+
+    #[test]
+    fn test_parse_gemini_model_list() {
+        let resp = json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "displayName": "Gemini 2.5 Pro",
+                    "supportedGenerationMethods": ["generateContent"]
+                },
+                {
+                    "name": "models/gemini-embedding-001",
+                    "displayName": "Gemini Embedding",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                {
+                    "name": "models/gemini-2.5-flash",
+                    "displayName": "Gemini 2.5 Flash"
+                }
+            ]
+        });
+        // Embedding-only dropped; `models/` prefix stripped; no-method entry kept.
+        assert_eq!(
+            parse_gemini_model_list(&resp),
+            vec!["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_gemini_model_list_malformed() {
+        assert_eq!(parse_gemini_model_list(&json!({})), Vec::<String>::new());
+        assert_eq!(
+            parse_gemini_model_list(&json!({"models": "nope"})),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

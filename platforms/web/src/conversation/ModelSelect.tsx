@@ -56,7 +56,7 @@ export function ModelSelect({ store }: ModelSelectProps): ReactNode {
         <span className={styles.glyph}>⚙</span>
         <span className={styles.label}>
           {active !== null
-            ? `${active.kind}${active.model !== '' ? ' · ' + active.model : ''}`
+            ? `${active.name}${active.model !== '' ? ' · ' + active.model : ''}`
             : t('modelSelect.none')}
         </span>
         <span className={styles.caret}>{open ? '▴' : '▾'}</span>
@@ -70,9 +70,9 @@ export function ModelSelect({ store }: ModelSelectProps): ReactNode {
               <button
                 key={i}
                 className={`${styles.item} ${p.active ? styles.itemActive : ''}`}
-                onClick={() => void pick(p.kind)}
+                onClick={() => void pick(p.name)}
               >
-                <span className={styles.itemKind}>{p.kind}</span>
+                <span className={styles.itemKind}>{p.name}</span>
                 {p.model !== '' && <span className={styles.itemModel}>{p.model}</span>}
                 {p.active && <span className={styles.itemActiveDot}>●</span>}
               </button>

@@ -106,6 +106,9 @@ export async function startMockServer(): Promise<{ close: () => Promise<void> }>
         case 'provider/set_active':
           respond(ws, id, { ok: true })
           break
+        case 'provider/models':
+          respond(ws, id, { ok: true, models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'] })
+          break
         case 'feedback/submit':
           respond(ws, id, { ok: true })
           break

@@ -15,6 +15,8 @@ import type {
   DomainPackList,
   ProviderEntryDto,
   ProviderInfo,
+  ProviderModelsParams,
+  ProviderModelsResult,
   ProviderOpResult,
   SkillInfo,
   SkillOpParams,
@@ -134,10 +136,12 @@ export class SettingsStore {
   }
 
   /** Live-switch the active provider (atomic pool active_index). Optimistically
-   *  flips the active marker; the server result confirms. */
+   *  flips the active marker; the server result confirms. Addressed by the
+   *  entry's unique `name`, never its `kind` (issue #37 — two entries may
+   *  share a kind, and the pool matches on name). */
   async providerSetActive(name: string): Promise<boolean> {
     this.set({
-      providers: this.state.providers.map((p) => ({ ...p, active: p.kind === name })),
+      providers: this.state.providers.map((p) => ({ ...p, active: p.name === name })),
       lastError: null,
     })
     try {
@@ -156,6 +160,20 @@ export class SettingsStore {
       this.set({ lastError: errMsg(e, 'provider/set_active') })
       await this.refresh()
       return false
+    }
+  }
+
+  /** Fetch the models an endpoint serves (issue #37 — feeds the add-provider
+   *  form's model dropdown). Returns the list, or `{models:[], error}` on any
+   *  failure (the UI keeps manual entry available). */
+  async providerModels(params: ProviderModelsParams): Promise<ProviderModelsResult> {
+    try {
+      return await this.rpc.call<ProviderModelsParams, ProviderModelsResult>(
+        'provider/models',
+        params,
+      )
+    } catch (e) {
+      return { ok: false, models: [], error: errMsg(e, 'provider/models') }
     }
   }
 

@@ -65,6 +65,23 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
+    /// List the model ids available at the provider's endpoint.
+    ///
+    /// Implementations query the provider's model-listing endpoint (OpenAI-
+    /// compatible `GET /models`, Anthropic `GET /v1/models`, Gemini
+    /// `GET /models`, Ollama `GET /api/tags`) and return the discovered model
+    /// ids. Powers the settings UI's model dropdown (`provider/models` RPC),
+    /// so the user picks from the endpoint's real catalog instead of typing
+    /// a model name blind.
+    ///
+    /// Best-effort like `probe_context_window` — network/auth/parse failures
+    /// return an empty list rather than erroring, so a metadata-endpoint
+    /// outage never blocks the UI. The default returns empty (this provider
+    /// has no model-listing endpoint).
+    async fn list_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether this backend benefits from constrained/structured-output decoding.
     ///
     /// Encodes a **cost/benefit judgment, not raw capability**: cloud SOTA backends

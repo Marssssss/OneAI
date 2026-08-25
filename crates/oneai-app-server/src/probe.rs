@@ -63,7 +63,12 @@ pub struct AppConfigSnapshot {
 /// One configured provider entry.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ProviderInfo {
-    /// Provider kind (openai/anthropic/ollama/…).
+    /// Unique entry name — the key `provider/set_active` / `provider/delete`
+    /// operate on (issue #37: two entries may share a `kind`, and the name is
+    /// whatever the user picked at add time, so the UI must address entries by
+    /// name, never by kind).
+    pub name: String,
+    /// Provider kind (openai/anthropic/gemini/ollama/…).
     pub kind: String,
     /// Model name (may be empty when inherited).
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -71,7 +76,7 @@ pub struct ProviderInfo {
     /// Base URL override, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Whether this is the entry the app-server launched with (the active one).
+    /// Whether this is the entry the pool currently routes to (the active one).
     pub active: bool,
 }
 
@@ -161,6 +166,36 @@ pub struct ProviderOpResult {
     pub error: Option<String>,
 }
 
+/// Query for `provider/models` — describes the endpoint whose model list the
+/// UI wants (typically the NOT-yet-submitted add-provider form's kind /
+/// api_key / base_url fields). Unset fields inherit the engine's env
+/// (`ONEAI_API_KEY` / `ONEAI_BASE_URL`) in the CLI impl, matching what
+/// `provider/add` would do.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderModelsQuery {
+    /// Protocol kind ("openai"/"anthropic"/"gemini"/"ollama"); absent ⇒
+    /// auto-detect from the base URL host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Result of `provider/models` (issue #37 — the model dropdown's data
+/// source). `ok:false` + `error` is a normal result (the UI shows a hint and
+/// leaves manual model-name entry available), NOT a JSON-RPC error.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModelsResult {
+    pub ok: bool,
+    /// Model ids the endpoint serves (sorted). Empty on failure.
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Raw config-file view (path + contents) for the settings "open config file"
 /// affordance — web can't reveal Finder, so it shows the path + a read-only
 /// preview.
@@ -235,6 +270,10 @@ pub trait AppProbe: Send + Sync {
     /// Live-switch the active provider (atomic pool active_index) + write
     /// `active_provider` to config. Returns the post-op provider list.
     async fn provider_set_active(&self, name: &str) -> ProviderOpResult;
+    /// List the models served by the endpoint described by `query` (the
+    /// add-provider form fields) — the settings UI's model dropdown data
+    /// source (issue #37). Backed by `LlmProvider::list_models`.
+    async fn provider_models(&self, query: ProviderModelsQuery) -> ProviderModelsResult;
     /// Read the raw config file (path + contents) for the "open config file"
     /// affordance.
     async fn config_read(&self) -> ConfigFileView;
@@ -317,6 +356,13 @@ impl AppProbe for NullAppProbe {
             ok: false,
             providers: None,
             error: Some("provider set-active not supported by this probe".to_string()),
+        }
+    }
+    async fn provider_models(&self, _query: ProviderModelsQuery) -> ProviderModelsResult {
+        ProviderModelsResult {
+            ok: false,
+            models: Vec::new(),
+            error: Some("provider models not supported by this probe".to_string()),
         }
     }
     async fn config_read(&self) -> ConfigFileView {

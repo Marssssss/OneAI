@@ -550,6 +550,39 @@ impl LlmProvider for AnthropicProvider {
         parse_anthropic_context_window(&json)
     }
 
+    /// List the models served by this Anthropic endpoint (`GET /v1/models`).
+    ///
+    /// Powers the settings UI's model dropdown (`provider/models` RPC).
+    /// Requests the max page (`limit=1000`) — Anthropic's catalog is far
+    /// smaller than that. Best-effort: any failure returns an empty list.
+    async fn list_models(&self) -> Vec<String> {
+        let Some(api_key) = self.config.api_key.as_deref() else {
+            return Vec::new();
+        };
+        let base = self.config.resolved_url();
+        let url = format!("{}/models", base.trim_end_matches('/'));
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .query(&[("limit", "1000")])
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        let Ok(resp) = resp else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(json) = resp.json::<Value>().await else {
+            return Vec::new();
+        };
+        parse_anthropic_model_list(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
     }
@@ -1396,6 +1429,25 @@ pub fn parse_anthropic_context_window(json: &Value) -> Option<u32> {
     }
 }
 
+/// Parse model ids from an Anthropic `GET /v1/models` (list) response.
+///
+/// Response shape: `{"data":[{"type":"model","id":"claude-opus-4-8","display_name":"..."},...],"has_more":false,...}`.
+/// Returns the `id` of every entry, sorted + deduped for a stable dropdown.
+pub fn parse_anthropic_model_list(json: &Value) -> Vec<String> {
+    let Some(data) = json.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;
@@ -1415,6 +1467,35 @@ mod probe_tests {
     fn test_parse_anthropic_missing_field() {
         let resp = json!({ "id": "claude-opus-4-8" });
         assert_eq!(parse_anthropic_context_window(&resp), None);
+    }
+
+    #[test]
+    fn test_parse_anthropic_model_list() {
+        let resp = json!({
+            "data": [
+                { "type": "model", "id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6" },
+                { "type": "model", "id": "claude-opus-4-8", "display_name": "Claude Opus 4.8" }
+            ],
+            "has_more": false,
+            "first_id": "claude-sonnet-4-6",
+            "last_id": "claude-opus-4-8"
+        });
+        assert_eq!(
+            parse_anthropic_model_list(&resp),
+            vec![
+                "claude-opus-4-8".to_string(),
+                "claude-sonnet-4-6".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_anthropic_model_list_malformed() {
+        assert_eq!(parse_anthropic_model_list(&json!({})), Vec::<String>::new());
+        assert_eq!(
+            parse_anthropic_model_list(&json!({"data": [42, {"id": ""}]})),
+            Vec::<String>::new()
+        );
     }
 
     /// PromptCachePolicy::Off must strip every `cache_control` breakpoint;

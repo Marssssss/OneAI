@@ -472,6 +472,32 @@ impl LlmProvider for OllamaProvider {
         parse_ollama_context_window(&json)
     }
 
+    /// List the models pulled in this Ollama server (`GET /api/tags`).
+    ///
+    /// Powers the settings UI's model dropdown (`provider/models` RPC).
+    /// Best-effort: any network/parse failure returns an empty list.
+    async fn list_models(&self) -> Vec<String> {
+        let base = self.config.resolved_url();
+        let url = format!("{}/api/tags", base.trim_end_matches('/'));
+
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        let Ok(resp) = resp else {
+            return Vec::new();
+        };
+        if !resp.status().is_success() {
+            return Vec::new();
+        }
+        let Ok(json) = resp.json::<Value>().await else {
+            return Vec::new();
+        };
+        parse_ollama_model_list(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
     }
@@ -503,6 +529,26 @@ pub fn parse_ollama_context_window(json: &Value) -> Option<u32> {
         }
     }
     None
+}
+
+/// Parse model names from an Ollama `GET /api/tags` response.
+///
+/// Response shape: `{"models":[{"name":"llama3:latest","size":...,"digest":"..."},...]}`.
+/// Returns the `name` of every pulled model, sorted + deduped for a stable
+/// dropdown.
+pub fn parse_ollama_model_list(json: &Value) -> Vec<String> {
+    let Some(models) = json.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.get("name").and_then(Value::as_str))
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[cfg(test)]
@@ -543,6 +589,30 @@ mod probe_tests {
     fn test_parse_ollama_no_context_length_key() {
         let resp = json!({ "model_info": { "general.architecture": "llama" } });
         assert_eq!(parse_ollama_context_window(&resp), None);
+    }
+
+    #[test]
+    fn test_parse_ollama_model_list() {
+        let resp = json!({
+            "models": [
+                { "name": "qwen2.5:7b", "size": 1, "digest": "a" },
+                { "name": "llama3:latest", "size": 2, "digest": "b" },
+                { "name": "", "size": 3 }
+            ]
+        });
+        assert_eq!(
+            parse_ollama_model_list(&resp),
+            vec!["llama3:latest".to_string(), "qwen2.5:7b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_ollama_model_list_empty() {
+        assert_eq!(
+            parse_ollama_model_list(&json!({"models": []})),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_ollama_model_list(&json!({})), Vec::<String>::new());
     }
 }
 
