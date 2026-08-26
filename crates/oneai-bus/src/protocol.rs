@@ -854,10 +854,21 @@ pub enum EngineYield {
     /// iteration (issue #40 trajectory panel). ← `on_context_assembled`.
     /// Sections whose content is unchanged from the previous iteration of the
     /// same turn carry `content: None` (hash-dedup — see `ContextSection`).
+    /// `duration_ms` is the wall-clock time spent assembling the context
+    /// (refresh sources → assemble → pinned blocks → tool defs → accounting).
     ContextAssembled {
         turn_id: String,
         iteration: usize,
         sections: Vec<ContextSection>,
+        #[serde(default)]
+        duration_ms: u64,
+    },
+    /// Snapshot of one inference call — request parameters + raw request
+    /// conversation + the model's response + latency (issue #40 trajectory
+    /// follow-up). ← `on_inference`.
+    Inference {
+        turn_id: String,
+        snapshot: oneai_core::InferenceSnapshot,
     },
     /// The loop paused at an interrupt point (rate-limit, cancel, …).
     /// ← `on_interrupt`. `point` is a short machine label, `reason` the
@@ -1471,19 +1482,68 @@ mod tests {
                     content: None, // unchanged since iteration 1
                 },
             ],
+            duration_ms: 12,
         };
         let line = serde_json::to_string(&y).unwrap();
         assert!(line.contains(r#""kind":"context_assembled""#));
+        assert!(line.contains(r#""duration_ms":12"#));
         match rt_yield(&y) {
             EngineYield::ContextAssembled {
                 iteration,
                 sections,
+                duration_ms,
                 ..
             } => {
                 assert_eq!(iteration, 2);
                 assert_eq!(sections.len(), 2);
+                assert_eq!(duration_ms, 12);
                 assert_eq!(sections[0].content.as_deref(), Some("you are OneAI"));
                 assert!(sections[1].content.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn context_assembled_duration_defaults_zero_for_old_producers() {
+        let line = r#"{"kind":"context_assembled","turn_id":"t1","iteration":1,"sections":[]}"#;
+        match serde_json::from_str::<EngineYield>(line).unwrap() {
+            EngineYield::ContextAssembled { duration_ms, .. } => assert_eq!(duration_ms, 0),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inference_round_trips() {
+        let y = EngineYield::Inference {
+            turn_id: "t1".into(),
+            snapshot: oneai_core::InferenceSnapshot {
+                iteration: 2,
+                model: "gpt-4o".into(),
+                temperature: Some(0.3),
+                max_tokens: Some(4096),
+                top_p: None,
+                thinking_budget: None,
+                tool_names: vec!["shell".into()],
+                message_count: 3,
+                request_messages: vec![oneai_core::Message::user("hi")],
+                response: oneai_core::InferenceResponse {
+                    message: oneai_core::Message::assistant("hello"),
+                    usage: oneai_core::TokenUsage::new(10, 4),
+                    model: "gpt-4o".into(),
+                    metadata: Default::default(),
+                },
+                duration_ms: 987,
+            },
+        };
+        let line = serde_json::to_string(&y).unwrap();
+        assert!(line.contains(r#""kind":"inference""#));
+        match rt_yield(&y) {
+            EngineYield::Inference { turn_id, snapshot } => {
+                assert_eq!(turn_id, "t1");
+                assert_eq!(snapshot.iteration, 2);
+                assert_eq!(snapshot.duration_ms, 987);
+                assert_eq!(snapshot.response.usage.completion_tokens, 4);
             }
             _ => panic!("wrong variant"),
         }

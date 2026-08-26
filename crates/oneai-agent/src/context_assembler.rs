@@ -367,7 +367,13 @@ pub fn build_context_snapshot(
         if !unchanged {
             hashes.insert(cache_key, content_hash);
         }
-        let label = key.label().to_string();
+        // Context sources get the actual source key in their label (e.g.
+        // "context: git_status") — a generic "context source" label hides which
+        // of the N ambient sources a section is (issue #40 follow-up).
+        let label = match &key {
+            ContextKey::Context(k) => format!("context: {k}"),
+            _ => key.label().to_string(),
+        };
         out_sections.push(ContextSection {
             key,
             label,

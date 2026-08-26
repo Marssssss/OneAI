@@ -300,11 +300,19 @@ impl AgentLoopObserver for BusObserver {
         });
     }
 
-    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot) {
+    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot, duration_ms: u64) {
         self.emit(EngineYield::ContextAssembled {
             turn_id: self.turn_id.clone(),
             iteration: snapshot.iteration,
             sections: snapshot.sections.clone(),
+            duration_ms,
+        });
+    }
+
+    fn on_inference(&self, snapshot: &oneai_core::InferenceSnapshot) {
+        self.emit(EngineYield::Inference {
+            turn_id: self.turn_id.clone(),
+            snapshot: snapshot.clone(),
         });
     }
 
@@ -498,19 +506,55 @@ mod tests {
                 content: Some("you are OneAI".to_string()),
             }],
         };
-        obs.on_context_assembled(&snapshot);
+        obs.on_context_assembled(&snapshot, 33);
         match sub.recv().await.unwrap() {
             EngineYield::ContextAssembled {
                 turn_id,
                 iteration,
                 sections,
+                duration_ms,
             } => {
                 assert_eq!(turn_id, "t_1");
                 assert_eq!(iteration, 1);
                 assert_eq!(sections.len(), 1);
+                assert_eq!(duration_ms, 33);
                 assert_eq!(sections[0].key, oneai_core::ContextKey::BasePrompt);
             }
             other => panic!("expected ContextAssembled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inference_emits_snapshot() {
+        let (bus, engine_bus) = observed_bus();
+        let mut sub = bus.subscribe_yields();
+        let obs = BusObserver::new(engine_bus, "t_1");
+        let snapshot = oneai_core::InferenceSnapshot {
+            iteration: 2,
+            model: "gpt-4o".to_string(),
+            temperature: Some(0.3),
+            max_tokens: None,
+            top_p: None,
+            thinking_budget: None,
+            tool_names: vec!["shell".to_string()],
+            message_count: 1,
+            request_messages: vec![oneai_core::Message::user("hi")],
+            response: oneai_core::InferenceResponse {
+                message: oneai_core::Message::assistant("hello"),
+                usage: oneai_core::TokenUsage::new(10, 4),
+                model: "gpt-4o".to_string(),
+                metadata: Default::default(),
+            },
+            duration_ms: 555,
+        };
+        obs.on_inference(&snapshot);
+        match sub.recv().await.unwrap() {
+            EngineYield::Inference { turn_id, snapshot } => {
+                assert_eq!(turn_id, "t_1");
+                assert_eq!(snapshot.iteration, 2);
+                assert_eq!(snapshot.duration_ms, 555);
+            }
+            other => panic!("expected Inference, got {other:?}"),
         }
     }
 

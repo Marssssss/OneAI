@@ -233,7 +233,7 @@ impl AgentLoopObserver for TestObserver {
             task.depends_on.clone(),
         ));
     }
-    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot) {
+    fn on_context_assembled(&self, snapshot: &oneai_core::ContextSnapshot, _duration_ms: u64) {
         self.events
             .lock()
             .unwrap()

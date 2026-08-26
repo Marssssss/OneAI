@@ -151,8 +151,16 @@ pub trait AgentLoopObserver: Send + Sync {
     /// log + context sources + pinned blocks + tool definitions), with a
     /// sectioned snapshot of what the model is about to see (issue #40
     /// trajectory panel). Sections are hash-deduped within the turn — see
-    /// [`oneai_core::ContextSection`]. Default no-op.
-    fn on_context_assembled(&self, _snapshot: &oneai_core::ContextSnapshot) {}
+    /// [`oneai_core::ContextSection`]. `duration_ms` is the wall-clock time
+    /// spent assembling the context. Default no-op.
+    fn on_context_assembled(&self, _snapshot: &oneai_core::ContextSnapshot, _duration_ms: u64) {}
+
+    /// Called after each inference with the concrete request + response + latency
+    /// (issue #40 trajectory follow-up) — the model name, sampling params, tool
+    /// set, the raw request conversation (trimmed), the model's response, and
+    /// the wall-clock inference duration. Default no-op so existing observers
+    /// keep compiling.
+    fn on_inference(&self, _snapshot: &oneai_core::InferenceSnapshot) {}
 
     /// Called when the durable working state changes (task created, step
     /// status synced, decision settled). Carries a materialized
@@ -897,6 +905,39 @@ fn emit_working_state_snapshot(observer: &dyn AgentLoopObserver, state: &LoopSta
     if let Some(ws) = &state.working_state {
         observer.on_working_state(&oneai_core::TaskEventPayload::Snapshot { state: ws.clone() });
     }
+}
+
+/// Trim the text-bearing content blocks of a request conversation to a bounded
+/// length for the [`oneai_core::InferenceSnapshot`] (issue #40 follow-up).
+///
+/// The full request conversation is already captured — sectioned — by
+/// `ContextSnapshot`; this trimmed copy is only for the inference node's
+/// "API request" drill-in, so capping long blocks (base prompt, stale tool
+/// results, large assistant replies) keeps the snapshot and the persisted event
+/// line bounded without losing the request's shape.
+fn trim_request_messages(msgs: &[Message]) -> Vec<Message> {
+    const CAP: usize = 2000;
+    let cap = |text: &mut String| {
+        if text.chars().count() > CAP {
+            let cut: String = text.chars().take(CAP).collect();
+            *text = format!("{cut}\n[...truncated]");
+        }
+    };
+    msgs.iter()
+        .map(|m| {
+            let mut m = m.clone();
+            for block in &mut m.content {
+                match block {
+                    ContentBlock::Text { text }
+                    | ContentBlock::Thinking { text }
+                    | ContentBlock::ToolResult { content: text, .. } => cap(text),
+                    ContentBlock::ToolCall { args, .. } => cap(args),
+                    _ => {}
+                }
+            }
+            m
+        })
+        .collect()
 }
 
 /// Inverse of [`paradigm_name`] for the lowercase form stored in
@@ -1883,6 +1924,11 @@ impl AgentLoop {
 
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
+            // ─── Context-assembly timing (issue #40 follow-up) ─────────
+            // Covers refresh_sources → assemble → pinned blocks → tool defs →
+            // accounting → snapshot; reported on `on_context_assembled`.
+            let context_t0 = std::time::Instant::now();
+
             // ─── Self-extension baseline (evolution-plan §3.4) ──────────
             // Snapshot the active (Footprint-gate `service_available()==true`)
             // tool set at the START of this iteration. After this turn's tool
@@ -2189,7 +2235,8 @@ impl AgentLoop {
                     &accounting,
                     &mut state.ctx_hashes,
                 );
-                observer.on_context_assembled(&snapshot);
+                let context_assembly_ms = context_t0.elapsed().as_millis() as u64;
+                observer.on_context_assembled(&snapshot, context_assembly_ms);
             }
 
             // 4. Run inference
@@ -2217,6 +2264,9 @@ impl AgentLoop {
             // path moves `request` into `provider.infer`, but PostInfer (below)
             // needs it to build the interaction request.
             let request_snapshot = request.clone();
+            // ─── Inference timing (issue #40 follow-up) ────────────────
+            // Reported on `on_inference` after the response lands.
+            let infer_t0 = std::time::Instant::now();
             let response_result = if self.config.use_streaming {
                 self.run_streaming_iteration_async(&request, observer).await
             } else {
@@ -2437,6 +2487,34 @@ impl AgentLoop {
                 response.usage.cache_read_tokens,
                 response.usage.cache_creation_tokens,
             );
+
+            // 4b'. Snapshot the concrete inference (request + response + latency)
+            // for the trajectory panel (issue #40 follow-up). `request_snapshot`
+            // is the pre-inference request clone; `response` is the final
+            // (possibly PostInfer-replaced) response. Request messages are
+            // trimmed so the snapshot stays bounded in the event log.
+            {
+                let inference_snapshot = oneai_core::InferenceSnapshot {
+                    iteration: state.iterations,
+                    model: response.model.clone(),
+                    temperature: request_snapshot.temperature,
+                    max_tokens: request_snapshot.max_tokens,
+                    top_p: request_snapshot.top_p,
+                    thinking_budget: request_snapshot.thinking_budget,
+                    tool_names: request_snapshot
+                        .tools
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect(),
+                    message_count: request_snapshot.conversation.messages.len(),
+                    request_messages: trim_request_messages(
+                        &request_snapshot.conversation.messages,
+                    ),
+                    response: response.clone(),
+                    duration_ms: infer_t0.elapsed().as_millis() as u64,
+                };
+                observer.on_inference(&inference_snapshot);
+            }
 
             // Resolve the token counts to record. Providers usually report usage
             // in their response (Anthropic streaming via message_delta, OpenAI with

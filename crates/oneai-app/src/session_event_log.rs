@@ -37,6 +37,7 @@ pub fn is_trajectory_kind(y: &EngineYield) -> bool {
             | EngineYield::IterationStart { .. }
             | EngineYield::ContextAssembled { .. }
             | EngineYield::ContextAccounting { .. }
+            | EngineYield::Inference { .. }
             | EngineYield::TokenUsage { .. }
             | EngineYield::ToolCalls { .. }
             | EngineYield::ToolResult { .. }
@@ -289,6 +290,7 @@ mod tests {
             turn_id: "t".into(),
             iteration: 1,
             sections: vec![],
+            duration_ms: 0,
         }));
         assert!(!is_trajectory_kind(&EngineYield::StreamChunk {
             turn_id: "t".into(),
