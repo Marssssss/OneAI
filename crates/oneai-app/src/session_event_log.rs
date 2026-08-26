@@ -103,18 +103,29 @@ pub fn spawn_session_event_tap(
             let Some(session_id) = current.clone() else {
                 continue;
             };
-            match serde_json::to_string(&y) {
-                Ok(line) if line.len() <= MAX_EVENT_LINE_BYTES => {
-                    if let Err(e) = store.append(&session_id, &line).await {
+            // Serialize + inject `ts` (epoch ms at persistence time). Live
+            // yields carry no timestamp — a frontend derives one from arrival
+            // time, which is fine live but useless for a replayed historical
+            // session (every event would arrive "now"). The persisted `ts`
+            // restores the real timeline on replay.
+            match serde_json::to_value(&y) {
+                Ok(mut value) => {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "ts".to_string(),
+                            serde_json::json!(chrono::Utc::now().timestamp_millis()),
+                        );
+                    }
+                    let line = serde_json::to_string(&value).unwrap_or_default();
+                    if line.len() > MAX_EVENT_LINE_BYTES {
+                        tracing::warn!(
+                            session = %session_id,
+                            bytes = line.len(),
+                            "skipping oversized session event (> {MAX_EVENT_LINE_BYTES} bytes)"
+                        );
+                    } else if let Err(e) = store.append(&session_id, &line).await {
                         tracing::warn!(session = %session_id, "session event append failed: {e}");
                     }
-                }
-                Ok(line) => {
-                    tracing::warn!(
-                        session = %session_id,
-                        bytes = line.len(),
-                        "skipping oversized session event (> {MAX_EVENT_LINE_BYTES} bytes)"
-                    );
                 }
                 Err(e) => {
                     tracing::warn!(session = %session_id, "session event serialize failed: {e}");
@@ -244,6 +255,9 @@ mod tests {
             ],
             "stream_chunk must be filtered; lifecycle markers not persisted"
         );
+        // Persisted lines carry an engine `ts` (epoch ms) so a historical
+        // replay can reconstruct the real timeline rather than "all now".
+        assert!(lines[0].contains("\"ts\""), "missing ts in: {}", lines[0]);
 
         // Session switch: new events attribute to s2.
         bus.emit(EngineYield::SessionLoaded {
