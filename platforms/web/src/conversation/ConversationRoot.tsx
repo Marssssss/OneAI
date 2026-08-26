@@ -209,14 +209,10 @@ export function ConversationRoot({
       <header className={styles.header}>
         <span className={styles.brand}>{brand}</span>
         <div className={styles.headerRight}>
-          <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
-            {statusText}
-            {snapshot.paradigm !== 're_act' && (
-              <span className={styles.paradigm}> · {snapshot.paradigm}</span>
-            )}
-          </span>
           {/* Issue #40: resident trajectory toggle. In conversation mode the
-              button reads "轨迹"; in trajectory mode it reads "对话". */}
+              button reads "轨迹"; in trajectory mode it reads "对话". The
+              app-server connection status used to live here but conflicted
+              with this button — it now floats at the bottom-right corner. */}
           <button className={styles.viewToggle} onClick={onToggleView} title={viewMode === 'conversation' ? t('trajectory.tab') : t('trajectory.conversationTab')}>
             {viewMode === 'conversation' ? t('trajectory.tab') : t('trajectory.conversationTab')}
           </button>
@@ -311,6 +307,18 @@ export function ConversationRoot({
       />
 
       <GoalBar working={snapshot.working} />
+
+      {/* App-server connection status — a floating badge at the bottom-right
+          corner (moved out of the header where it collided with the trajectory
+          toggle, issue #40 follow-up). */}
+      <div className={styles.statusCorner}>
+        <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
+          {statusText}
+          {snapshot.paradigm !== 're_act' && (
+            <span className={styles.paradigm}> · {snapshot.paradigm}</span>
+          )}
+        </span>
+      </div>
 
       {!empty && <div className={styles.composer}>{composerEl}</div>}
     </div>

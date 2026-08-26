@@ -1,4 +1,5 @@
 .root {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -56,6 +57,21 @@
   font-family: var(--oneai-font-mono);
   font-size: 12px;
   color: var(--oneai-brand-500);
+}
+
+/* Issue #40 follow-up: app-server connection status floats at the bottom-right
+   corner (moved out of the header where it collided with the trajectory
+   toggle). Anchored above the composer so it never overlaps the send button. */
+.statusCorner {
+  position: absolute;
+  right: var(--oneai-gap-lg);
+  bottom: 100px;
+  z-index: 20;
+  pointer-events: none;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
 }
 
 /* Issue #40: resident trajectory/conversation toggle in the header right. */

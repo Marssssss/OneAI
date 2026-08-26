@@ -9,8 +9,10 @@ export interface TimelineNode {
   lane: number
   kind: TrajectoryEntry['kind']
   title: string
-  /** Epoch ms — the x position along the timeline. */
-  at: number
+  /** Logical position (0-based sorted rank) — the x coordinate source. Nodes
+   *  are ordered semantically (context < infer < tool per iteration) then
+   *  spaced uniformly, so long wall-clock gaps don't make the lane sparse. */
+  index: number
   /** Span (ms) for nodes with a duration (tool calls); 0 for instants. */
   durationMs: number
   entry: TrajectoryEntry
@@ -34,9 +36,11 @@ export interface TurnBoundary {
   turnId: string
   /** The turn's task (from `turn_start`), used as a marker label. */
   label: string
-  startAt: number
-  /** null while the turn is still in flight (no `turn_complete` seen). */
-  endAt: number | null
+  /** Sorted index of the turn's first node. */
+  startIndex: number
+  /** Sorted index of the turn's last node; null while the turn is still in
+   *  flight (no `turn_complete` seen). */
+  endIndex: number | null
 }
 
 export interface TimelineModel {
@@ -44,7 +48,8 @@ export interface TimelineModel {
   nodes: TimelineNode[]
   edges: TimelineEdge[]
   turns: TurnBoundary[]
-  timeRange: [number, number]
+  /** Total node count (drives fit-to-width; 0 when no nodes). */
+  count: number
 }
 
 const MAIN_LANE = 0
@@ -73,31 +78,31 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
 
   // First pass: split turn-boundary entries from node entries, collect turns.
   const nodeEntries: TrajectoryEntry[] = []
-  const turnStarts = new Map<string, TurnBoundary>()
-  const turnEnds = new Map<string, number>()
+  const turnStarts = new Map<string, { turnId: string; label: string }>()
+  const turnEnds = new Set<string>()
 
   for (const e of entries) {
     if (e.kind === 'turn_start') {
       const d = e.detail as Extract<TrajectoryDetail, { kind: 'turn' }> | undefined
       const id = e.turnId ?? ''
-      turnStarts.set(id, { turnId: id, label: d?.task ?? '', startAt: e.at, endAt: null })
+      turnStarts.set(id, { turnId: id, label: d?.task ?? '' })
       continue
     }
     if (e.kind === 'turn_complete') {
-      const id = e.turnId ?? ''
-      turnEnds.set(id, e.at)
+      turnEnds.add(e.turnId ?? '')
       continue
     }
     nodeEntries.push(e)
   }
 
-  const turns: TurnBoundary[] = Array.from(turnStarts.values()).map((s) => ({
-    ...s,
-    endAt: turnEnds.get(s.turnId) ?? null,
-  }))
-
-  // Second pass: assign lanes + collect task ids.
-  const nodes: TimelineNode[] = nodeEntries.map((e) => {
+  // Second pass: order nodes by semantic position (`pos`, falling back to
+  // arrival `seq` for older replayed logs), then assign a uniform logical
+  // index + lane + duration. Wall-clock `at` is deliberately NOT the axis —
+  // it would scatter nodes with long gaps and invert context/infer/tool.
+  const ordered = [...nodeEntries].sort(
+    (a, b) => (a.pos ?? a.seq) - (b.pos ?? b.seq) || a.seq - b.seq,
+  )
+  const nodes: TimelineNode[] = ordered.map((e, index) => {
     let lane = MAIN_LANE
     let durationMs = 0
     const d = e.detail
@@ -105,7 +110,7 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
       if (d.kind === 'delegate_progress') lane = laneForTask(d.taskId)
       if (d.kind === 'tool' && typeof d.durationMs === 'number') durationMs = d.durationMs
     }
-    return { seq: e.seq, lane, kind: e.kind, title: e.title, at: e.at, durationMs, entry: e }
+    return { seq: e.seq, lane, kind: e.kind, title: e.title, index, durationMs, entry: e }
   })
 
   // Third pass: fork/join/depends edges.
@@ -141,10 +146,20 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
     }
   }
 
-  // Time range (nodes only — turn markers are decorative).
-  const times = nodes.map((n) => n.at)
-  const timeRange: [number, number] =
-    times.length > 0 ? [Math.min(...times), Math.max(...times)] : [0, 1]
+  // Turn boundaries map to the first/last node index of each turn.
+  const firstIndexByTurn = new Map<string, number>()
+  const lastIndexByTurn = new Map<string, number>()
+  for (const n of nodes) {
+    const id = n.entry.turnId ?? ''
+    if (!firstIndexByTurn.has(id)) firstIndexByTurn.set(id, n.index)
+    lastIndexByTurn.set(id, n.index)
+  }
+  const turns: TurnBoundary[] = Array.from(turnStarts.values()).map((s) => ({
+    turnId: s.turnId,
+    label: s.label,
+    startIndex: firstIndexByTurn.get(s.turnId) ?? 0,
+    endIndex: turnEnds.has(s.turnId) ? (lastIndexByTurn.get(s.turnId) ?? null) : null,
+  }))
 
-  return { lanes, nodes, edges, turns, timeRange }
+  return { lanes, nodes, edges, turns, count: nodes.length }
 }

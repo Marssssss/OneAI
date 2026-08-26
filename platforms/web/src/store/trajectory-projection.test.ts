@@ -152,7 +152,7 @@ describe('trajectory data layer (issue #40)', () => {
     ])
   })
 
-  it('positions context before infer, approval before tool, and attaches inference detail', () => {
+  it('positions context before infer, approval before tool, and attaches inference detail (streaming order)', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)
     y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
@@ -165,6 +165,10 @@ describe('trajectory data layer (issue #40)', () => {
       sections: [{ key: { type: 'base_prompt' }, label: 'system prompt', tokens: 10, content_hash: 1, content: 'sys' }],
       duration_ms: 7,
     })
+    vi.advanceTimersByTime(5)
+    // Streaming path: the tool call is detected mid-stream, BEFORE `inference`
+    // fires at stream end — so `tool_calls` finalizes the text buffer first.
+    y({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: {} }], speaker: null })
     vi.advanceTimersByTime(5)
     y({
       kind: 'inference',
@@ -188,8 +192,6 @@ describe('trajectory data layer (issue #40)', () => {
       },
     })
     vi.advanceTimersByTime(5)
-    y({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: {} }], speaker: null })
-    vi.advanceTimersByTime(5)
     y({
       kind: 'approval_request',
       request_id: 'r1',
@@ -202,12 +204,15 @@ describe('trajectory data layer (issue #40)', () => {
     const tool = snap.trajectory.find((e) => e.kind === 'tool_calls')!
     const approval = snap.trajectory.find((e) => e.detail?.kind === 'approval')!
 
-    // Context is the input to inference → sits left of the infer node.
-    expect(context.at).toBeLessThan(infer.at)
-    // Approval gates the tool → sits left of the tool node.
-    expect(approval.at).toBeLessThan(tool.at)
+    // Semantic ordering via `pos` (context 1000 < infer 1001 < approval 1002
+    // < tool 1003), independent of wall-clock arrival.
+    expect(context.pos!).toBeLessThan(infer.pos!)
+    expect(infer.pos!).toBeLessThan(tool.pos!)
+    expect(approval.pos!).toBeLessThan(tool.pos!)
 
     const id = infer.detail as Extract<TrajectoryDetail, { kind: 'iteration' }>
+    // The inference detail attaches even though `tool_calls` (mid-stream)
+    // finalized the text buffer before `inference` arrived.
     expect(id.inferenceDetail).toBeDefined()
     expect(id.durationMs).toBe(99)
     expect(id.inferenceDetail!.response.usage.prompt_tokens).toBe(10)

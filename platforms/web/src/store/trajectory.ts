@@ -36,6 +36,11 @@ export interface TrajectoryEntry {
   turnId: string | null
   /** Wall-clock ms at arrival (epoch, for relative display). */
   at: number
+  /** Logical sort position — `iteration * 1000 + phase` so the timeline can
+   *  order nodes semantically (context < infer < tool) independent of the
+   *  wall-clock gaps that make raw `at` sparse (issue #40 follow-up). Absent
+   *  on entries replayed from older logs — callers fall back to `seq`. */
+  pos?: number
   /** Elapsed ms since the entry's turn_start (null if no active turn). */
   ms: number | null
   /** Which EngineYield kind produced this line. */

@@ -341,6 +341,14 @@ export class ProjectionStore {
    *  `contextKeyString(key)`; filled when a section carries `content`, read
    *  back when it arrives deduped (`content` absent). */
   private ctxCache = new Map<string, string>()
+  /** The seq of the current iteration's `iteration_start` entry. Unlike
+   *  `iterBuffer` (nulled at each tool/direct-answer boundary), this persists
+   *  until the next `iteration_start`, so the trailing `inference` /
+   *  `token_usage` events — which arrive AFTER the mid-stream `tool_calls`
+   *  finalizes the text buffer — can still patch the infer node (issue #40). */
+  private currentIterSeq: number | null = null
+  /** The iteration number of the current iteration (drives `pos`). */
+  private currentIteration = 0
 
   constructor(rpc: OneAiRpcClient) {
     this.rpc = rpc
@@ -573,6 +581,43 @@ export class ProjectionStore {
     this.state.working = { ...this.state.working }
   }
 
+  /** Semantic phase within an iteration, for `pos` ordering (issue #40
+   *  follow-up): the trajectory must read context → infer → tool regardless of
+   *  when each event actually landed on the bus (the streaming path emits
+   *  `tool_calls` mid-stream, BEFORE `inference` fires at stream end). */
+  private phaseForKind(kind: TrajectoryEntry['kind']): number {
+    switch (kind) {
+      case 'context_assembled':
+      case 'context_accounting':
+        return 0
+      case 'iteration_start':
+        return 1
+      case 'approval_request':
+        return 2
+      case 'tool_calls':
+      case 'tool_result':
+      case 'direct_answer':
+      case 'delegate':
+      case 'paradigm_switch':
+        return 3
+      // Delegation lifecycle: child-lane progress/complete must sort AFTER the
+      // fork (phase 3) so fork/join edges always point forward on the timeline.
+      case 'delegate_progress':
+        return 4
+      case 'delegate_complete':
+        return 5
+      default:
+        return 1
+    }
+  }
+
+  /** Logical sort key: `iteration * 1000 + phase` keeps iterations strictly
+   *  ordered while letting context/infer/tool within an iteration order
+   *  correctly. */
+  private posFor(iteration: number, phase: number): number {
+    return iteration * 1000 + phase
+  }
+
   /** Push a trajectory entry (non-hot → caller flushes via emitNow). */
   private pushTrajectory(
     turnId: string | null,
@@ -589,6 +634,7 @@ export class ProjectionStore {
         ms: this.elapsedSinceTurnStart(turnId),
         kind,
         title,
+        pos: this.posFor(this.currentIteration, this.phaseForKind(kind)),
         ...extra,
       },
     ]
@@ -611,6 +657,8 @@ export class ProjectionStore {
     this.state.latestUsage = null
     this.iterBuffer = null
     this.ctxCache.clear()
+    this.currentIterSeq = null
+    this.currentIteration = 0
   }
 
   // ── Issue #40 trajectory helpers ───────────────────────────────────────────
@@ -648,6 +696,8 @@ export class ProjectionStore {
   private startIterationBuffer(turnId: string, iteration: number, paradigm: string, at: number): void {
     this.finalizeIterBuffer()
     const seq = nextTrajectorySeq()
+    this.currentIteration = iteration
+    this.currentIterSeq = seq
     this.state.trajectory = [
       ...this.state.trajectory,
       {
@@ -659,6 +709,7 @@ export class ProjectionStore {
         title: `iteration ${iteration} · ${paradigm}`,
         iter: iteration,
         paradigm,
+        pos: this.posFor(iteration, this.phaseForKind('iteration_start')),
         detail: { kind: 'iteration', iteration, paradigm, inference: '', thinking: '' },
       },
     ]
@@ -883,22 +934,21 @@ export class ProjectionStore {
         break
       case 'token_usage': {
         // Attribute to the current iteration entry (latest per iteration wins).
-        const b = this.iterBuffer
-        if (b !== null) {
-          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+        const iterSeq = this.currentIterSeq
+        if (iterSeq !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === iterSeq)
           if (entry?.detail && entry.detail.kind === 'iteration') {
-            this.patchTrajectory(b.entrySeq, { detail: { ...entry.detail, usage: y.usage } })
+            this.patchTrajectory(iterSeq, { detail: { ...entry.detail, usage: y.usage } })
           }
         }
         break
       }
       case 'inference': {
-        const b = this.iterBuffer
-        if (b !== null) {
-          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+        const iterSeq = this.currentIterSeq
+        if (iterSeq !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === iterSeq)
           if (entry?.detail && entry.detail.kind === 'iteration') {
-            this.patchTrajectory(b.entrySeq, {
-              at,
+            this.patchTrajectory(iterSeq, {
               detail: {
                 ...entry.detail,
                 inferenceDetail: y.snapshot,
@@ -1710,12 +1760,14 @@ export class ProjectionStore {
         this.state.latestUsage = y.usage
         // Issue #40: attribute the per-inference usage to the current
         // iteration node (latest record per iteration wins) instead of a
-        // standalone session-scoped line.
-        const b = this.iterBuffer
-        if (b !== null) {
-          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+        // standalone session-scoped line. Resolve via `currentIterSeq` — the
+        // `token_usage` event arrives AFTER the mid-stream `tool_calls`
+        // finalizes `iterBuffer`, so the buffer can't locate the node.
+        const iterSeq = this.currentIterSeq
+        if (iterSeq !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === iterSeq)
           if (entry?.detail && entry.detail.kind === 'iteration') {
-            this.patchTrajectory(b.entrySeq, { detail: { ...entry.detail, usage: y.usage } })
+            this.patchTrajectory(iterSeq, { detail: { ...entry.detail, usage: y.usage } })
           }
         }
         this.emitNow()
@@ -1723,15 +1775,15 @@ export class ProjectionStore {
       }
       case 'inference': {
         // Issue #40: attach the concrete API request/response + inference
-        // latency to the current infer node, and re-anchor the node to the
-        // inference-completion time — the infer node represents the inference
-        // RESULT, so it sits after the context node (context < infer).
-        const b = this.iterBuffer
-        if (b !== null) {
-          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+        // latency to the current infer node. Ordering is handled by `pos`
+        // (context < infer < tool), NOT by re-anchoring `at` — the streaming
+        // path emits `tool_calls` mid-stream BEFORE `inference` fires, so a
+        // wall-clock anchor would place infer AFTER tool.
+        const iterSeq = this.currentIterSeq
+        if (iterSeq !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === iterSeq)
           if (entry?.detail && entry.detail.kind === 'iteration') {
-            this.patchTrajectory(b.entrySeq, {
-              at: this.eventTs(y),
+            this.patchTrajectory(iterSeq, {
               detail: {
                 ...entry.detail,
                 inferenceDetail: y.snapshot,

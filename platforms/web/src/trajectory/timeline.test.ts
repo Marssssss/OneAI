@@ -7,7 +7,7 @@ function entry(seq: number, at: number, kind: TrajectoryEntry['kind'], detail?: 
 }
 
 describe('buildTimeline (issue #40)', () => {
-  it('maps a flat sequence onto the main lane with a time range', () => {
+  it('maps a flat sequence onto the main lane with uniform indices', () => {
     const entries = [
       entry(1, 1000, 'turn_start', { kind: 'turn', task: 'go' }),
       entry(2, 1100, 'iteration_start', { kind: 'iteration', iteration: 1, paradigm: 're_act', inference: '', thinking: '' }),
@@ -19,11 +19,34 @@ describe('buildTimeline (issue #40)', () => {
     expect(m.nodes).toHaveLength(1)
     expect(m.nodes[0].kind).toBe('iteration_start')
     expect(m.nodes[0].lane).toBe(0)
+    expect(m.nodes[0].index).toBe(0)
     expect(m.turns).toHaveLength(1)
-    expect(m.turns[0].startAt).toBe(1000)
-    expect(m.turns[0].endAt).toBe(1300)
-    expect(m.timeRange).toEqual([1100, 1100])
+    // The turn's first + last node both resolve to index 0 (the single node).
+    expect(m.turns[0].startIndex).toBe(0)
+    expect(m.turns[0].endIndex).toBe(0)
+    expect(m.count).toBe(1)
     expect(m.edges).toHaveLength(0)
+  })
+
+  it('orders nodes by semantic position (context < infer < tool), not wall-clock', () => {
+    // `pos` is `iteration * 1000 + phase`; context=0, infer=1, tool=3.
+    // Deliberately arrive tool first to prove the sort is pos-driven.
+    const entries = [
+      entry(1, 1300, 'tool_calls', { kind: 'tool', callId: 'c1', name: 'shell', args: {} }, 't1'),
+      entry(2, 1200, 'iteration_start', { kind: 'iteration', iteration: 1, paradigm: 're_act', inference: '', thinking: '' }, 't1'),
+      entry(3, 1100, 'context_assembled', { kind: 'context', iteration: 1, sections: [] }, 't1'),
+    ]
+    // Stamp pos directly (the store would compute this).
+    entries[0].pos = 1003
+    entries[1].pos = 1001
+    entries[2].pos = 1000
+    const m = buildTimeline(entries)
+    expect(m.nodes.map((n) => n.kind)).toEqual([
+      'context_assembled',
+      'iteration_start',
+      'tool_calls',
+    ])
+    expect(m.nodes.map((n) => n.index)).toEqual([0, 1, 2])
   })
 
   it('assigns a child lane + fork/join edges for a delegation', () => {

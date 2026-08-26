@@ -23,11 +23,15 @@ interface TrajectoryExplorerProps {
 const LANE_H = 22
 const LANE_GAP = 6
 const NODE_R = 10
-/** Min scale — low enough to fit an entire long session in one screen. */
-const MIN_SCALE = 0.0001
-const MAX_SCALE = 2
-/** Fit-to-width caps the zoom-in for a short (sub-second) span. */
-const MAX_FIT_SCALE = 0.5
+/** Pixels per node index at scale 1 — the uniform spacing the timeline uses
+ *  instead of wall-clock gaps (issue #40 follow-up: raw elapsed time between
+ *  iterations scatters nodes too sparsely). */
+const NODE_GAP = 40
+/** Min scale (px/node = NODE_GAP × scale) — collapses a long session tight. */
+const MIN_SCALE = 0.05
+const MAX_SCALE = 4
+/** Fit-to-width caps the zoom-in so a short session doesn't over-spread. */
+const MAX_FIT_SCALE = 3
 /** Horizontal padding (px) so the fitted timeline doesn't touch the edges. */
 const FIT_PAD = 56
 
@@ -37,12 +41,12 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
 
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState(800)
-  const [scale, setScale] = useState(0.05)
+  const [scale, setScale] = useState(1)
   const [pan, setPan] = useState(FIT_PAD / 2)
   const [follow, setFollow] = useState(true)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
 
-  const rangeMs = model.timeRange[1] - model.timeRange[0]
+  const count = model.count
 
   // Measure the canvas width.
   useEffect(() => {
@@ -56,22 +60,22 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
 
   // Fit-to-width on data / size change (only while the user hasn't interacted).
   useEffect(() => {
-    if (model.nodes.length === 0) return
+    if (count === 0) return
     if (!follow) return
-    setScale(fitScale(width, rangeMs))
-  }, [model.nodes.length, rangeMs, width, follow])
+    setScale(fitScale(width, count))
+  }, [count, width, follow])
 
   // Auto-follow the latest node (default, requirement #4).
   useEffect(() => {
-    if (!follow || model.nodes.length === 0) return
+    if (!follow || count === 0) return
     const last = model.nodes[model.nodes.length - 1]
-    const x = (last.at - model.timeRange[0]) * scale
+    const x = last.index * NODE_GAP * scale
     setPan(width - x - NODE_R)
-  }, [model.nodes.length, scale, width, follow, model.timeRange, model.nodes])
+  }, [count, scale, width, follow, model.nodes])
 
   const canvasHeight = Math.max(60, model.lanes.length * (LANE_H + LANE_GAP) + 16)
 
-  const xOf = (at: number): number => (at - model.timeRange[0]) * scale + pan
+  const xOf = (index: number): number => index * NODE_GAP * scale + pan
   const yOfLane = (lane: number): number => 12 + lane * (LANE_H + LANE_GAP) + LANE_H / 2
 
   // Pan + zoom.
@@ -91,11 +95,11 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
     e.preventDefault()
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const cursorX = e.clientX - rect.left
-    const timeAtCursor = (cursorX - pan) / scale + model.timeRange[0]
+    const indexAtCursor = (cursorX - pan) / (NODE_GAP * scale)
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
     const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * factor))
     setScale(next)
-    setPan(cursorX - (timeAtCursor - model.timeRange[0]) * next)
+    setPan(cursorX - indexAtCursor * NODE_GAP * next)
   }
 
   const selectedEntry = useMemo(
@@ -109,7 +113,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
 
   // Viewport culling: only draw nodes within the visible x band.
   const culled = model.nodes.filter((n) => {
-    const x = xOf(n.at)
+    const x = xOf(n.index)
     return x > -40 && x < width + 40
   })
 
@@ -138,7 +142,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
           <button
             className={styles.btn}
             onClick={() => {
-              setScale(fitScale(width, rangeMs))
+              setScale(fitScale(width, count))
               setPan(FIT_PAD / 2)
               setFollow(true)
             }}
@@ -163,22 +167,22 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
           {model.turns.map((turn, i) => (
             <g key={`turn-${turn.turnId || i}`}>
               <line
-                x1={xOf(turn.startAt)}
-                x2={xOf(turn.startAt)}
+                x1={xOf(turn.startIndex)}
+                x2={xOf(turn.startIndex)}
                 y1={4}
                 y2={canvasHeight - 4}
                 className={styles.turnMarker}
               />
-              {turn.endAt !== null && (
+              {turn.endIndex !== null && (
                 <line
-                  x1={xOf(turn.endAt)}
-                  x2={xOf(turn.endAt)}
+                  x1={xOf(turn.endIndex)}
+                  x2={xOf(turn.endIndex)}
                   y1={4}
                   y2={canvasHeight - 4}
                   className={styles.turnMarkerEnd}
                 />
               )}
-              <text x={xOf(turn.startAt) + 3} y={10} className={styles.turnLabel}>
+              <text x={xOf(turn.startIndex) + 3} y={10} className={styles.turnLabel}>
                 {turn.label}
               </text>
             </g>
@@ -205,8 +209,8 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
             const from = model.nodes.find((n) => n.seq === edge.fromSeq)
             const to = model.nodes.find((n) => n.seq === edge.toSeq)
             if (!from || !to) return null
-            const x1 = xOf(from.at)
-            const x2 = xOf(to.at)
+            const x1 = xOf(from.index)
+            const x2 = xOf(to.index)
             if (x1 < -40 || x1 > width + 40 || x2 < -40 || x2 > width + 40) return null
             return (
               <path
@@ -219,7 +223,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
 
           {/* Nodes */}
           {culled.map((n) => {
-            const x = xOf(n.at)
+            const x = xOf(n.index)
             const y = yOfLane(n.lane)
             const color = colorFor(n.kind)
             return (
@@ -234,9 +238,9 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
                 {n.durationMs > 0 && n.kind === 'tool_calls' ? (
                   <rect
                     x={-NODE_R}
-                    y={-NODE_R}
-                    width={Math.max(16, n.durationMs * scale)}
-                    height={NODE_R * 2}
+                    y={-NODE_R * 0.7}
+                    width={NODE_R * 2}
+                    height={NODE_R * 1.4}
                     rx={2}
                     fill={color}
                   />
@@ -257,9 +261,11 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
   )
 }
 
-function fitScale(width: number, rangeMs: number): number {
-  return Math.min(
-    MAX_FIT_SCALE,
-    Math.max(MIN_SCALE, Math.max(1, width - FIT_PAD) / Math.max(1, rangeMs)),
-  )
+function fitScale(width: number, count: number): number {
+  // Scale so `count - 1` inter-node gaps span the width, clamped to
+  // [MIN_SCALE, MAX_FIT_SCALE]. The MAX_FIT_SCALE cap keeps a 2-node session
+  // from spreading to an absurd per-node gap.
+  const span = Math.max(1, count - 1)
+  const target = Math.max(1, width - FIT_PAD)
+  return Math.min(MAX_FIT_SCALE, Math.max(MIN_SCALE, target / span / NODE_GAP))
 }
