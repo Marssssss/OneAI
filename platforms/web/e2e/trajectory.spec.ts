@@ -54,3 +54,22 @@ test('clicking a tool node reveals args + result in the detail pane', async ({ p
   await expect(page.getByText(/工具指令|Tool command/)).toBeVisible()
   await expect(page.getByText('file1')).toBeVisible()
 })
+
+test('clicking an infer node reveals the API request/response detail', async ({ page }) => {
+  await page.goto('/')
+  const composer = composerOf(page)
+  await composer.pressSequentially('run the trajectory')
+  await composer.press('Enter')
+  await expect(page.getByText('run the trajectory')).toBeVisible()
+
+  await toggleBtn(page).click()
+  const canvas = page.getByTestId('trajectory-timeline')
+  await expect(canvas).toBeVisible()
+
+  // Click the infer node (the iteration_start marker).
+  await canvas.locator('g[data-kind="iteration_start"] > circle').first().click()
+  // The detail pane shows the API request/response drill-in (model + raw
+  // request/response messages from the inference snapshot).
+  await expect(page.getByText(/API 请求|API request/).first()).toBeVisible()
+  await expect(page.getByText('gpt-4o')).toBeVisible()
+})

@@ -1,6 +1,6 @@
 // Timeline model builder (issue #40) — a pure function that folds the flat
-// trajectory ledger into swim-lanes + nodes + fork/join edges the SVG canvas
-// renders. No React, no DOM — trivially unit-testable.
+// trajectory ledger into swim-lanes + nodes + fork/join edges + turn boundaries
+// the SVG canvas renders. No React, no DOM — trivially unit-testable.
 
 import type { TrajectoryDetail, TrajectoryEntry } from '../store/trajectory'
 
@@ -29,10 +29,21 @@ export interface TimelineEdge {
   kind: TimelineEdgeKind
 }
 
+/** A turn's start/end span, drawn as a lane marker (not a node). */
+export interface TurnBoundary {
+  turnId: string
+  /** The turn's task (from `turn_start`), used as a marker label. */
+  label: string
+  startAt: number
+  /** null while the turn is still in flight (no `turn_complete` seen). */
+  endAt: number | null
+}
+
 export interface TimelineModel {
   lanes: TimelineLane[]
   nodes: TimelineNode[]
   edges: TimelineEdge[]
+  turns: TurnBoundary[]
   timeRange: [number, number]
 }
 
@@ -43,6 +54,9 @@ const MAIN_LANE = 0
  * task id (in first-seen order). Child-lane nodes are the `delegate_progress`
  * entries (forwarded sub-agent iteration/tool/usage events); `delegate` /
  * `delegate_complete` stay on the main lane as the fork/join anchors.
+ *
+ * Turn boundaries (`turn_start` / `turn_complete`) are NOT nodes — they are
+ * folded into `turns` for a lane marker (issue #40 follow-up).
  */
 export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
   const lanes: TimelineLane[] = [{ id: 'main', label: 'main', depth: 0 }]
@@ -57,8 +71,33 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
     return idx
   }
 
-  // First pass: assign lanes + collect task ids.
-  const nodes: TimelineNode[] = entries.map((e) => {
+  // First pass: split turn-boundary entries from node entries, collect turns.
+  const nodeEntries: TrajectoryEntry[] = []
+  const turnStarts = new Map<string, TurnBoundary>()
+  const turnEnds = new Map<string, number>()
+
+  for (const e of entries) {
+    if (e.kind === 'turn_start') {
+      const d = e.detail as Extract<TrajectoryDetail, { kind: 'turn' }> | undefined
+      const id = e.turnId ?? ''
+      turnStarts.set(id, { turnId: id, label: d?.task ?? '', startAt: e.at, endAt: null })
+      continue
+    }
+    if (e.kind === 'turn_complete') {
+      const id = e.turnId ?? ''
+      turnEnds.set(id, e.at)
+      continue
+    }
+    nodeEntries.push(e)
+  }
+
+  const turns: TurnBoundary[] = Array.from(turnStarts.values()).map((s) => ({
+    ...s,
+    endAt: turnEnds.get(s.turnId) ?? null,
+  }))
+
+  // Second pass: assign lanes + collect task ids.
+  const nodes: TimelineNode[] = nodeEntries.map((e) => {
     let lane = MAIN_LANE
     let durationMs = 0
     const d = e.detail
@@ -69,7 +108,7 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
     return { seq: e.seq, lane, kind: e.kind, title: e.title, at: e.at, durationMs, entry: e }
   })
 
-  // Second pass: fork/join/depends edges.
+  // Third pass: fork/join/depends edges.
   const edges: TimelineEdge[] = []
   const delegateNodeByTask = new Map<string, TimelineNode>()
   const childNodesByTask = new Map<string, TimelineNode[]>()
@@ -102,12 +141,10 @@ export function buildTimeline(entries: TrajectoryEntry[]): TimelineModel {
     }
   }
 
-  // Time range.
+  // Time range (nodes only — turn markers are decorative).
   const times = nodes.map((n) => n.at)
   const timeRange: [number, number] =
-    times.length > 0
-      ? [Math.min(...times), Math.max(...times)]
-      : [0, 1]
+    times.length > 0 ? [Math.min(...times), Math.max(...times)] : [0, 1]
 
-  return { lanes, nodes, edges, timeRange }
+  return { lanes, nodes, edges, turns, timeRange }
 }

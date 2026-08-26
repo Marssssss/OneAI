@@ -715,11 +715,22 @@ export class ProjectionStore {
     const out: ResolvedContextSection[] = []
     for (const s of sections) {
       const key = contextKeyString(s.key)
+      const changed = s.content !== undefined
       if (s.content !== undefined) this.ctxCache.set(key, s.content)
       const content = s.content !== undefined ? s.content : (this.ctxCache.get(key) ?? '')
-      out.push({ key: s.key, label: s.label, tokens: s.tokens, content })
+      out.push({ key: s.key, label: s.label, tokens: s.tokens, content, changed })
     }
     return out
+  }
+
+  /** Find the `at` of the most recent tool node in `turnId` (for placing an
+   *  approval just before the tool it gates). null when none yet. */
+  private latestToolAt(turnId: string | null): number | null {
+    for (let i = this.state.trajectory.length - 1; i >= 0; i--) {
+      const e = this.state.trajectory[i]
+      if (e.detail && e.detail.kind === 'tool' && e.turnId === turnId) return e.at
+    }
+    return null
   }
 
   /** Replay a historical session's trajectory. Events are fed through the
@@ -851,16 +862,19 @@ export class ProjectionStore {
       case 'working_state':
         this.applyWorkingStateEvent(y.event)
         break
-      case 'context_assembled':
+      case 'context_assembled': {
+        const sections = this.resolveContextSections(y.sections)
         this.pushTrajectory(y.turn_id, 'context_assembled', `context assembled · iter ${y.iteration}`, {
           at,
           detail: {
             kind: 'context',
             iteration: y.iteration,
-            sections: this.resolveContextSections(y.sections),
+            sections,
+            durationMs: y.duration_ms,
           },
         })
         break
+      }
       case 'context_accounting':
         this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
           at,
@@ -874,6 +888,23 @@ export class ProjectionStore {
           const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
           if (entry?.detail && entry.detail.kind === 'iteration') {
             this.patchTrajectory(b.entrySeq, { detail: { ...entry.detail, usage: y.usage } })
+          }
+        }
+        break
+      }
+      case 'inference': {
+        const b = this.iterBuffer
+        if (b !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+          if (entry?.detail && entry.detail.kind === 'iteration') {
+            this.patchTrajectory(b.entrySeq, {
+              at,
+              detail: {
+                ...entry.detail,
+                inferenceDetail: y.snapshot,
+                durationMs: y.snapshot.duration_ms,
+              },
+            })
           }
         }
         break
@@ -909,12 +940,16 @@ export class ProjectionStore {
           detail: { kind: 'turn_complete' },
         })
         break
-      case 'approval_request':
+      case 'approval_request': {
+        let approvalAt = at
+        const toolAt = this.latestToolAt(this.state.currentTurnId)
+        if (toolAt !== null) approvalAt = toolAt - 1
         this.pushTrajectory(this.state.currentTurnId, 'approval_request', 'approval request', {
-          at,
+          at: approvalAt,
           detail: { kind: 'approval', requestId: y.request_id, request: y.request },
         })
         break
+      }
       default:
         break
     }
@@ -1350,8 +1385,14 @@ export class ProjectionStore {
           ...this.state.approvalQueue,
           { request_id: y.request_id, request: y.request, seq: approvalSeq },
         ]
+        // Place the approval just BEFORE the tool it gates (issue #40 — an
+        // approval gates execution, so it must sit to the left of the tool
+        // node, not overlap it).
+        let approvalAt = this.eventTs(y)
+        const toolAt = this.latestToolAt(this.state.currentTurnId)
+        if (toolAt !== null) approvalAt = toolAt - 1
         this.pushTrajectory(this.state.currentTurnId, 'approval_request', 'approval request', {
-          at: this.eventTs(y),
+          at: approvalAt,
           detail: { kind: 'approval', requestId: y.request_id, request: y.request },
         })
         this.emitNow()
@@ -1680,6 +1721,28 @@ export class ProjectionStore {
         this.emitNow()
         break
       }
+      case 'inference': {
+        // Issue #40: attach the concrete API request/response + inference
+        // latency to the current infer node, and re-anchor the node to the
+        // inference-completion time — the infer node represents the inference
+        // RESULT, so it sits after the context node (context < infer).
+        const b = this.iterBuffer
+        if (b !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+          if (entry?.detail && entry.detail.kind === 'iteration') {
+            this.patchTrajectory(b.entrySeq, {
+              at: this.eventTs(y),
+              detail: {
+                ...entry.detail,
+                inferenceDetail: y.snapshot,
+                durationMs: y.snapshot.duration_ms,
+              },
+            })
+          }
+        }
+        this.emitNow()
+        break
+      }
       case 'tools_added': {
         this.pushTrajectory(y.turn_id, 'tools_added', `+tools: ${y.names.join(', ')}`, {
           at: this.eventTs(y),
@@ -1690,13 +1753,18 @@ export class ProjectionStore {
       }
       case 'context_assembled': {
         // Issue #40: sectioned snapshot of the assembled context. Resolve
-        // hash-deduped sections against the cache; store a context node.
+        // hash-deduped sections against the cache; store a context node. The
+        // context sits to the LEFT of its infer node by construction: the
+        // infer node is re-anchored to the inference-completion time when the
+        // `inference` event arrives, so context (assembled first) < infer.
+        const sections = this.resolveContextSections(y.sections)
         this.pushTrajectory(y.turn_id, 'context_assembled', `context assembled · iter ${y.iteration}`, {
           at: this.eventTs(y),
           detail: {
             kind: 'context',
             iteration: y.iteration,
-            sections: this.resolveContextSections(y.sections),
+            sections,
+            durationMs: y.duration_ms,
           },
         })
         this.emitNow()

@@ -16,6 +16,7 @@ import type {
   ContextAccounting,
   ContextKey,
   EngineYieldKind,
+  InferenceSnapshot,
   InteractionRequest,
   StepStatus,
   TaskEventPayload,
@@ -56,6 +57,9 @@ export interface ResolvedContextSection {
   label: string
   tokens: number
   content: string
+  /** Whether this section carried fresh content this iteration (vs. resolved
+   *  from the cache because it was hash-deduped). */
+  changed: boolean
 }
 
 /** Per-node detail, discriminated by the node's origin kind. The trajectory
@@ -63,8 +67,8 @@ export interface ResolvedContextSection {
  *  "工具执行指令/结果只在工具节点展示" etc.). */
 export type TrajectoryDetail =
   | { kind: 'turn'; task: string }
-  | { kind: 'iteration'; iteration: number; paradigm: string; inference: string; thinking: string; usage?: BusUsageRecord; durationMs?: number }
-  | { kind: 'context'; iteration: number; sections: ResolvedContextSection[] }
+  | { kind: 'iteration'; iteration: number; paradigm: string; inference: string; thinking: string; usage?: BusUsageRecord; durationMs?: number; inferenceDetail?: InferenceSnapshot }
+  | { kind: 'context'; iteration: number; sections: ResolvedContextSection[]; durationMs?: number }
   | { kind: 'tool'; callId: string; name: string; args: unknown; result?: string; error?: string; ok?: boolean; durationMs?: number }
   | { kind: 'delegate'; taskId: string; task: string; agentKind: BusSubAgentKind; dependsOn: string[] }
   | { kind: 'delegate_progress'; taskId: string; event: BusDelegateProgress }

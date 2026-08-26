@@ -72,6 +72,7 @@ export type EngineYieldKind =
   | 'working_state'
   | 'context_accounting'
   | 'context_assembled'
+  | 'inference'
   | 'plan_update'
   | 'tools_added'
   | 'interrupted'
@@ -206,6 +207,13 @@ export interface YieldContextAssembled {
   turn_id: string
   iteration: number
   sections: ContextSection[]
+  /** Wall-clock context-assembly latency (ms). Absent for older engines. */
+  duration_ms?: number
+}
+export interface YieldInference {
+  kind: 'inference'
+  turn_id: string
+  snapshot: InferenceSnapshot
 }
 export interface YieldInterrupted {
   kind: 'interrupted'
@@ -272,6 +280,7 @@ export type EngineYield =
   | YieldWorkingState
   | YieldContextAccounting
   | YieldContextAssembled
+  | YieldInference
   | YieldInterrupted
   | YieldReflection
   | YieldTokenUsage
@@ -368,6 +377,55 @@ export interface ContextSection {
 /** Stable cache/dedup key for a context section (mirrors `ContextKey::cache_key`). */
 export function contextKeyString(key: ContextKey): string {
   return key.type === 'context' ? `context:${key.value}` : key.type
+}
+
+// ─── Inference snapshot (oneai-core::InferenceSnapshot, issue #40) ──────────
+// The concrete request + response for one inference call, so the trajectory
+// inference node can show the API request/response + metrics. `Option<T>`
+// fields serialize as `null` when None. `request_messages` content blocks are
+// trimmed by the producer (long text capped with a `[...truncated]` marker).
+
+export interface InferenceTokenUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+export type InferenceContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string }
+  | { type: 'tool_call'; id: string; name: string; args: string }
+  | { type: 'tool_result'; call_id: string; content: string }
+  | { type: 'image'; mime_type: string; data: string }
+  | { type: 'file'; mime_type: string; uri: string }
+
+export interface InferenceMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: InferenceContentBlock[]
+  metadata?: Record<string, string>
+}
+
+export interface InferenceResponse {
+  message: InferenceMessage
+  usage: InferenceTokenUsage
+  model: string
+  metadata?: Record<string, string>
+}
+
+export interface InferenceSnapshot {
+  iteration: number
+  model: string
+  temperature: number | null
+  max_tokens: number | null
+  top_p: number | null
+  thinking_budget: number | null
+  tool_names: string[]
+  message_count: number
+  request_messages: InferenceMessage[]
+  response: InferenceResponse
+  duration_ms: number
 }
 
 // ─── Working state (oneai-core working-state types) ─────────────────────────

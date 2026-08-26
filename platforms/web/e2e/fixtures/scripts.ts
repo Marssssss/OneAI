@@ -96,6 +96,28 @@ export function trajectoryReply(turnId = TURN): EngineYield[] {
         { key: { type: 'tools' }, label: 'tool definitions', tokens: 80, content_hash: 2, content: 'shell, read_file' },
         { key: { type: 'latest_user' }, label: 'latest user message', tokens: 6, content_hash: 3, content: 'plan and execute a task' },
       ],
+      duration_ms: 7,
+    },
+    {
+      kind: 'inference',
+      turn_id: turnId,
+      snapshot: {
+        iteration: 1,
+        model: 'gpt-4o',
+        temperature: 0.3,
+        max_tokens: 4096,
+        top_p: null,
+        thinking_budget: null,
+        tool_names: ['shell'],
+        message_count: 3,
+        request_messages: [{ role: 'user', content: [{ type: 'text', text: 'plan and execute a task' }] }],
+        response: {
+          message: { role: 'assistant', content: [{ type: 'tool_call', id: 'call_1', name: 'shell', args: '{"command":"ls"}' }] },
+          usage: { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220, cache_read_tokens: 100, cache_creation_tokens: 0 },
+          model: 'gpt-4o',
+        },
+        duration_ms: 120,
+      },
     },
     {
       kind: 'tool_calls',

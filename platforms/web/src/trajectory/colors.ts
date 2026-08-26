@@ -42,18 +42,16 @@ export interface LegendEntry {
 }
 
 export const LEGEND: LegendEntry[] = [
-  { color: 'var(--oneai-traj-turn)', label: 'turn', kinds: ['turn_start', 'turn_complete'] },
-  { color: 'var(--oneai-traj-iteration)', label: 'iteration', kinds: ['iteration_start'] },
+  { color: 'var(--oneai-traj-iteration)', label: 'infer', kinds: ['iteration_start'] },
+  { color: 'var(--oneai-traj-context)', label: 'context', kinds: ['context_assembled', 'context_accounting'] },
   { color: 'var(--oneai-traj-tool)', label: 'tool', kinds: ['tool_calls', 'tool_result'] },
+  { color: 'var(--oneai-traj-approval)', label: 'approval', kinds: ['approval_request'] },
   { color: 'var(--oneai-traj-delegate)', label: 'delegate', kinds: ['delegate', 'delegate_progress', 'delegate_complete'] },
   { color: 'var(--oneai-traj-plan)', label: 'plan', kinds: ['plan_revision'] },
   { color: 'var(--oneai-traj-paradigm)', label: 'paradigm', kinds: ['paradigm_switch'] },
-  { color: 'var(--oneai-traj-context)', label: 'context', kinds: ['context_assembled', 'context_accounting'] },
   { color: 'var(--oneai-traj-working)', label: 'working', kinds: ['working_state'] },
-  { color: 'var(--oneai-traj-usage)', label: 'usage', kinds: ['token_usage'] },
   { color: 'var(--oneai-traj-tools)', label: 'tools', kinds: ['tools_added'] },
   { color: 'var(--oneai-traj-interrupt)', label: 'interrupt', kinds: ['interrupted'] },
   { color: 'var(--oneai-traj-reflection)', label: 'reflection', kinds: ['reflection'] },
   { color: 'var(--oneai-traj-error)', label: 'error', kinds: ['error'] },
-  { color: 'var(--oneai-traj-approval)', label: 'approval', kinds: ['approval_request'] },
 ]

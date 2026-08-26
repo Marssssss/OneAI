@@ -3,8 +3,9 @@
 // A horizontal swim-lane timeline: lane 0 = main agent, one lane per delegated
 // sub-agent; nodes are color-coded markers positioned by wall-clock time;
 // fork/join/depends edges draw the delegation DAG. Drag to pan, wheel to zoom,
-// click a node for its type-specific detail below. Auto-follows the latest
-// node until the user pans away ("回到最新" re-enables).
+// click a node for its type-specific detail below. Defaults to a fit-to-width
+// scale so the whole process is visible in one screen; "回到最新" jumps to the
+// latest node.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -19,11 +20,16 @@ interface TrajectoryExplorerProps {
   snapshot: ProjectionSnapshot
 }
 
-const LANE_H = 26
-const LANE_GAP = 8
-const NODE_R = 5
-const MIN_SCALE = 0.005
+const LANE_H = 22
+const LANE_GAP = 6
+const NODE_R = 10
+/** Min scale — low enough to fit an entire long session in one screen. */
+const MIN_SCALE = 0.0001
 const MAX_SCALE = 2
+/** Fit-to-width caps the zoom-in for a short (sub-second) span. */
+const MAX_FIT_SCALE = 0.5
+/** Horizontal padding (px) so the fitted timeline doesn't touch the edges. */
+const FIT_PAD = 56
 
 export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): ReactNode {
   const { t } = useLocale()
@@ -32,7 +38,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState(800)
   const [scale, setScale] = useState(0.05)
-  const [pan, setPan] = useState(0)
+  const [pan, setPan] = useState(FIT_PAD / 2)
   const [follow, setFollow] = useState(true)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
 
@@ -48,12 +54,11 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
     return () => ro.disconnect()
   }, [])
 
-  // Fit on first data (only while the user hasn't interacted).
+  // Fit-to-width on data / size change (only while the user hasn't interacted).
   useEffect(() => {
     if (model.nodes.length === 0) return
     if (!follow) return
-    const fit = Math.min(0.2, Math.max(MIN_SCALE, width / Math.max(1, rangeMs)))
-    setScale(fit)
+    setScale(fitScale(width, rangeMs))
   }, [model.nodes.length, rangeMs, width, follow])
 
   // Auto-follow the latest node (default, requirement #4).
@@ -64,7 +69,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
     setPan(width - x - NODE_R)
   }, [model.nodes.length, scale, width, follow, model.timeRange, model.nodes])
 
-  const canvasHeight = Math.max(60, model.lanes.length * (LANE_H + LANE_GAP) + 12)
+  const canvasHeight = Math.max(60, model.lanes.length * (LANE_H + LANE_GAP) + 16)
 
   const xOf = (at: number): number => (at - model.timeRange[0]) * scale + pan
   const yOfLane = (lane: number): number => 12 + lane * (LANE_H + LANE_GAP) + LANE_H / 2
@@ -133,8 +138,8 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
           <button
             className={styles.btn}
             onClick={() => {
-              setScale(Math.min(0.2, Math.max(MIN_SCALE, width / Math.max(1, rangeMs))))
-              setPan(0)
+              setScale(fitScale(width, rangeMs))
+              setPan(FIT_PAD / 2)
               setFollow(true)
             }}
             title={t('trajectory.zoomReset')}
@@ -154,6 +159,31 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
         onWheel={onWheel}
       >
         <svg width={width} height={canvasHeight} className={styles.svg} data-testid="trajectory-timeline">
+          {/* Turn boundaries — vertical markers, not nodes (issue #40). */}
+          {model.turns.map((turn, i) => (
+            <g key={`turn-${turn.turnId || i}`}>
+              <line
+                x1={xOf(turn.startAt)}
+                x2={xOf(turn.startAt)}
+                y1={4}
+                y2={canvasHeight - 4}
+                className={styles.turnMarker}
+              />
+              {turn.endAt !== null && (
+                <line
+                  x1={xOf(turn.endAt)}
+                  x2={xOf(turn.endAt)}
+                  y1={4}
+                  y2={canvasHeight - 4}
+                  className={styles.turnMarkerEnd}
+                />
+              )}
+              <text x={xOf(turn.startAt) + 3} y={10} className={styles.turnLabel}>
+                {turn.label}
+              </text>
+            </g>
+          ))}
+
           {/* Lane guides */}
           {model.lanes.map((lane) => (
             <g key={lane.id}>
@@ -164,7 +194,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
                 y2={yOfLane(lane.depth === 0 ? 0 : lane.depth)}
                 className={styles.laneGuide}
               />
-              <text x={6} y={yOfLane(lane.depth === 0 ? 0 : lane.depth) - 8} className={styles.laneLabel}>
+              <text x={6} y={yOfLane(lane.depth === 0 ? 0 : lane.depth) - 4} className={styles.laneLabel}>
                 {lane.depth === 0 ? 'main' : lane.label.replace('task:', '')}
               </text>
             </g>
@@ -205,7 +235,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
                   <rect
                     x={-NODE_R}
                     y={-NODE_R}
-                    width={Math.max(10, n.durationMs * scale)}
+                    width={Math.max(16, n.durationMs * scale)}
                     height={NODE_R * 2}
                     rx={2}
                     fill={color}
@@ -224,5 +254,12 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
         <DetailPane entry={selectedEntry} />
       </div>
     </div>
+  )
+}
+
+function fitScale(width: number, rangeMs: number): number {
+  return Math.min(
+    MAX_FIT_SCALE,
+    Math.max(MIN_SCALE, Math.max(1, width - FIT_PAD) / Math.max(1, rangeMs)),
   )
 }

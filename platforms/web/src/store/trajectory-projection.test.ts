@@ -152,6 +152,70 @@ describe('trajectory data layer (issue #40)', () => {
     ])
   })
 
+  it('positions context before infer, approval before tool, and attaches inference detail', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({ kind: 'iteration_start', turn_id: 't1', iteration: 1, paradigm: 're_act' })
+    vi.advanceTimersByTime(5)
+    y({
+      kind: 'context_assembled',
+      turn_id: 't1',
+      iteration: 1,
+      sections: [{ key: { type: 'base_prompt' }, label: 'system prompt', tokens: 10, content_hash: 1, content: 'sys' }],
+      duration_ms: 7,
+    })
+    vi.advanceTimersByTime(5)
+    y({
+      kind: 'inference',
+      turn_id: 't1',
+      snapshot: {
+        iteration: 1,
+        model: 'gpt-4o',
+        temperature: 0.3,
+        max_tokens: 4096,
+        top_p: null,
+        thinking_budget: null,
+        tool_names: ['shell'],
+        message_count: 1,
+        request_messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        response: {
+          message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+          usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11, cache_read_tokens: 2, cache_creation_tokens: 0 },
+          model: 'gpt-4o',
+        },
+        duration_ms: 99,
+      },
+    })
+    vi.advanceTimersByTime(5)
+    y({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: {} }], speaker: null })
+    vi.advanceTimersByTime(5)
+    y({
+      kind: 'approval_request',
+      request_id: 'r1',
+      request: { ToolApproval: { approval: { tool_name: 'shell', args: {}, risk_level: 'low', justification: '' } } },
+    })
+
+    const snap = store.getSnapshot()
+    const infer = snap.trajectory.find((e) => e.detail?.kind === 'iteration')!
+    const context = snap.trajectory.find((e) => e.detail?.kind === 'context')!
+    const tool = snap.trajectory.find((e) => e.kind === 'tool_calls')!
+    const approval = snap.trajectory.find((e) => e.detail?.kind === 'approval')!
+
+    // Context is the input to inference → sits left of the infer node.
+    expect(context.at).toBeLessThan(infer.at)
+    // Approval gates the tool → sits left of the tool node.
+    expect(approval.at).toBeLessThan(tool.at)
+
+    const id = infer.detail as Extract<TrajectoryDetail, { kind: 'iteration' }>
+    expect(id.inferenceDetail).toBeDefined()
+    expect(id.durationMs).toBe(99)
+    expect(id.inferenceDetail!.response.usage.prompt_tokens).toBe(10)
+
+    const cd = context.detail as Extract<TrajectoryDetail, { kind: 'context' }>
+    expect(cd.durationMs).toBe(7)
+  })
+
   it('ignores interrupted/reflection kinds that older frontends drop, but records them here', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)

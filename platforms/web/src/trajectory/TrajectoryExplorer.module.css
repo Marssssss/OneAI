@@ -66,8 +66,8 @@
 }
 
 .canvas {
-  flex: 1;
-  min-height: 120px;
+  flex: 0 0 auto;
+  min-height: 60px;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
@@ -89,6 +89,26 @@
 
 .laneLabel {
   font-size: 10px;
+  fill: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}
+
+.turnMarker {
+  stroke: var(--oneai-traj-turn);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.7;
+}
+
+.turnMarkerEnd {
+  stroke: var(--oneai-traj-turn);
+  stroke-width: 1;
+  stroke-dasharray: 1 4;
+  opacity: 0.4;
+}
+
+.turnLabel {
+  font-size: 9px;
   fill: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
 }
@@ -116,8 +136,8 @@
 }
 
 .detail {
-  flex: 0 0 auto;
-  max-height: 42%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   border-top: 1px solid var(--oneai-border);
   background: var(--oneai-bg-elevated);

@@ -15,9 +15,14 @@ describe('buildTimeline (issue #40)', () => {
     ]
     const m = buildTimeline(entries)
     expect(m.lanes).toHaveLength(1)
-    expect(m.nodes).toHaveLength(3)
-    expect(m.nodes.every((n) => n.lane === 0)).toBe(true)
-    expect(m.timeRange).toEqual([1000, 1300])
+    // turn_start/turn_complete are folded into `turns`, not nodes.
+    expect(m.nodes).toHaveLength(1)
+    expect(m.nodes[0].kind).toBe('iteration_start')
+    expect(m.nodes[0].lane).toBe(0)
+    expect(m.turns).toHaveLength(1)
+    expect(m.turns[0].startAt).toBe(1000)
+    expect(m.turns[0].endAt).toBe(1300)
+    expect(m.timeRange).toEqual([1100, 1100])
     expect(m.edges).toHaveLength(0)
   })
 

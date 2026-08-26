@@ -87,6 +87,12 @@
   gap: 6px;
 }
 
+.params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .chip {
   padding: 2px 8px;
   background: var(--oneai-bg-subtle);
