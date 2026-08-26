@@ -209,6 +209,7 @@ export default function App(): React.ReactNode {
     // be stale when this fires right after `workspaceStore.setCurrent` in the
     // same synchronous handler (the picker auto-bind path).
     projection.exitScenario()
+    setViewMode('conversation')
     setDrawerOpen(false)
     try {
       const ws = workspaceStore.getSnapshot().current ?? undefined
@@ -223,6 +224,7 @@ export default function App(): React.ReactNode {
   }
   const handlePickSession = (id: string) => {
     projection.exitScenario()
+    setViewMode('conversation')
     setDrawerOpen(false)
     // Sync the workspace chip to the loaded session's bound working dir
     // (persisted in conversation.metadata["workspace"]) — otherwise the chip
@@ -508,6 +510,7 @@ export default function App(): React.ReactNode {
   // ── scenario handlers ───────────────────────────────────────────────────────
   const handlePickScenario = (scenario: BusScenario) => {
     setDrawerOpen(false)
+    setViewMode('conversation')
     const hasTopics = (scenario.topic_fields ?? []).length > 0
     if (hasTopics) {
       setModal({ kind: 'intake', scenario })
@@ -520,6 +523,7 @@ export default function App(): React.ReactNode {
     if (modal?.kind === 'intake') {
       const scenario = modal.scenario
       setModal(null)
+      setViewMode('conversation')
       void projection.startScenario(scenario, values, locale as BusLocale)
     }
   }

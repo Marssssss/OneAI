@@ -424,7 +424,11 @@ export interface InferenceSnapshot {
   tool_names: string[]
   message_count: number
   request_messages: InferenceMessage[]
+  /** Full request body (model + messages + tools + sampling knobs). */
+  request_body: unknown
   response: InferenceResponse
+  /** Full response body (message + usage + model + metadata). */
+  response_body: unknown
   duration_ms: number
 }
 

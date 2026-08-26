@@ -6,6 +6,16 @@
   padding: var(--oneai-gap);
 }
 
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  padding-bottom: 8px;
+  margin-bottom: var(--oneai-gap);
+  border-bottom: 1px solid var(--oneai-border);
+  word-break: break-word;
+}
+
 .row {
   display: grid;
   grid-template-columns: 96px 1fr;

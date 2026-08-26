@@ -2494,6 +2494,37 @@ impl AgentLoop {
             // (possibly PostInfer-replaced) response. Request messages are
             // trimmed so the snapshot stays bounded in the event log.
             {
+                // Reconstruct the full request body (model + messages + tools +
+                // sampling knobs) so the trajectory panel's "API request"
+                // drill-in shows the wire shape, not just the message list.
+                let trimmed_messages =
+                    trim_request_messages(&request_snapshot.conversation.messages);
+                let mut request_body = serde_json::Map::new();
+                request_body.insert(
+                    "model".to_string(),
+                    serde_json::json!(response.model.clone()),
+                );
+                request_body.insert(
+                    "messages".to_string(),
+                    serde_json::to_value(&trimmed_messages).unwrap_or_default(),
+                );
+                request_body.insert(
+                    "tools".to_string(),
+                    serde_json::to_value(&request_snapshot.tools).unwrap_or_default(),
+                );
+                if let Some(t) = request_snapshot.temperature {
+                    request_body.insert("temperature".to_string(), serde_json::json!(t));
+                }
+                if let Some(m) = request_snapshot.max_tokens {
+                    request_body.insert("max_tokens".to_string(), serde_json::json!(m));
+                }
+                if let Some(p) = request_snapshot.top_p {
+                    request_body.insert("top_p".to_string(), serde_json::json!(p));
+                }
+                if let Some(tb) = request_snapshot.thinking_budget {
+                    request_body.insert("thinking_budget".to_string(), serde_json::json!(tb));
+                }
+
                 let inference_snapshot = oneai_core::InferenceSnapshot {
                     iteration: state.iterations,
                     model: response.model.clone(),
@@ -2507,10 +2538,10 @@ impl AgentLoop {
                         .map(|t| t.name.clone())
                         .collect(),
                     message_count: request_snapshot.conversation.messages.len(),
-                    request_messages: trim_request_messages(
-                        &request_snapshot.conversation.messages,
-                    ),
+                    request_messages: trimmed_messages,
+                    request_body: serde_json::Value::Object(request_body),
                     response: response.clone(),
+                    response_body: serde_json::to_value(&response).unwrap_or_default(),
                     duration_ms: infer_t0.elapsed().as_millis() as u64,
                 };
                 observer.on_inference(&inference_snapshot);
@@ -3363,6 +3394,14 @@ impl AgentLoop {
                     // announced as a system message. Other strategies
                     // (Escalate / ExternalFeedback) remain informational
                     // injections since they require model-level decisions.
+                    //
+                    // Recovery-time system notes (escalation/retry feedback)
+                    // are collected here and injected AFTER `feed_tool_results`
+                    // below: the tool result must immediately follow its
+                    // assistant `tool_calls` message (OpenAI API contract —
+                    // "assistant message with tool_calls must be followed by
+                    // tool messages"), so no system note may interleave.
+                    let mut recovery_notes: Vec<String> = Vec::new();
                     let failed_count = results.iter().filter(|r| !r.output.success).count();
                     if failed_count > 0 {
                         tracing::warn!(
@@ -3425,11 +3464,9 @@ impl AgentLoop {
                                             // No args snapshot (e.g. plan-mode
                                             // synthetic or control tool) — can't
                                             // re-execute; surface honestly.
-                                            state.conversation.add_message(Message::system(
-                                                format!(
+                                            recovery_notes.push(format!(
                                                 "Recovery: cannot retry '{}' (no args snapshot)",
                                                 r.tool_name
-                                            ),
                                             ));
                                             continue;
                                         };
@@ -3445,12 +3482,10 @@ impl AgentLoop {
                                         // re-execution could double-apply. Don't
                                         // risk it; surface the error instead.
                                         if tool.risk_level() != oneai_core::RiskLevel::Low {
-                                            state.conversation.add_message(Message::system(
-                                                format!(
+                                            recovery_notes.push(format!(
                                             "Recovery: transient error on '{}' (non-idempotent, risk={:?}) not retried to avoid side effects: {}",
                                                     r.tool_name, tool.risk_level(),
-                                                    r.output.error.as_deref().unwrap_or("unknown"))
-                                            ));
+                                                    r.output.error.as_deref().unwrap_or("unknown")));
                                             continue;
                                         }
 
@@ -3494,13 +3529,11 @@ impl AgentLoop {
                                             }
                                         }
                                         if !r.output.success {
-                                            state.conversation.add_message(Message::system(
-                                                format!(
-                                                    "Recovery: '{}' failed after {} retries: {}",
-                                                    r.tool_name,
-                                                    max_retries,
-                                                    r.output.error.as_deref().unwrap_or("unknown")
-                                                ),
+                                            recovery_notes.push(format!(
+                                                "Recovery: '{}' failed after {} retries: {}",
+                                                r.tool_name,
+                                                max_retries,
+                                                r.output.error.as_deref().unwrap_or("unknown")
                                             ));
                                         }
                                     }
@@ -3517,25 +3550,19 @@ impl AgentLoop {
                                             checkpoint system has been removed; skipping rollback.",
                                             checkpoint_id
                                         );
-                                        state.conversation.add_message(Message::system(
-                                            format!("Recovery: rollback to checkpoint '{}' unavailable (checkpoint system removed); re-derive state from the task event log instead.", checkpoint_id)
-                                        ));
+                                        recovery_notes.push(format!("Recovery: rollback to checkpoint '{}' unavailable (checkpoint system removed); re-derive state from the task event log instead.", checkpoint_id));
                                     }
                                     crate::error_recovery::RecoveryOutcome::ValidationFailed {
                                         feedback,
                                     } => {
-                                        state.conversation.add_message(Message::system(format!(
-                                            "Recovery feedback: {}",
-                                            feedback
-                                        )));
+                                        recovery_notes
+                                            .push(format!("Recovery feedback: {}", feedback));
                                     }
                                     crate::error_recovery::RecoveryOutcome::Escalated {
                                         summary,
                                     } => {
-                                        state.conversation.add_message(Message::system(format!(
-                                            "Error escalated: {}",
-                                            summary
-                                        )));
+                                        recovery_notes
+                                            .push(format!("Error escalated: {}", summary));
                                     }
                                     _ => {
                                         // Other outcomes are informational — just log
@@ -3592,6 +3619,14 @@ impl AgentLoop {
                         state.feed_tool_results(results);
                     } else {
                         state.feed_tool_results(results);
+                    }
+
+                    // Inject the deferred recovery notes AFTER the tool results
+                    // (see the collection site above): the tool result must sit
+                    // immediately after its assistant `tool_calls` message, so
+                    // escalation/retry feedback is appended afterwards instead.
+                    for note in recovery_notes {
+                        state.conversation.add_message(Message::system(note));
                     }
 
                     // ─── Self-extension diff (evolution-plan §3.4) ────────

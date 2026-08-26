@@ -42,8 +42,20 @@ pub struct InferenceSnapshot {
     pub message_count: usize,
     /// The request conversation (text blocks trimmed) handed to the provider.
     pub request_messages: Vec<Message>,
+    /// The full request body (model + messages + tools + sampling knobs) as a
+    /// JSON object — what the trajectory panel's "API request" drill-in shows.
+    /// Reconstructed by the producer from the [`crate::InferenceRequest`]; its
+    /// message list is the same trimmed form as `request_messages`. Older
+    /// snapshots that predate this field deserialize to `null`.
+    #[serde(default)]
+    pub request_body: serde_json::Value,
     /// The model's response message + usage + model.
     pub response: InferenceResponse,
+    /// The full response body (message + usage + model + metadata) as a JSON
+    /// object — what the "API response" drill-in shows. Older snapshots that
+    /// predate this field deserialize to `null`.
+    #[serde(default)]
+    pub response_body: serde_json::Value,
     /// Wall-clock inference latency in milliseconds.
     pub duration_ms: u64,
 }
@@ -64,12 +76,14 @@ mod tests {
             tool_names: vec!["shell".to_string()],
             message_count: 1,
             request_messages: vec![Message::user("hi")],
+            request_body: serde_json::json!({"model": "gpt-4o", "messages": [{"role": "user"}]}),
             response: InferenceResponse {
                 message: Message::assistant("hello"),
                 usage: crate::types::TokenUsage::new(10, 4),
                 model: "gpt-4o".to_string(),
                 metadata: std::collections::HashMap::new(),
             },
+            response_body: serde_json::json!({"model": "gpt-4o", "message": {"role": "assistant"}}),
             duration_ms: 1234,
         };
         let json = serde_json::to_string(&snap).unwrap();

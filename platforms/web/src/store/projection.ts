@@ -588,7 +588,6 @@ export class ProjectionStore {
   private phaseForKind(kind: TrajectoryEntry['kind']): number {
     switch (kind) {
       case 'context_assembled':
-      case 'context_accounting':
         return 0
       case 'iteration_start':
         return 1
@@ -845,6 +844,18 @@ export class ProjectionStore {
       case 'tool_calls':
         this.finalizeIterBuffer()
         for (const c of y.calls) {
+          // The engine emits the same call twice in streaming mode — once per
+          // `ToolCallComplete` (mid-stream) and again from `AgentDecision::ToolCalls`
+          // at stream end — and both are persisted. Dedupe so a historical replay
+          // doesn't split one tool call into duplicate nodes (the live `consume`
+          // path already guards this against the chat node ledger).
+          if (
+            this.state.trajectory.some(
+              (e) => e.turnId === y.turn_id && e.detail?.kind === 'tool' && e.detail.callId === c.id,
+            )
+          ) {
+            continue
+          }
           this.pushTrajectory(y.turn_id, 'tool_calls', `tool: ${c.name}`, {
             at,
             detail: { kind: 'tool', callId: c.id, name: c.name, args: c.args },
@@ -869,11 +880,15 @@ export class ProjectionStore {
         }
         break
       case 'paradigm_switch':
-        this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
-          at,
-          paradigm: y.to,
-          detail: { kind: 'paradigm', from: y.from, to: y.to },
-        })
+        // Same no-op filter as the live path — a `from === to` switch is a
+        // spurious activation (e.g. replayed `re_act → re_act`), not a node.
+        if (y.from !== y.to) {
+          this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
+            at,
+            paradigm: y.to,
+            detail: { kind: 'paradigm', from: y.from, to: y.to },
+          })
+        }
         break
       case 'delegate': {
         const kindLabel =
@@ -926,12 +941,6 @@ export class ProjectionStore {
         })
         break
       }
-      case 'context_accounting':
-        this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
-          at,
-          detail: { kind: 'context_accounting', accounting: y.accounting },
-        })
-        break
       case 'token_usage': {
         // Attribute to the current iteration entry (latest per iteration wins).
         const iterSeq = this.currentIterSeq
@@ -1367,11 +1376,17 @@ export class ProjectionStore {
       }
       case 'paradigm_switch': {
         this.state.paradigm = y.to
-        this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
-          at: this.eventTs(y),
-          paradigm: y.to,
-          detail: { kind: 'paradigm', from: y.from, to: y.to },
-        })
+        // A no-op switch (the engine forcing the already-active paradigm, e.g.
+        // the initial `re_act → re_act` the directive pump emits when the
+        // frontend selects re_act before any inference) is not a real
+        // transition — suppress the spurious trajectory node.
+        if (y.from !== y.to) {
+          this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
+            at: this.eventTs(y),
+            paradigm: y.to,
+            detail: { kind: 'paradigm', from: y.from, to: y.to },
+          })
+        }
         this.emitNow()
         break
       }
@@ -1739,11 +1754,10 @@ export class ProjectionStore {
         break
       }
       case 'context_accounting': {
+        // Context accounting is a capability-panel metric (context token
+        // breakdown), not a timeline node — it carries no meaningful per-node
+        // action, so it's folded into the usage snapshot only (issue #40).
         this.state.usage = { ...this.state.usage, context: y.accounting }
-        this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
-          at: this.eventTs(y),
-          detail: { kind: 'context_accounting', accounting: y.accounting },
-        })
         this.emitNow()
         break
       }

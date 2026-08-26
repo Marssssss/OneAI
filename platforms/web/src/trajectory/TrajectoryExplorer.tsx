@@ -34,6 +34,13 @@ const MAX_SCALE = 4
 const MAX_FIT_SCALE = 3
 /** Horizontal padding (px) so the fitted timeline doesn't touch the edges. */
 const FIT_PAD = 56
+/** Vertical headroom (px) above the top lane — gives the lane label, turn
+ *  label, and the hover tooltip room to sit without being clipped by the
+ *  canvas `overflow: hidden`. */
+const TOP_PAD = 40
+/** Assumed half-width of the hover tooltip, used to clamp it inside the
+ *  canvas so the first/last node's label isn't clipped at the edges. */
+const TOOLTIP_HALF = 110
 
 export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): ReactNode {
   const { t } = useLocale()
@@ -45,6 +52,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
   const [pan, setPan] = useState(FIT_PAD / 2)
   const [follow, setFollow] = useState(true)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
+  const [hoverSeq, setHoverSeq] = useState<number | null>(null)
 
   const count = model.count
 
@@ -73,10 +81,20 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
     setPan(width - x - NODE_R)
   }, [count, scale, width, follow, model.nodes])
 
-  const canvasHeight = Math.max(60, model.lanes.length * (LANE_H + LANE_GAP) + 16)
+  // Select the first node on entry so the detail pane shows something instead
+  // of the "no events" empty state (issue #40 follow-up). The component
+  // remounts on every viewMode toggle, so this re-runs on each switch in and
+  // leaves a subsequent click-selection untouched.
+  useEffect(() => {
+    if (selectedSeq === null && model.nodes.length > 0) {
+      setSelectedSeq(model.nodes[0].seq)
+    }
+  }, [selectedSeq, model.nodes])
+
+  const canvasHeight = Math.max(60, model.lanes.length * (LANE_H + LANE_GAP) + TOP_PAD + 16)
 
   const xOf = (index: number): number => index * NODE_GAP * scale + pan
-  const yOfLane = (lane: number): number => 12 + lane * (LANE_H + LANE_GAP) + LANE_H / 2
+  const yOfLane = (lane: number): number => TOP_PAD + lane * (LANE_H + LANE_GAP) + LANE_H / 2
 
   // Pan + zoom.
   const drag = useRef<{ startX: number; startPan: number } | null>(null)
@@ -105,6 +123,13 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
   const selectedEntry = useMemo(
     () => snapshot.trajectory.find((e) => e.seq === selectedSeq) ?? null,
     [snapshot.trajectory, selectedSeq],
+  )
+
+  // Instant hover label: the native SVG <title> tooltip has a browser delay,
+  // and nodes carry no persistent caption, so we render our own on hover.
+  const hovered = useMemo(
+    () => (hoverSeq === null ? undefined : model.nodes.find((n) => n.seq === hoverSeq)),
+    [model.nodes, hoverSeq],
   )
 
   if (model.nodes.length === 0) {
@@ -226,6 +251,7 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
             const x = xOf(n.index)
             const y = yOfLane(n.lane)
             const color = colorFor(n.kind)
+            const selected = n.seq === selectedSeq
             return (
               <g
                 key={n.seq}
@@ -233,8 +259,12 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
                 transform={`translate(${x}, ${y})`}
                 data-kind={n.kind}
                 data-seq={n.seq}
+                data-selected={selected || undefined}
                 onClick={() => setSelectedSeq(n.seq)}
+                onMouseEnter={() => setHoverSeq(n.seq)}
+                onMouseLeave={() => setHoverSeq(null)}
               >
+                {selected && <circle r={NODE_R + 5} className={styles.nodeSelectedRing} />}
                 {n.durationMs > 0 && n.kind === 'tool_calls' ? (
                   <rect
                     x={-NODE_R}
@@ -247,11 +277,21 @@ export function TrajectoryExplorer({ snapshot }: TrajectoryExplorerProps): React
                 ) : (
                   <circle r={NODE_R} fill={color} />
                 )}
-                <title>{n.title}</title>
               </g>
             )
           })}
         </svg>
+        {hovered && (
+          <div
+            className={styles.tooltip}
+            style={{
+              left: Math.min(Math.max(xOf(hovered.index), TOOLTIP_HALF + 4), width - TOOLTIP_HALF - 4),
+              top: yOfLane(hovered.lane) - NODE_R - 6,
+            }}
+          >
+            {hovered.title}
+          </div>
+        )}
       </div>
 
       <div className={styles.detail}>

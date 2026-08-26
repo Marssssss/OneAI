@@ -539,12 +539,14 @@ mod tests {
             tool_names: vec!["shell".to_string()],
             message_count: 1,
             request_messages: vec![oneai_core::Message::user("hi")],
+            request_body: serde_json::json!({"model": "gpt-4o", "messages": []}),
             response: oneai_core::InferenceResponse {
                 message: oneai_core::Message::assistant("hello"),
                 usage: oneai_core::TokenUsage::new(10, 4),
                 model: "gpt-4o".to_string(),
                 metadata: Default::default(),
             },
+            response_body: serde_json::json!({"model": "gpt-4o", "message": {}}),
             duration_ms: 555,
         };
         obs.on_inference(&snapshot);

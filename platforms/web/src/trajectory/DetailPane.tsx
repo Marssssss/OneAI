@@ -1,12 +1,14 @@
 // DetailPane — renders the drill-in details of a selected trajectory node,
 // keyed by the node's `TrajectoryDetail.kind` (issue #40: what a node shows
 // depends on its type — tool args/result only on tool nodes, context sections
-// only on context nodes, the API request/response on infer nodes, …).
+// only on context nodes, the raw API request/response body on infer nodes, …).
+// Every node leads with its title (the node name) before the type-specific body.
 
 import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
-import type { InferenceMessage, InferenceSnapshot } from '../rpc/types'
-import type { TrajectoryEntry } from '../store/trajectory'
+import type { InferenceSnapshot } from '../rpc/types'
+import type { TrajectoryDetail, TrajectoryEntry } from '../store/trajectory'
+import { JsonTree } from './JsonTree'
 import styles from './DetailPane.module.css'
 
 interface DetailPaneProps {
@@ -40,36 +42,9 @@ function formatMs(ms: number | undefined): string {
   return ms !== undefined && ms >= 0 ? `${ms}ms` : '—'
 }
 
-/** A compact, readable rendering of one inference message (request/response). */
-function renderMessage(m: InferenceMessage): string {
-  const body = m.content
-    .map((b) => {
-      switch (b.type) {
-        case 'text':
-        case 'thinking':
-          return b.text
-        case 'tool_call':
-          return `⟦tool_call ${b.name}⟧ ${b.args}`
-        case 'tool_result':
-          return `⟦tool_result⟧ ${b.content}`
-        case 'image':
-          return `⟦image ${b.mime_type}⟧`
-        case 'file':
-          return `⟦file ${b.uri}⟧`
-        default:
-          return ''
-      }
-    })
-    .filter((s) => s.length > 0)
-    .join('\n')
-  return body.length > 0 ? `[${m.role}] ${body}` : `[${m.role}]`
-}
-
-function renderMessages(msgs: InferenceMessage[]): string {
-  return msgs.map(renderMessage).join('\n\n')
-}
-
-/** Render the API request/response drill-in for an infer node. */
+/** Render the API request/response drill-in for an infer node. The request and
+ *  response are shown as their raw message bodies (the wire form the provider
+ *  received / returned), not a rendered transcript. */
 function InferenceDetail({ snap }: { snap: InferenceSnapshot }): ReactNode {
   const { t } = useLocale()
   const u = snap.response.usage
@@ -101,28 +76,21 @@ function InferenceDetail({ snap }: { snap: InferenceSnapshot }): ReactNode {
           <summary>
             <span className={styles.sectionLabel}>{t('trajectory.detail.apiRequest')}</span>
           </summary>
-          <Mono text={renderMessages(snap.request_messages)} />
+          <JsonTree value={snap.request_body ?? snap.request_messages} />
         </details>
         <details className={styles.section}>
           <summary>
             <span className={styles.sectionLabel}>{t('trajectory.detail.apiResponse')}</span>
           </summary>
-          <Mono text={renderMessage(snap.response.message)} />
+          <JsonTree value={snap.response_body ?? snap.response.message} />
         </details>
       </div>
     </>
   )
 }
 
-export function DetailPane({ entry }: DetailPaneProps): ReactNode {
-  const { t } = useLocale()
-  if (entry === null) return <div className={styles.empty}>{t('trajectory.noEvents')}</div>
-
-  const d = entry.detail
-  if (!d) {
-    return <div className={styles.plain}>{entry.title}</div>
-  }
-
+/** The type-specific body of a node (rendered below the node-title header). */
+function DetailBody({ d, t }: { d: TrajectoryDetail; t: (key: string) => string }): ReactNode {
   switch (d.kind) {
     case 'iteration':
       return (
@@ -229,13 +197,6 @@ export function DetailPane({ entry }: DetailPaneProps): ReactNode {
       )
     case 'working_state':
       return <Mono text={jsonify(d.event)} />
-    case 'context_accounting':
-      return (
-        <div>
-          <Row label={t('trajectory.detail.tokens')}>{d.accounting.total_tokens} (of {d.accounting.context_window_size})</Row>
-          <Mono text={jsonify(d.accounting)} />
-        </div>
-      )
     case 'tools_added':
       return (
         <div>
@@ -249,6 +210,19 @@ export function DetailPane({ entry }: DetailPaneProps): ReactNode {
     case 'error':
       return <Row label={t('trajectory.detail.err')}>{d.message}</Row>
     default:
-      return <div className={styles.plain}>{entry.title}</div>
+      return null
   }
+}
+
+export function DetailPane({ entry }: DetailPaneProps): ReactNode {
+  const { t } = useLocale()
+  if (entry === null) return <div className={styles.empty}>{t('trajectory.noEvents')}</div>
+
+  const d = entry.detail
+  return (
+    <div>
+      <div className={styles.title}>{entry.title}</div>
+      {d !== undefined && <DetailBody d={d} t={t} />}
+    </div>
+  )
 }

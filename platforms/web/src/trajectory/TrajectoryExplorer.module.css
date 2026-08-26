@@ -66,12 +66,28 @@
 }
 
 .canvas {
+  position: relative;
   flex: 0 0 auto;
   min-height: 60px;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
   background: var(--oneai-bg-subtle);
+}
+
+.tooltip {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  padding: 3px 8px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-sm);
+  font-size: 12px;
+  color: var(--oneai-text);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .canvas:active {
@@ -133,6 +149,18 @@
 .node:hover rect {
   stroke: var(--oneai-text);
   stroke-width: 1.5;
+}
+
+/* Selected state: a halo ring around the node so the user can see at a glance
+   which node the detail pane below belongs to (issue #40 follow-up). */
+.node[data-selected] {
+  opacity: 1;
+}
+
+.nodeSelectedRing {
+  fill: none;
+  stroke: var(--oneai-accent);
+  stroke-width: 2;
 }
 
 .detail {

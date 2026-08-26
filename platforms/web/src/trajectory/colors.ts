@@ -19,7 +19,6 @@ const KIND_TO_TOKEN: Record<string, string> = {
   plan_revision: 'var(--oneai-traj-plan)',
   paradigm_switch: 'var(--oneai-traj-paradigm)',
   context_assembled: 'var(--oneai-traj-context)',
-  context_accounting: 'var(--oneai-traj-context)',
   working_state: 'var(--oneai-traj-working)',
   token_usage: 'var(--oneai-traj-usage)',
   tools_added: 'var(--oneai-traj-tools)',
@@ -43,7 +42,7 @@ export interface LegendEntry {
 
 export const LEGEND: LegendEntry[] = [
   { color: 'var(--oneai-traj-iteration)', label: 'infer', kinds: ['iteration_start'] },
-  { color: 'var(--oneai-traj-context)', label: 'context', kinds: ['context_assembled', 'context_accounting'] },
+  { color: 'var(--oneai-traj-context)', label: 'context', kinds: ['context_assembled'] },
   { color: 'var(--oneai-traj-tool)', label: 'tool', kinds: ['tool_calls', 'tool_result'] },
   { color: 'var(--oneai-traj-approval)', label: 'approval', kinds: ['approval_request'] },
   { color: 'var(--oneai-traj-delegate)', label: 'delegate', kinds: ['delegate', 'delegate_progress', 'delegate_complete'] },

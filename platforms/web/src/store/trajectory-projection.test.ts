@@ -183,11 +183,13 @@ describe('trajectory data layer (issue #40)', () => {
         tool_names: ['shell'],
         message_count: 1,
         request_messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        request_body: { model: 'gpt-4o', messages: [{ role: 'user' }], tools: [{ name: 'shell' }] },
         response: {
           message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
           usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11, cache_read_tokens: 2, cache_creation_tokens: 0 },
           model: 'gpt-4o',
         },
+        response_body: { model: 'gpt-4o', message: { role: 'assistant' } },
         duration_ms: 99,
       },
     })
@@ -230,5 +232,41 @@ describe('trajectory data layer (issue #40)', () => {
     const snap = store.getSnapshot()
     expect(snap.trajectory.map((e) => e.kind)).toContain('interrupted')
     expect(snap.trajectory.map((e) => e.kind)).toContain('reflection')
+  })
+
+  it('dedupes duplicate tool_calls in replay (streaming + decision paths both persist)', async () => {
+    const events = [
+      JSON.stringify({ kind: 'turn_start', turn_id: 't1', task: 'hello', ts: 1000 }),
+      JSON.stringify({ kind: 'iteration_start', turn_id: 't1', iteration: 1, paradigm: 're_act', ts: 1001 }),
+      // Same call id persisted twice (mid-stream ToolCallComplete + decision
+      // path AgentDecision::ToolCalls), then one result.
+      JSON.stringify({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: { cmd: 'ls' } }], ts: 1002 }),
+      JSON.stringify({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: { cmd: 'ls' } }], ts: 1003 }),
+      JSON.stringify({ kind: 'tool_result', turn_id: 't1', call_id: 'c1', tool_name: 'shell', output: { success: true, content: 'ok' }, ts: 1004 }),
+      JSON.stringify({ kind: 'turn_complete', turn_id: 't1', ts: 1005 }),
+    ]
+    const rpc = fakeRpc({ call: () => Promise.resolve({ ok: true, events } as never) })
+    const store = new ProjectionStore(rpc)
+    store.consume({ kind: 'session_loaded', id: 's1', messages: [] })
+    await vi.runAllTimersAsync()
+    await Promise.resolve()
+
+    const tools = store.getSnapshot().trajectory.filter((e) => e.kind === 'tool_calls')
+    expect(tools).toHaveLength(1)
+    expect((tools[0].detail as Extract<TrajectoryDetail, { kind: 'tool' }>).result).toBe('ok')
+  })
+
+  it('suppresses no-op paradigm_switch nodes (re_act → re_act)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({ kind: 'paradigm_switch', turn_id: 't1', from: 're_act', to: 're_act' })
+    y({ kind: 'paradigm_switch', turn_id: 't1', from: 're_act', to: 'plan' })
+
+    const paradigms = store.getSnapshot().trajectory.filter((e) => e.kind === 'paradigm_switch')
+    expect(paradigms).toHaveLength(1)
+    const d = paradigms[0].detail as Extract<TrajectoryDetail, { kind: 'paradigm' }>
+    expect(d.from).toBe('re_act')
+    expect(d.to).toBe('plan')
   })
 })

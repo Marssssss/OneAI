@@ -3889,6 +3889,89 @@ async fn e2e_recovery_retry_re_executes_transient_failure() {
     );
 }
 
+#[tokio::test]
+async fn e2e_recovery_escalate_note_follows_tool_result() {
+    // Regression for the OpenAI 400 "assistant message with tool_calls must be
+    // followed by tool messages" error: a non-transient tool failure escalates
+    // (Escalate outcome) and previously injected an "Error escalated: …"
+    // SYSTEM note *between* the assistant `tool_calls` message and its tool
+    // result. OpenAI rejects that — the tool result must immediately follow the
+    // assistant message. The note must come AFTER the tool result.
+    let shell_tool = MockTool::shell_mock_with_error("Exit code: 1");
+    let _shell_log = shell_tool.call_log();
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("shell", serde_json::json!({"command": "boom"})),
+        ScriptedResponse::direct_answer("recovered with a different approach"),
+    ]);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
+        let mut map = HashMap::new();
+        map.insert(
+            "shell".to_string(),
+            Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>,
+        );
+        Arc::new(tokio::sync::RwLock::new(map))
+    };
+
+    // Attach a RecoveryManager so the non-transient error escalates (and would
+    // otherwise inject the "Error escalated" system note mid-turn).
+    let rm = Arc::new(RecoveryManager::new());
+
+    let agent_loop = AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    )
+    .with_recovery_manager(rm);
+
+    let result = agent_loop.run("Run the command").await.unwrap();
+
+    // The loop should still complete (the escalation note doesn't abort it).
+    assert!(result.completed);
+
+    // Every assistant message carrying tool_calls must be immediately followed
+    // by a Tool message (the OpenAI contract) — no System note interleaved.
+    let msgs = &result.conversation.messages;
+    for (i, m) in msgs.iter().enumerate() {
+        if m.role == oneai_core::Role::Assistant && !m.tool_calls().is_empty() {
+            assert!(
+                i + 1 < msgs.len(),
+                "assistant tool_calls must be followed by a tool result"
+            );
+            assert_eq!(
+                msgs[i + 1].role,
+                oneai_core::Role::Tool,
+                "tool result must immediately follow assistant tool_calls"
+            );
+        }
+    }
+
+    // The escalation note itself is still present (deferred, not dropped).
+    assert!(
+        msgs.iter().any(|m| {
+            m.role == oneai_core::Role::System && m.text_content().contains("Error escalated")
+        }),
+        "the escalation note should still be injected (after the tool result)"
+    );
+}
+
 // ─── gap-analysis #4: OTEL metrics actually recorded during a run ────────────
 //
 // `OtelMetricsProvider` existed as bare AtomicU64 fields but was never

@@ -82,7 +82,6 @@ export type TrajectoryDetail =
   | { kind: 'paradigm'; from: string; to: string }
   | { kind: 'approval'; requestId: string; request: InteractionRequest }
   | { kind: 'working_state'; event: TaskEventPayload }
-  | { kind: 'context_accounting'; accounting: ContextAccounting }
   | { kind: 'tools_added'; names: string[] }
   | { kind: 'interrupted'; reason: string; point: string }
   | { kind: 'reflection'; summary: string }

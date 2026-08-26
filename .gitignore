@@ -41,3 +41,7 @@ platforms/npm/bin/oneai-*
 # npm shell: bundled web dist (built at `npm publish` via prepublishOnly —
 # platform-independent JS, ships inside the tarball but stays out of git)
 platforms/npm/web-dist/
+
+# Node dependencies (never track; platforms/web has its own .gitignore too,
+# this catches stray root-level installs)
+node_modules/
