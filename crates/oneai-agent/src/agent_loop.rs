@@ -5719,72 +5719,39 @@ impl AgentLoop {
     ///
     /// This addresses the "范式切换语义空洞" gap. Previously, `run_paradigm()`
     /// just returned a formatted string like "Plan paradigm activated" — no
-    /// actual behavior change. Now, paradigm switching does three things:
+    /// actual behavior change. Now, paradigm switching does two things:
     ///
-    /// 1. **Replaces the system prompt** in the conversation — removes the
-    ///    old system message and adds a paradigm-specific one.
-    /// 2. **Stores ParadigmConfig** in LoopState — `build_tool_definitions()`
+    /// 1. **Stores ParadigmConfig** in LoopState — `build_tool_definitions()`
     ///    uses the config's tool_filter to only send relevant tools to the model.
-    /// 3. **Injects a decision hint** — a brief system message telling the model
-    ///    what kind of decisions to make in this paradigm.
+    /// 2. **Updates `active_paradigm`** — the per-turn mode line (injected
+    ///    ephemerally into the dynamic tail by `inject_pinned_blocks`) reflects
+    ///    the new paradigm on the next iteration.
+    ///
+    /// The paradigm mode line is deliberately NOT written to the durable log:
+    /// doing so placed it in the request prefix (before the history), so a
+    /// model-driven `switch_paradigm` rewrote the cached prefix and invalidated
+    /// everything after it. Recording only the state keeps the durable log — and
+    /// hence the provider's prompt-prefix cache — untouched by a switch.
     ///
     /// Inspired by Aider's Architect/Editor dual-model pattern where each
     /// "role" has its own prompt and tool set. OneAI extends this to 4 paradigms.
     fn apply_paradigm_switch(&self, paradigm: ParadigmKind, state: &mut LoopState) -> String {
         let config = ParadigmConfig::for_paradigm(paradigm);
 
-        // Cache-stable system prompt + paradigm suffixation (Phase 1.1).
-        //
-        // The durable system layer has two parts:
-        //   1. **Stable prefix** — the first system message, built once at
-        //      session start as `build_system_prompt() + runtime_context_block()`
-        //      (agent identity, `{{TOOL_PREFERENCE_RULES}}`, current date,
-        //      web-search nudge). Byte-stable for the session so the
-        //      provider's prompt-prefix cache survives across iterations and
-        //      paradigm switches — switching paradigm must NOT rewrite it.
-        //   2. **Paradigm tail** — paradigm-specific system messages added by
-        //      this method (the paradigm prompt + decision hint), tagged with
-        //      metadata[`PARADIGM_TAIL_KEY`] so they can be removed surgically.
-        //
-        // Previously this method did `retain(|m| m.role != Role::System)`,
-        // nuking the ENTIRE durable system layer on every switch. That
-        // (a) invalidated the prompt-prefix cache each switch — cost doubled
-        // on the very next iteration — and (b) dropped `runtime_context_block`
-        // (the date + web-search guidance) for the rest of the session, a
-        // correctness bug. Now we remove only the tagged paradigm tail,
-        // preserving the stable prefix and any other legitimately-injected
-        // system messages (feedback retry prompts, etc.).
+        // Strip any lingering paradigm-tail messages from sessions that predate
+        // the ephemeral model (migration) — a no-op on fresh sessions.
         const PARADIGM_TAIL_KEY: &str = "paradigm_tail";
         state
             .conversation
             .messages
             .retain(|m| !(m.role == Role::System && m.metadata.contains_key(PARADIGM_TAIL_KEY)));
 
-        // Append the new (tagged) paradigm tail.
-        let mut prompt_msg = Message::system(&config.system_prompt);
-        prompt_msg
-            .metadata
-            .insert(PARADIGM_TAIL_KEY.to_string(), "1".to_string());
-        state.conversation.add_message(prompt_msg);
-
-        // Decision hint — also a tagged tail message so a later switch
-        // replaces it along with the prompt.
-        if !config.decision_hint.is_empty() {
-            let mut hint_msg =
-                Message::system(format!("[Paradigm switch]: {}", config.decision_hint));
-            hint_msg
-                .metadata
-                .insert(PARADIGM_TAIL_KEY.to_string(), "1".to_string());
-            state.conversation.add_message(hint_msg);
-        }
-
-        // Store ParadigmConfig for tool filtering
+        // Store ParadigmConfig for tool filtering + the per-turn mode line.
         state.active_paradigm = paradigm;
         state.active_paradigm_config = Some(config.clone());
 
-        // Return a concise summary for the loop
         format!(
-            "{} paradigm activated — paradigm tail swapped, tools filtered to: [{}]",
+            "{} paradigm activated — tools filtered to: [{}]",
             paradigm_name(&paradigm),
             config.tool_filter.join(", ")
         )
@@ -6726,14 +6693,23 @@ impl AgentLoop {
         Some(lines.join("\n"))
     }
 
-    /// Inject the ephemeral pinned blocks onto a conversation clone — the
-    /// original-task anchor (Q2), the live plan/progress (Q1), and the skill
-    /// menu / active skill (progressive disclosure). These are re-injected
-    /// every turn and are NOT written to the durable `state.conversation`, so
-    /// they survive compression by re-injection and don't accumulate.
+    /// Inject the ephemeral pinned blocks onto a conversation clone, split by
+    /// cache stability into a **prefix** and a **tail**:
     ///
-    /// **Data source**: when `state.working_state` is bound (a
-    /// `WorkingStateStore` is configured and a task is active), the pinned
+    /// - **Prefix** (prepended, before the history — the cache-friendly front):
+    ///   the original-task anchor (Q2) and the skill menu. Byte-stable across
+    ///   iterations (or changing only on rare user action), so they belong in
+    ///   the prompt-prefix cache region.
+    /// - **Tail** (appended, after the history — the dynamic region): the
+    ///   paradigm mode line, live plan/progress (Q1), decisions, blockers, the
+    ///   active skill, self-extension notes, and background-task status. These
+    ///   change per-turn or as the task evolves, so they must not sit in the
+    ///   cached prefix.
+    ///
+    /// Everything is re-injected every turn and NOT written to the durable
+    /// `state.conversation`, so it survives compression by re-injection and
+    /// doesn't accumulate. **Data source**: when `state.working_state` is bound
+    /// (a `WorkingStateStore` is configured and a task is active), the pinned
     /// blocks read the in-memory working-state projection — the cross-session
     /// source of truth held in `LoopState`, zero IO per turn. The durable
     /// source is the event log, not the conversation transcript. When no
@@ -6742,35 +6718,58 @@ impl AgentLoop {
     /// The `plan_state` is also mirrored to `conversation.metadata["plan_state"]`
     /// (persisted + copied by every compressor) for legacy Q3 reseed on reload.
     async fn inject_pinned_blocks(&self, conv: &mut Conversation, state: &LoopState) {
+        let mut prefix: Vec<Message> = Vec::new();
+        let mut tail: Vec<Message> = Vec::new();
+
+        // ── Prefix: stable, cache-friendly ──────────────────────────────
+        // Task anchor — the original goal, never changes.
         if let Some(ws) = &state.working_state {
-            conv.add_message(Message::system(
+            prefix.push(Message::system(
                 crate::context_assembler::task_anchor_block_from_working_state(ws),
             ));
-            conv.add_message(Message::system(
-                crate::context_assembler::plan_progress_block_from_working_state(ws),
-            ));
-            let decisions = crate::context_assembler::decisions_block(ws);
-            if !decisions.is_empty() {
-                conv.add_message(Message::system(decisions));
-            }
-            let blockers = crate::context_assembler::blockers_block(ws);
-            if !blockers.is_empty() {
-                conv.add_message(Message::system(blockers));
-            }
         } else {
             // Legacy path — no WorkingStateStore configured (or no task bound).
-            conv.add_message(Message::system(
+            prefix.push(Message::system(
                 crate::context_assembler::task_anchor_block(
                     &state.original_task,
                     &state.conversation.metadata,
                 ),
             ));
-            if let Some(plan) = &state.plan_state {
-                conv.add_message(Message::system(
-                    crate::context_assembler::plan_progress_block(&state.original_task, plan),
-                ));
-            }
         }
+
+        // ── Tail: per-turn / mutable ────────────────────────────────────
+        // Paradigm mode line — changes when the model switches paradigm. Use the
+        // active config when set, else the default config for the current kind
+        // (so a never-switched ReAct loop still sees its mode).
+        let paradigm_config = state
+            .active_paradigm_config
+            .clone()
+            .unwrap_or_else(|| ParadigmConfig::for_paradigm(state.active_paradigm));
+        if !paradigm_config.decision_hint.is_empty() {
+            tail.push(Message::system(format!(
+                "[Paradigm switch]: {}",
+                paradigm_config.decision_hint
+            )));
+        }
+        // Plan/progress + decisions + blockers — evolve as the task progresses.
+        if let Some(ws) = &state.working_state {
+            tail.push(Message::system(
+                crate::context_assembler::plan_progress_block_from_working_state(ws),
+            ));
+            let decisions = crate::context_assembler::decisions_block(ws);
+            if !decisions.is_empty() {
+                tail.push(Message::system(decisions));
+            }
+            let blockers = crate::context_assembler::blockers_block(ws);
+            if !blockers.is_empty() {
+                tail.push(Message::system(blockers));
+            }
+        } else if let Some(plan) = &state.plan_state {
+            tail.push(Message::system(
+                crate::context_assembler::plan_progress_block(&state.original_task, plan),
+            ));
+        }
+        // Skills: the menu is stable (prefix); the active skill is per-task (tail).
         if self.config.inject_skills {
             // Defense-in-depth (issue #38): the menu instructs the model to
             // "call the `skill` tool" — only inject it when that tool is
@@ -6780,7 +6779,7 @@ impl AgentLoop {
             // built; this gate protects hand-assembled AgentLoops.)
             if self.tools.read().await.contains_key("skill") {
                 if let Some(menu) = self.build_skill_menu().await {
-                    conv.add_message(Message::system(menu));
+                    prefix.push(Message::system(menu));
                 }
             }
             if let Some(name) = &self.active_skill {
@@ -6789,7 +6788,7 @@ impl AgentLoop {
                         "# Active skill: {}\n{}\n\n(Follow these instructions for this task.)",
                         skill.name, skill.prompt_template
                     );
-                    conv.add_message(Message::system(inject));
+                    tail.push(Message::system(inject));
                 } else {
                     tracing::warn!("Active skill '{}' not in registry; clearing", name);
                 }
@@ -6807,7 +6806,7 @@ impl AgentLoop {
                     .map(|n| format!("- `{n}`"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                conv.add_message(Message::system(format!(
+                tail.push(Message::system(format!(
                     "# Newly available tools\n\
                      The following tools became available after the last step:\n\
                      {list}\n\n\
@@ -6844,7 +6843,7 @@ impl AgentLoop {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                conv.add_message(Message::system(format!(
+                tail.push(Message::system(format!(
                     "[Background tasks] (live)\n{body}\n\
                      These sub-agents are running detached in PARALLEL with you. You WILL be \
                      auto-resumed (a new turn) when each finishes — its result will arrive as a \
@@ -6854,6 +6853,15 @@ impl AgentLoop {
                      nothing else to do, end your response and the results will wake you."
                 )));
             }
+        }
+
+        // ── Inject: prefix prepended (reversed so the stable order survives
+        //    the index-0 inserts), tail appended ─────────────────────────
+        for msg in prefix.into_iter().rev() {
+            conv.messages.insert(0, msg);
+        }
+        for msg in tail {
+            conv.add_message(msg);
         }
     }
 
@@ -8378,7 +8386,10 @@ mod dynamic_tool_prompt_tests {
         assert_eq!(activated, Some(ParadigmKind::Plan));
         assert_eq!(state.active_paradigm, ParadigmKind::Plan);
         assert!(state.active_paradigm_config.is_some());
-        assert!(state.conversation.messages.iter().any(
+        // The paradigm mode line is ephemeral (injected per-turn into the tail),
+        // so a switch must NOT write a durable paradigm message — the durable log
+        // (and hence the prompt-prefix cache) is untouched by a switch.
+        assert!(!state.conversation.messages.iter().any(
             |m| m.role == oneai_core::Role::System && m.metadata.contains_key("paradigm_tail")
         ));
     }

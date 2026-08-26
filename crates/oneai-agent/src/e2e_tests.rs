@@ -672,15 +672,18 @@ async fn e2e_scenario_4_paradigm_switch() {
         .count();
     assert_eq!(paradigm_switches, 1);
 
-    // Verify conversation contains Plan paradigm system prompt
+    // The paradigm mode line is ephemeral (injected per-turn into the request
+    // tail), so the durable conversation must NOT carry the Plan paradigm
+    // prompt — only the state (`active_paradigm`, asserted above) records the
+    // switch, keeping the durable log byte-stable for the prompt-prefix cache.
     let has_plan_prompt = result
         .conversation
         .messages
         .iter()
         .any(|m| m.role == Role::System && m.text_content().contains("planning agent"));
     assert!(
-        has_plan_prompt,
-        "Conversation should contain Plan paradigm system prompt"
+        !has_plan_prompt,
+        "paradigm prompt must not be written to the durable log"
     );
 }
 
@@ -798,28 +801,31 @@ async fn e2e_scenario_4c_paradigm_switch_preserves_stable_prefix() {
         .map(|m| m.text_content())
         .collect();
 
-    // Stable prefix survives the switch — runtime_context_block is intact.
-    assert!(
-        system_texts
-            .iter()
-            .any(|t| t.contains("Current date and time")),
-        "runtime_context block (stable prefix) was dropped on paradigm switch: {system_texts:?}"
-    );
+    // The stable prefix survives the switch — the web-search guidance (the
+    // runtime_context_block) and the base identity prompt are intact.
     assert!(
         system_texts.iter().any(|t| t.contains("web_search")),
         "web-search guidance (stable prefix) was dropped on paradigm switch: {system_texts:?}"
     );
-    // The base agent identity prompt also survives.
     assert!(
         system_texts
             .iter()
             .any(|t| t.contains("intelligent AI agent")),
         "stable identity prefix was dropped on paradigm switch: {system_texts:?}"
     );
-    // And the paradigm tail is present alongside it.
+    // The runtime block no longer embeds a timestamp (date is date-only, via
+    // DateSource in the tail) — assert it's gone so the prefix stays byte-stable.
     assert!(
-        system_texts.iter().any(|t| t.contains("planning agent")),
-        "paradigm tail missing after switch: {system_texts:?}"
+        !system_texts
+            .iter()
+            .any(|t| t.contains("Current date and time")),
+        "runtime context must not carry a timestamp: {system_texts:?}"
+    );
+    // The paradigm mode line is ephemeral (tail-injected per turn), so the
+    // durable log must not carry the Plan paradigm prompt.
+    assert!(
+        !system_texts.iter().any(|t| t.contains("planning agent")),
+        "paradigm prompt must not be written to the durable log: {system_texts:?}"
     );
 }
 

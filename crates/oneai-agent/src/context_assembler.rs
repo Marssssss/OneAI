@@ -29,7 +29,7 @@ use std::fmt::Write as _;
 use oneai_core::error::Result;
 use oneai_core::Conversation;
 
-use oneai_domain::context_source::ContextSource;
+use oneai_domain::context_source::{ContextPosition, ContextSource};
 
 // ─── ContextAssembler ───────────────────────────────────────────────────────
 
@@ -163,9 +163,15 @@ impl ContextAssembler {
 
     /// Inject context-source messages into the conversation, filtered by `predicate`.
     ///
-    /// Sources are injected in ascending `priority()` order. The predicate
-    /// receives the source's `RefreshPolicy` and key, and decides whether the
-    /// source's cached content is injected on this epoch.
+    /// Sources are injected in ascending `priority()` order, split by
+    /// [`ContextPosition`] into two regions:
+    /// - `Prefix` sources are prepended (before the conversation history) — the
+    ///   byte-stable, cache-friendly front of the request.
+    /// - `Tail` sources are appended (after the history) — the per-turn dynamic
+    ///   region whose churn must not invalidate the cached prefix.
+    ///
+    /// The predicate receives the source's `RefreshPolicy` and key, and decides
+    /// whether the source's cached content is injected on this epoch.
     fn inject_sources<F>(&self, conversation: &mut Conversation, predicate: F)
     where
         F: Fn(&oneai_domain::context_source::RefreshPolicy, &str) -> bool,
@@ -176,6 +182,9 @@ impl ContextAssembler {
         let mut sources: Vec<&Arc<dyn ContextSource>> = self.context_sources.iter().collect();
         sources.sort_by_key(|s| s.priority());
 
+        let mut prefix: Vec<oneai_core::Message> = Vec::new();
+        let mut tail: Vec<oneai_core::Message> = Vec::new();
+
         for source in sources {
             let policy = source.refresh_policy();
             if !predicate(&policy, source.key()) {
@@ -183,10 +192,29 @@ impl ContextAssembler {
             }
             if let Some(content) = self.cached_context.get(source.key()) {
                 if !content.is_empty() {
-                    let context_msg = format!("[Context: {}] {}", source.key(), content);
-                    conversation.add_message(oneai_core::Message::system(context_msg));
+                    let context_msg = oneai_core::Message::system(format!(
+                        "[Context: {}] {}",
+                        source.key(),
+                        content
+                    ));
+                    match source.position() {
+                        ContextPosition::Prefix => prefix.push(context_msg),
+                        ContextPosition::Tail => tail.push(context_msg),
+                        // `ContextPosition` is #[non_exhaustive] — unknown
+                        // positions default to the stable, cache-friendly prefix.
+                        _ => prefix.push(context_msg),
+                    }
                 }
             }
+        }
+
+        // Prepend prefix sources (iterated in reverse so the ascending-priority
+        // order survives the index-0 inserts), then append the tail sources.
+        for msg in prefix.into_iter().rev() {
+            conversation.messages.insert(0, msg);
+        }
+        for msg in tail {
+            conversation.add_message(msg);
         }
     }
 
@@ -518,29 +546,25 @@ pub fn blockers_block(ws: &oneai_core::WorkingState) -> String {
 
 /// Build a runtime context block appended to the system prompt each session.
 ///
-/// This guarantees the model always knows "today" (so it can reason about
-/// recency) and is explicitly told to reach for `web_search` / `web_fetch`
-/// when a question is time-sensitive, instead of answering from potentially
-/// stale training memory.
+/// This is the **time-sensitive search guidance** only — it tells the model to
+/// reach for `web_search` / `web_fetch` when a question is time-sensitive
+/// instead of answering from potentially stale training memory.
 ///
-/// We append this to the system prompt directly (rather than relying solely on
-/// the `DateSource` context source) because: (1) the system prompt survives
-/// context compression better than an ad-hoc system message, and (2) it also
-/// carries the time-sensitive search guidance, which `DateSource` does not.
+/// The current date itself is deliberately NOT embedded here (it was
+/// previously, as a per-second `Current date and time` line). That timestamp
+/// churned the byte-stable base prompt every session and duplicated the
+/// `DateSource` context source (which is now date-only and injected in the
+/// dynamic tail each turn). The base prompt must stay byte-stable across
+/// iterations so the provider's prompt-prefix cache can hold it.
 pub fn runtime_context_block() -> String {
-    let now = chrono::Local::now();
-    format!(
-        "\n\n**Current date and time**: {} ({})\n\
-         \n**Time-sensitive questions (IMPORTANT)**: If the user asks about recent \
-         events, news, latest releases or library versions, current prices, live data, \
-         or any information that may have changed since your training, do NOT answer from \
-         memory — your knowledge has a cutoff. Call `web_search` first to discover current \
-         sources, then `web_fetch` to read the most promising results, and answer based on \
-         what you find. Only answer from your own knowledge when the topic is clearly stable \
-         and well within your training cutoff.",
-        now.format("%Y-%m-%d %H:%M:%S %:z"),
-        now.format("%A"),
-    )
+    "\n\n**Time-sensitive questions (IMPORTANT)**: If the user asks about recent \
+     events, news, latest releases or library versions, current prices, live data, \
+     or any information that may have changed since your training, do NOT answer from \
+     memory — your knowledge has a cutoff. Call `web_search` first to discover current \
+     sources, then `web_fetch` to read the most promising results, and answer based on \
+     what you find. Only answer from your own knowledge when the topic is clearly stable \
+     and well within your training cutoff."
+        .to_string()
 }
 
 /// Build the memory-guidance block appended to the system prompt when the
@@ -728,12 +752,17 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_block_has_date_and_search_guidance() {
+    fn runtime_context_block_has_search_guidance_and_no_timestamp() {
         let block = runtime_context_block();
-        assert!(block.contains("Current date and time"), "block: {block}");
         assert!(
             block.contains("web_search"),
             "block should nudge web_search: {block}"
+        );
+        // The date/time must NOT be embedded in the base prompt — it churns the
+        // byte-stable prefix and duplicates DateSource (which owns "today" now).
+        assert!(
+            !block.contains("Current date and time"),
+            "runtime block must not carry a timestamp: {block}"
         );
     }
 

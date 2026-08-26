@@ -57,6 +57,30 @@ pub enum RefreshPolicy {
     Periodic(Duration),
 }
 
+// ─── ContextPosition ────────────────────────────────────────────────────────────
+
+/// Where a source's content is injected in the assembled request.
+///
+/// The assembler splits sources into two regions so the provider's
+/// prompt-prefix cache can hold the byte-stable front while per-turn churn is
+/// confined to a small trailing region:
+/// - [`ContextPosition::Prefix`] — injected before the conversation history
+///   (the cache-friendly region). Reserved for sources whose bytes are stable
+///   across iterations, or that change only as a rare consequence of the
+///   agent's own mutations (project file tree / repo map / git status).
+/// - [`ContextPosition::Tail`] — injected after the history (the non-cached
+///   region). Sources whose bytes change every turn (the current date) or that
+///   the agent can mutate mid-session (the working directory) must report
+///   `Tail`, or a single changing source would invalidate the whole prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ContextPosition {
+    /// Stable source — injected into the cache-friendly prefix region.
+    Prefix,
+    /// Dynamic source — injected into the trailing (non-cached) region.
+    Tail,
+}
+
 // ─── ContextSource Trait ───────────────────────────────────────────────────────
 
 /// Trait for domain-specific context sources.
@@ -66,6 +90,7 @@ pub enum RefreshPolicy {
 /// - What information to provide (via `load()`)
 /// - When to refresh (via `refresh_policy()`)
 /// - Where in the injection order (via `priority()`)
+/// - Whether it sits in the cache-friendly prefix or the dynamic tail (via `position()`)
 ///
 /// Implementations may hold internal state (previous snapshots for diffing,
 /// cached data) using internal `RwLock<Option<...>>` or similar mechanisms.
@@ -105,6 +130,17 @@ pub trait ContextSource: Send + Sync {
     /// Sources with the same priority are injected in registration order.
     fn priority(&self) -> u32 {
         100 // Default priority — moderate
+    }
+
+    /// Which region of the assembled request this source's content lands in.
+    ///
+    /// Defaults to [`ContextPosition::Prefix`] (stable, cache-friendly). Sources
+    /// whose content changes every turn — or that the agent itself can mutate
+    /// mid-session — must override this to return [`ContextPosition::Tail`] so
+    /// their churn does not invalidate the cached prefix. See
+    /// [`ContextPosition`] for the full contract.
+    fn position(&self) -> ContextPosition {
+        ContextPosition::Prefix
     }
 
     /// Whether this source reads from a project directory (vs. ambient data

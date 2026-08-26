@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use oneai_core::error::Result;
 use tokio::sync::RwLock;
 
-use crate::context_source::{ContextSource, RefreshPolicy};
+use crate::context_source::{ContextPosition, ContextSource, RefreshPolicy};
 
 // ─── GitStatusSource ───────────────────────────────────────────────────────────
 
@@ -405,10 +405,13 @@ impl ContextSource for DateSource {
 
     async fn load(&self) -> Result<String> {
         let now = chrono::Local::now();
+        // Date only — the per-second time is pure prompt-prefix-cache poison
+        // (it changes every iteration) and carries no reasoning value; "today"
+        // is what matters for recency judgments. The frozen runtime-context
+        // timestamp was removed for the same reason.
         Ok(format!(
-            "Current Date: {}\nCurrent Time: {}\nDay of Week: {}",
+            "Current Date: {}\nDay of Week: {}",
             now.format("%Y-%m-%d"),
-            now.format("%H:%M:%S"),
             now.format("%A")
         ))
     }
@@ -419,6 +422,12 @@ impl ContextSource for DateSource {
 
     fn priority(&self) -> u32 {
         5
+    }
+
+    fn position(&self) -> ContextPosition {
+        // The date changes once per day — far too often to sit in the cached
+        // prefix. Keep it in the tail so it can't invalidate the stable front.
+        ContextPosition::Tail
     }
 }
 
@@ -487,6 +496,14 @@ impl ContextSource for EnvironmentInfoSource {
 
     fn priority(&self) -> u32 {
         15
+    }
+
+    fn position(&self) -> ContextPosition {
+        // `Working Directory` is the active workspace, which the model can
+        // change mid-session (shell `cd` / `switch_project`). It's a tiny
+        // block, so keep the whole source in the tail rather than splitting
+        // the stable platform/arch/shell lines out.
+        ContextPosition::Tail
     }
 }
 
@@ -838,10 +855,14 @@ mod tests {
         let source = DateSource::new();
         assert_eq!(source.key(), "date");
         assert_eq!(source.priority(), 5);
+        // Date-only, in the dynamic tail — no per-second timestamp to poison
+        // the prompt-prefix cache.
+        assert_eq!(source.position(), ContextPosition::Tail);
 
         let content = source.load().await.unwrap();
         assert!(content.contains("Current Date:"));
-        assert!(content.contains("Current Time:"));
+        assert!(content.contains("Day of Week:"));
+        assert!(!content.contains("Current Time:"), "content: {content}");
     }
 
     #[tokio::test]
