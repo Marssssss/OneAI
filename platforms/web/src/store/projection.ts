@@ -11,6 +11,7 @@ import type {
   BusUsageRecord,
   ConfigUpdateParams,
   ContentBlock,
+  ContextSection,
   EngineYield,
   FeedbackEntry,
   FeedbackKind,
@@ -27,11 +28,14 @@ import type {
   ToolOutput,
   TurnRunParams,
 } from '../rpc/types'
+import { contextKeyString } from '../rpc/types'
 import { StreamCoalescer } from '../stream/coalescer'
 import { compileGroupScenario, firstUserMessage } from '../scenario/compile'
 import type {
   BackgroundTaskNode,
+  ResolvedContextSection,
   SubagentNode,
+  TrajectoryDetail,
   TrajectoryEntry,
   UsageSnapshot,
   WorkingProjection,
@@ -324,6 +328,20 @@ export class ProjectionStore {
    *  per-snapshot. */
   private metricsCache = new Map<string, SessionMetrics>()
 
+  // ── Issue #40 trajectory buffering / replay ────────────────────────────────
+  /** The current iteration's accumulated reasoning text, flushed into that
+   *  iteration's trajectory entry at the next boundary event. */
+  private iterBuffer: {
+    turnId: string
+    entrySeq: number
+    inference: string
+    thinking: string
+  } | null = null
+  /** Per-key resolved context content (context assembly hash-dedup). Keyed by
+   *  `contextKeyString(key)`; filled when a section carries `content`, read
+   *  back when it arrives deduped (`content` absent). */
+  private ctxCache = new Map<string, string>()
+
   constructor(rpc: OneAiRpcClient) {
     this.rpc = rpc
     this.coalescer = new StreamCoalescer(() => this.emit())
@@ -493,11 +511,11 @@ export class ProjectionStore {
       case 'task':
         w.goal = ev.goal
         w.intent = ev.intent ?? null
-        this.pushTrajectory(curTurn, 'working_state', `goal: ${ev.goal}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `goal: ${ev.goal}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'step_added':
         w.steps = [...w.steps, ev.step]
-        this.pushTrajectory(curTurn, 'working_state', `step added: ${ev.step.description}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `step added: ${ev.step.description}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'step_status_changed': {
         w.steps = w.steps.map((s) =>
@@ -509,26 +527,26 @@ export class ProjectionStore {
               }
             : s,
         )
-        this.pushTrajectory(curTurn, 'working_state', `step ${ev.step_id} → ${ev.status}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `step ${ev.step_id} → ${ev.status}`, { detail: { kind: 'working_state', event: ev } })
         break
       }
       case 'decision_made':
         w.decisions = [...w.decisions, ev.decision]
-        this.pushTrajectory(curTurn, 'working_state', `decision: ${ev.decision.chosen}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `decision: ${ev.decision.chosen}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'blocker_raised':
         w.blockers = [...w.blockers, ev.blocker]
-        this.pushTrajectory(curTurn, 'working_state', `blocker: ${ev.blocker.description}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `blocker: ${ev.blocker.description}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'blocker_resolved':
         w.blockers = w.blockers.map((b) =>
           b.id === ev.blocker_id ? { ...b, status: 'resolved', resolution: ev.resolution } : b,
         )
-        this.pushTrajectory(curTurn, 'working_state', `blocker resolved: ${ev.blocker_id}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `blocker resolved: ${ev.blocker_id}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'note_added':
         w.notes = [...w.notes, ev.note]
-        this.pushTrajectory(curTurn, 'working_state', `note: ${ev.note.content.slice(0, 60)}`, { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', `note: ${ev.note.content.slice(0, 60)}`, { detail: { kind: 'working_state', event: ev } })
         break
       case 'snapshot': {
         // A materialized checkpoint — replace the working projection wholesale.
@@ -541,12 +559,12 @@ export class ProjectionStore {
           blockers: s.blockers ?? [],
           notes: s.notes ?? [],
         }
-        this.pushTrajectory(curTurn, 'working_state', 'working-state snapshot', { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', 'working-state snapshot', { detail: { kind: 'working_state', event: ev } })
         break
       }
       case 'task_status':
       case 'reflection_fired':
-        this.pushTrajectory(curTurn, 'working_state', ev.kind === 'reflection_fired' ? 'reflection fired' : 'task status', { detail: ev })
+        this.pushTrajectory(curTurn, 'working_state', ev.kind === 'reflection_fired' ? 'reflection fired' : 'task status', { detail: { kind: 'working_state', event: ev } })
         break
       default:
         // Unknown TaskEventPayload kind — ignore (non_exhaustive contract).
@@ -591,6 +609,315 @@ export class ProjectionStore {
     this.state.firstTokenPerf.clear()
     this.state.turnUsage.clear()
     this.state.latestUsage = null
+    this.iterBuffer = null
+    this.ctxCache.clear()
+  }
+
+  // ── Issue #40 trajectory helpers ───────────────────────────────────────────
+
+  /** Wall-clock timestamp for a yield: the engine's persisted `ts` when present
+   *  (a replayed historical event), else now (live arrival time). */
+  private eventTs(y: EngineYield): number {
+    const t = (y as { ts?: unknown }).ts
+    return typeof t === 'number' ? t : Date.now()
+  }
+
+  /** Patch one ledger entry by seq (immutable replacement). */
+  private patchTrajectory(seq: number, patch: Partial<TrajectoryEntry>): void {
+    this.state.trajectory = this.state.trajectory.map((e) =>
+      e.seq === seq ? { ...e, ...patch } : e,
+    )
+  }
+
+  /** Flush the accumulated reasoning text into its iteration entry. */
+  private finalizeIterBuffer(): void {
+    const b = this.iterBuffer
+    if (b === null) return
+    this.iterBuffer = null
+    const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+    if (!entry) return
+    const d = entry.detail
+    if (d && d.kind === 'iteration') {
+      this.patchTrajectory(b.entrySeq, {
+        detail: { ...d, inference: b.inference, thinking: b.thinking },
+      })
+    }
+  }
+
+  /** Open a fresh iteration entry and point the reasoning buffer at it. */
+  private startIterationBuffer(turnId: string, iteration: number, paradigm: string, at: number): void {
+    this.finalizeIterBuffer()
+    const seq = nextTrajectorySeq()
+    this.state.trajectory = [
+      ...this.state.trajectory,
+      {
+        seq,
+        turnId,
+        at,
+        ms: this.elapsedSinceTurnStart(turnId),
+        kind: 'iteration_start',
+        title: `iteration ${iteration} · ${paradigm}`,
+        iter: iteration,
+        paradigm,
+        detail: { kind: 'iteration', iteration, paradigm, inference: '', thinking: '' },
+      },
+    ]
+    this.iterBuffer = { turnId, entrySeq: seq, inference: '', thinking: '' }
+  }
+
+  /** Backfill a matching tool node in the ledger with its result + duration. */
+  private backfillToolResult(
+    turnId: string,
+    callId: string,
+    toolName: string,
+    output: { success: boolean; content: string; error?: string },
+    at: number,
+  ): void {
+    let idx = -1
+    for (let i = this.state.trajectory.length - 1; i >= 0; i--) {
+      const e = this.state.trajectory[i]
+      if (e.detail && e.detail.kind === 'tool' && e.detail.callId === callId && e.detail.result === undefined) {
+        idx = i
+        break
+      }
+    }
+    if (idx >= 0) {
+      const e = this.state.trajectory[idx]
+      const d = e.detail as Extract<TrajectoryDetail, { kind: 'tool' }>
+      this.patchTrajectory(e.seq, {
+        detail: {
+          ...d,
+          result: output.success ? output.content : (output.error ?? output.content),
+          error: output.error,
+          ok: output.success,
+          durationMs: at - e.at,
+        },
+      })
+    } else {
+      this.pushTrajectory(turnId, 'tool_result', `tool_result: ${toolName}`, {
+        at,
+        detail: {
+          kind: 'tool',
+          callId,
+          name: toolName,
+          args: undefined,
+          result: output.success ? output.content : (output.error ?? output.content),
+          error: output.error,
+          ok: output.success,
+        },
+      })
+    }
+  }
+
+  /** Resolve a context assembly snapshot against the cache; update the cache
+   *  for sections that carry content. Returns the resolved sections. */
+  private resolveContextSections(sections: ContextSection[]): ResolvedContextSection[] {
+    const out: ResolvedContextSection[] = []
+    for (const s of sections) {
+      const key = contextKeyString(s.key)
+      if (s.content !== undefined) this.ctxCache.set(key, s.content)
+      const content = s.content !== undefined ? s.content : (this.ctxCache.get(key) ?? '')
+      out.push({ key: s.key, label: s.label, tokens: s.tokens, content })
+    }
+    return out
+  }
+
+  /** Replay a historical session's trajectory. Events are fed through the
+   *  trajectory-only path (no chat nodes — those come from session_loaded). */
+  private replayEvents(events: EngineYield[]): void {
+    if (events.length === 0) return
+    for (const y of events) this.consumeReplay(y)
+    this.emitNow()
+  }
+
+  /** Load + replay the persisted trajectory for a session (issue #40). */
+  async loadSessionTrajectory(sessionId: string): Promise<void> {
+    let result: { ok: boolean; events?: string[]; error?: string }
+    try {
+      result = await this.rpc.call<{ id: string }, { ok: boolean; events?: string[]; error?: string }>(
+        'session/trajectory',
+        { id: sessionId },
+      )
+    } catch {
+      // method-not-found (older engine) or offline — live-only trajectory.
+      return
+    }
+    if (!result.ok || !result.events || result.events.length === 0) return
+    const events: EngineYield[] = []
+    for (const line of result.events) {
+      try {
+        events.push(JSON.parse(line) as EngineYield)
+      } catch {
+        // skip a corrupt line (the store already guards against this)
+      }
+    }
+    this.replayEvents(events)
+  }
+
+  /** Trajectory-only consumption path for replayed (historical) events — feeds
+   *  the ledger + working projection but never touches chat nodes (which
+   *  `session_loaded.messages` already built). Mirrors the live cases but is
+   *  deliberately lean: stream/thinking/direct_answer are excluded by the tap
+   *  whitelist, so they never arrive here. */
+  private consumeReplay(y: EngineYield): void {
+    const at = this.eventTs(y)
+    switch (y.kind) {
+      case 'turn_start':
+        this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start', {
+          at,
+          detail: { kind: 'turn', task: y.task },
+        })
+        break
+      case 'iteration_start':
+        this.startIterationBuffer(y.turn_id, y.iteration, y.paradigm, at)
+        break
+      case 'stream_chunk':
+        if (this.iterBuffer) this.iterBuffer.inference += y.text
+        break
+      case 'thinking':
+        if (this.iterBuffer) this.iterBuffer.thinking += y.text
+        break
+      case 'direct_answer':
+        this.finalizeIterBuffer()
+        break
+      case 'tool_calls':
+        this.finalizeIterBuffer()
+        for (const c of y.calls) {
+          this.pushTrajectory(y.turn_id, 'tool_calls', `tool: ${c.name}`, {
+            at,
+            detail: { kind: 'tool', callId: c.id, name: c.name, args: c.args },
+          })
+        }
+        break
+      case 'tool_result':
+        this.backfillToolResult(y.turn_id, y.call_id, y.tool_name, y.output, at)
+        break
+      case 'plan_update':
+        if (y.plan !== null) {
+          const plan = y.plan as { steps?: unknown[]; revision?: number }
+          this.pushTrajectory(y.turn_id, 'plan_revision', 'plan revised', {
+            at,
+            detail: {
+              kind: 'plan',
+              steps: plan.steps?.length ?? 0,
+              revision: typeof plan.revision === 'number' ? plan.revision : undefined,
+              plan: y.plan,
+            },
+          })
+        }
+        break
+      case 'paradigm_switch':
+        this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
+          at,
+          paradigm: y.to,
+          detail: { kind: 'paradigm', from: y.from, to: y.to },
+        })
+        break
+      case 'delegate': {
+        const kindLabel =
+          typeof y.agent_kind === 'string' ? y.agent_kind : `Custom:${y.agent_kind.custom}`
+        this.pushTrajectory(y.turn_id, 'delegate', `delegate → ${kindLabel}`, {
+          at,
+          detail: {
+            kind: 'delegate',
+            taskId: y.task_id,
+            task: y.task,
+            agentKind: y.agent_kind,
+            dependsOn: y.depends_on ?? [],
+          },
+        })
+        break
+      }
+      case 'delegate_progress':
+        this.pushTrajectory(y.turn_id, 'delegate_progress', `bg progress: ${y.event.kind}`, {
+          at,
+          detail: { kind: 'delegate_progress', taskId: y.task_id, event: y.event },
+        })
+        break
+      case 'delegate_complete': {
+        const summary = {
+          summary: y.summary.summary,
+          keyFindings: y.summary.key_findings,
+          budgetExceeded: y.summary.budget_exceeded,
+          tokensUsed: y.summary.tokens_used,
+          completed: y.summary.completed,
+        }
+        this.pushTrajectory(y.turn_id, 'delegate_complete', 'delegate complete', {
+          at,
+          detail: { kind: 'delegate_complete', taskId: y.task_id, summary },
+        })
+        break
+      }
+      case 'working_state':
+        this.applyWorkingStateEvent(y.event)
+        break
+      case 'context_assembled':
+        this.pushTrajectory(y.turn_id, 'context_assembled', `context assembled · iter ${y.iteration}`, {
+          at,
+          detail: {
+            kind: 'context',
+            iteration: y.iteration,
+            sections: this.resolveContextSections(y.sections),
+          },
+        })
+        break
+      case 'context_accounting':
+        this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
+          at,
+          detail: { kind: 'context_accounting', accounting: y.accounting },
+        })
+        break
+      case 'token_usage': {
+        // Attribute to the current iteration entry (latest per iteration wins).
+        const b = this.iterBuffer
+        if (b !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+          if (entry?.detail && entry.detail.kind === 'iteration') {
+            this.patchTrajectory(b.entrySeq, { detail: { ...entry.detail, usage: y.usage } })
+          }
+        }
+        break
+      }
+      case 'tools_added':
+        this.pushTrajectory(y.turn_id, 'tools_added', `+tools: ${y.names.join(', ')}`, {
+          at,
+          detail: { kind: 'tools_added', names: y.names },
+        })
+        break
+      case 'interrupted':
+        this.pushTrajectory(y.turn_id, 'interrupted', `interrupted: ${y.reason}`, {
+          at,
+          detail: { kind: 'interrupted', reason: y.reason, point: y.point },
+        })
+        break
+      case 'reflection':
+        this.pushTrajectory(y.turn_id, 'reflection', 'reflection', {
+          at,
+          detail: { kind: 'reflection', summary: y.summary },
+        })
+        break
+      case 'error':
+        this.pushTrajectory(this.state.currentTurnId, 'error', y.message, {
+          at,
+          detail: { kind: 'error', message: y.message, recoverable: y.recoverable },
+        })
+        break
+      case 'turn_complete':
+        this.finalizeIterBuffer()
+        this.pushTrajectory(y.turn_id, 'turn_complete', 'turn complete', {
+          at,
+          detail: { kind: 'turn_complete' },
+        })
+        break
+      case 'approval_request':
+        this.pushTrajectory(this.state.currentTurnId, 'approval_request', 'approval request', {
+          at,
+          detail: { kind: 'approval', requestId: y.request_id, request: y.request },
+        })
+        break
+      default:
+        break
+    }
   }
 
   /** Build the per-turn timing array from the live perf maps (turns seen since
@@ -765,7 +1092,10 @@ export class ProjectionStore {
         // the top slot — and the `TypingDots` row already signals "in flight"
         // so no progress affordance is lost. Group chat keeps deferring to
         // `speaker_turn`/`stream_chunk` (they carry the member id).
-        this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start')
+        this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start', {
+          at: this.eventTs(y),
+          detail: { kind: 'turn', task: y.task },
+        })
         this.emitNow()
         break
       }
@@ -806,6 +1136,8 @@ export class ProjectionStore {
         if (!this.state.firstTokenPerf.has(y.turn_id)) {
           this.state.firstTokenPerf.set(y.turn_id, performance.now())
         }
+        // Issue #40: accumulate per-iteration reasoning into the buffer.
+        if (this.iterBuffer) this.iterBuffer.inference += y.text
         this.coalescer.request()
         break
       }
@@ -834,6 +1166,8 @@ export class ProjectionStore {
             },
           ]
         }
+        // Issue #40: accumulate per-iteration reasoning into the buffer.
+        if (this.iterBuffer) this.iterBuffer.thinking += y.text
         this.coalescer.request()
         break
       }
@@ -851,6 +1185,7 @@ export class ProjectionStore {
             this.replaceNode(seeded.id, { text: y.text, state: 'done' })
           }
         }
+        this.finalizeIterBuffer()
         this.emitNow()
         break
       }
@@ -860,6 +1195,7 @@ export class ProjectionStore {
         // thinking seeds a fresh node after the cards).
         this.finalizeStreamingText(y.turn_id)
         this.finalizeStreamingThinking(y.turn_id)
+        this.finalizeIterBuffer()
         for (const c of y.calls) {
           // Dedupe by call id within the turn: the engine's streaming path
           // (`on_tool_calls` per `ToolCallComplete`) and the decision path
@@ -896,7 +1232,8 @@ export class ProjectionStore {
             },
           ]
           this.pushTrajectory(y.turn_id, 'tool_calls', `tool: ${c.name}`, {
-            detail: { callId: c.id, args: c.args },
+            at: this.eventTs(y),
+            detail: { kind: 'tool', callId: c.id, name: c.name, args: c.args },
           })
         }
         this.emitNow()
@@ -938,14 +1275,17 @@ export class ProjectionStore {
             },
           ]
         }
+        // Issue #40: backfill the trajectory tool node with result + duration.
+        this.backfillToolResult(y.turn_id, y.call_id, y.tool_name, y.output, this.eventTs(y))
         this.emitNow()
         break
       }
       case 'paradigm_switch': {
         this.state.paradigm = y.to
         this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
+          at: this.eventTs(y),
           paradigm: y.to,
-          detail: { from: y.from, to: y.to },
+          detail: { kind: 'paradigm', from: y.from, to: y.to },
         })
         this.emitNow()
         break
@@ -985,10 +1325,19 @@ export class ProjectionStore {
         }
         if (plan !== null) {
           this.pushTrajectory(y.turn_id, 'plan_revision', 'plan revised', {
-            detail: { steps: plan.steps.length, revision: plan.revision },
+            at: this.eventTs(y),
+            detail: {
+              kind: 'plan',
+              steps: plan.steps.length,
+              revision: typeof plan.revision === 'number' ? plan.revision : undefined,
+              plan: y.plan,
+            },
           })
         } else {
-          this.pushTrajectory(y.turn_id, 'plan_revision', 'plan cleared')
+          this.pushTrajectory(y.turn_id, 'plan_revision', 'plan cleared', {
+            at: this.eventTs(y),
+            detail: { kind: 'plan', steps: 0, revision: undefined, plan: null },
+          })
         }
         this.emitNow()
         break
@@ -1001,6 +1350,10 @@ export class ProjectionStore {
           ...this.state.approvalQueue,
           { request_id: y.request_id, request: y.request, seq: approvalSeq },
         ]
+        this.pushTrajectory(this.state.currentTurnId, 'approval_request', 'approval request', {
+          at: this.eventTs(y),
+          detail: { kind: 'approval', requestId: y.request_id, request: y.request },
+        })
         this.emitNow()
         // Auto-accept: silently allow tool execution (Proceed) without showing
         // the approval bar. Plan/network/elicitation still queue.
@@ -1050,7 +1403,11 @@ export class ProjectionStore {
         this.state.turnActive = false
         this.state.currentSpeaker = null
         this.state.turnEndPerf.set(y.turn_id, performance.now())
-        this.pushTrajectory(y.turn_id, 'turn_complete', 'turn complete')
+        this.finalizeIterBuffer()
+        this.pushTrajectory(y.turn_id, 'turn_complete', 'turn complete', {
+          at: this.eventTs(y),
+          detail: { kind: 'turn_complete' },
+        })
         this.emitNow()
         break
       }
@@ -1081,6 +1438,10 @@ export class ProjectionStore {
           },
         ]
         if (!y.recoverable) this.state.turnActive = false
+        this.pushTrajectory(this.state.currentTurnId, 'error', y.message, {
+          at: this.eventTs(y),
+          detail: { kind: 'error', message: y.message, recoverable: y.recoverable },
+        })
         this.emitNow()
         break
       }
@@ -1116,6 +1477,9 @@ export class ProjectionStore {
         // it), so per-message feedback is not available on history — the UI
         // hides 👍/👎 on these nodes. New live turns in this loaded session
         // do carry a turn_id and are feedbackable.
+        // Issue #40: rebuild this historical session's trajectory from the
+        // persisted bus-event log (no-op when the engine has no store).
+        void this.loadSessionTrajectory(y.id)
         this.emitNow()
         break
       }
@@ -1161,17 +1525,13 @@ export class ProjectionStore {
         this.finalizeStreamingThinking(y.turn_id)
         const prev = this.state.turnIterations.get(y.turn_id) ?? 0
         this.state.turnIterations.set(y.turn_id, prev + 1)
-        this.pushTrajectory(y.turn_id, 'iteration_start', `iteration ${y.iteration} · ${y.paradigm}`, {
-          iter: y.iteration,
-          paradigm: y.paradigm,
-          detail: { iteration: y.iteration, paradigm: y.paradigm },
-        })
+        this.startIterationBuffer(y.turn_id, y.iteration, y.paradigm, this.eventTs(y))
         this.emitNow()
         break
       }
       case 'delegate': {
         const id = nextSubagentId(y.turn_id)
-        const kindLabel = typeof y.agent_kind === 'string' ? y.agent_kind : `Custom:${y.agent_kind.Custom}`
+        const kindLabel = typeof y.agent_kind === 'string' ? y.agent_kind : `Custom:${y.agent_kind.custom}`
         this.state.subagents = [
           ...this.state.subagents,
           {
@@ -1195,7 +1555,14 @@ export class ProjectionStore {
           })
         }
         this.pushTrajectory(y.turn_id, 'delegate', `delegate → ${kindLabel}`, {
-          detail: { subagentId: id, task: y.task },
+          at: this.eventTs(y),
+          detail: {
+            kind: 'delegate',
+            taskId: y.task_id,
+            task: y.task,
+            agentKind: y.agent_kind,
+            dependsOn: y.depends_on ?? [],
+          },
         })
         this.emitNow()
         break
@@ -1226,7 +1593,8 @@ export class ProjectionStore {
           return next
         })
         this.pushTrajectory(y.turn_id, 'delegate_progress', `bg progress: ${ev.kind}`, {
-          detail: { taskId: y.task_id, event: ev },
+          at: this.eventTs(y),
+          detail: { kind: 'delegate_progress', taskId: y.task_id, event: ev },
         })
         this.emitNow()
         break
@@ -1268,7 +1636,8 @@ export class ProjectionStore {
           )
         }
         this.pushTrajectory(y.turn_id, 'delegate_complete', 'delegate complete', {
-          detail: { summary: y.summary.summary, keyFindings: y.summary.key_findings },
+          at: this.eventTs(y),
+          detail: { kind: 'delegate_complete', taskId: y.task_id, summary },
         })
         this.emitNow()
         break
@@ -1281,7 +1650,8 @@ export class ProjectionStore {
       case 'context_accounting': {
         this.state.usage = { ...this.state.usage, context: y.accounting }
         this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
-          detail: y.accounting,
+          at: this.eventTs(y),
+          detail: { kind: 'context_accounting', accounting: y.accounting },
         })
         this.emitNow()
         break
@@ -1297,16 +1667,53 @@ export class ProjectionStore {
         // Track the most recent usage record overall — the cache-hit % metric
         // reads the latest inference step's rate, not a cumulative average.
         this.state.latestUsage = y.usage
-        const total = y.usage.prompt_tokens + y.usage.completion_tokens
-        this.pushTrajectory(null, 'token_usage', `usage: ${total} tokens`, {
-          detail: y.usage,
-        })
+        // Issue #40: attribute the per-inference usage to the current
+        // iteration node (latest record per iteration wins) instead of a
+        // standalone session-scoped line.
+        const b = this.iterBuffer
+        if (b !== null) {
+          const entry = this.state.trajectory.find((e) => e.seq === b.entrySeq)
+          if (entry?.detail && entry.detail.kind === 'iteration') {
+            this.patchTrajectory(b.entrySeq, { detail: { ...entry.detail, usage: y.usage } })
+          }
+        }
         this.emitNow()
         break
       }
       case 'tools_added': {
         this.pushTrajectory(y.turn_id, 'tools_added', `+tools: ${y.names.join(', ')}`, {
-          detail: { names: y.names },
+          at: this.eventTs(y),
+          detail: { kind: 'tools_added', names: y.names },
+        })
+        this.emitNow()
+        break
+      }
+      case 'context_assembled': {
+        // Issue #40: sectioned snapshot of the assembled context. Resolve
+        // hash-deduped sections against the cache; store a context node.
+        this.pushTrajectory(y.turn_id, 'context_assembled', `context assembled · iter ${y.iteration}`, {
+          at: this.eventTs(y),
+          detail: {
+            kind: 'context',
+            iteration: y.iteration,
+            sections: this.resolveContextSections(y.sections),
+          },
+        })
+        this.emitNow()
+        break
+      }
+      case 'interrupted': {
+        this.pushTrajectory(y.turn_id, 'interrupted', `interrupted: ${y.reason}`, {
+          at: this.eventTs(y),
+          detail: { kind: 'interrupted', reason: y.reason, point: y.point },
+        })
+        this.emitNow()
+        break
+      }
+      case 'reflection': {
+        this.pushTrajectory(y.turn_id, 'reflection', 'reflection', {
+          at: this.eventTs(y),
+          detail: { kind: 'reflection', summary: y.summary },
         })
         this.emitNow()
         break

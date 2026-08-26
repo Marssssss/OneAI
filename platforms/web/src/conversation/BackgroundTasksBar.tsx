@@ -22,7 +22,7 @@ interface BackgroundTasksBarProps {
 }
 
 function kindLabel(k: BackgroundTaskNode['agentKind']): string {
-  return typeof k === 'string' ? k : `Custom:${k.Custom}`
+  return typeof k === 'string' ? k : `Custom:${k.custom}`
 }
 
 export function BackgroundTasksBar({ tasks, onCancel }: BackgroundTasksBarProps): ReactNode | null {

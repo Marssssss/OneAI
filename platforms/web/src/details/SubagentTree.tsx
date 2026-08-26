@@ -62,5 +62,5 @@ export function SubagentTree({ subagents }: SubagentTreeProps): ReactNode | null
 
 function kindLabel(kind: SubagentNode['agentKind']): string {
   if (typeof kind === 'string') return kind
-  return `Custom:${kind.Custom}`
+  return `Custom:${kind.custom}`
 }

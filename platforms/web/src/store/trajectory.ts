@@ -12,9 +12,13 @@
 import type {
   BusSubAgentKind,
   BusUsageRecord,
+  BusDelegateProgress,
   ContextAccounting,
+  ContextKey,
   EngineYieldKind,
+  InteractionRequest,
   StepStatus,
+  TaskEventPayload,
   WorkingStep,
   Decision,
   Blocker,
@@ -37,13 +41,44 @@ export interface TrajectoryEntry {
   kind: EngineYieldKind | 'plan_revision' | 'round_boundary'
   /** One-line human title (tool name, paradigm, token count, …). */
   title: string
-  /** Optional structured detail for the detail drill-in. */
-  detail?: unknown
+  /** Structured drill-in payload, discriminated by node type (issue #40). */
+  detail?: TrajectoryDetail
   /** Iteration number, when kind === iteration_start. */
   iter?: number
   /** Paradigm, when relevant. */
   paradigm?: string
 }
+
+/** A context section resolved against the projection's cache — `content` is
+ *  always present (the missing-content hash-dedup already resolved). */
+export interface ResolvedContextSection {
+  key: ContextKey
+  label: string
+  tokens: number
+  content: string
+}
+
+/** Per-node detail, discriminated by the node's origin kind. The trajectory
+ *  timeline's detail pane switches on this to decide what to render (issue #40:
+ *  "工具执行指令/结果只在工具节点展示" etc.). */
+export type TrajectoryDetail =
+  | { kind: 'turn'; task: string }
+  | { kind: 'iteration'; iteration: number; paradigm: string; inference: string; thinking: string; usage?: BusUsageRecord; durationMs?: number }
+  | { kind: 'context'; iteration: number; sections: ResolvedContextSection[] }
+  | { kind: 'tool'; callId: string; name: string; args: unknown; result?: string; error?: string; ok?: boolean; durationMs?: number }
+  | { kind: 'delegate'; taskId: string; task: string; agentKind: BusSubAgentKind; dependsOn: string[] }
+  | { kind: 'delegate_progress'; taskId: string; event: BusDelegateProgress }
+  | { kind: 'delegate_complete'; taskId: string; summary: BusSubAgentNode }
+  | { kind: 'plan'; steps: number; revision?: number; plan: unknown }
+  | { kind: 'paradigm'; from: string; to: string }
+  | { kind: 'approval'; requestId: string; request: InteractionRequest }
+  | { kind: 'working_state'; event: TaskEventPayload }
+  | { kind: 'context_accounting'; accounting: ContextAccounting }
+  | { kind: 'tools_added'; names: string[] }
+  | { kind: 'interrupted'; reason: string; point: string }
+  | { kind: 'reflection'; summary: string }
+  | { kind: 'error'; message: string; recoverable: boolean }
+  | { kind: 'turn_complete' }
 
 /** A delegated sub-agent in flight or completed. */
 export interface SubagentNode {

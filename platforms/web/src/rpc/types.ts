@@ -71,8 +71,11 @@ export type EngineYieldKind =
   | 'approval_request'
   | 'working_state'
   | 'context_accounting'
+  | 'context_assembled'
   | 'plan_update'
   | 'tools_added'
+  | 'interrupted'
+  | 'reflection'
   | 'init_result'
   | 'compact_result'
   | 'token_usage'
@@ -171,6 +174,9 @@ export interface YieldDelegate {
   task: string
   agent_kind: BusSubAgentKind
   speaker: string | null
+  /** DAG edges (issue #40): sibling task ids this delegation waits for.
+   *  Absent for older engines; empty for independent/parallel tasks. */
+  depends_on?: string[]
 }
 export interface YieldDelegateComplete {
   kind: 'delegate_complete'
@@ -194,6 +200,23 @@ export interface YieldContextAccounting {
   kind: 'context_accounting'
   turn_id: string
   accounting: ContextAccounting
+}
+export interface YieldContextAssembled {
+  kind: 'context_assembled'
+  turn_id: string
+  iteration: number
+  sections: ContextSection[]
+}
+export interface YieldInterrupted {
+  kind: 'interrupted'
+  turn_id: string
+  reason: string
+  point: string
+}
+export interface YieldReflection {
+  kind: 'reflection'
+  turn_id: string
+  summary: string
 }
 export interface YieldTokenUsage {
   kind: 'token_usage'
@@ -248,6 +271,9 @@ export type EngineYield =
   | YieldDelegateProgress
   | YieldWorkingState
   | YieldContextAccounting
+  | YieldContextAssembled
+  | YieldInterrupted
+  | YieldReflection
   | YieldTokenUsage
   | YieldToolsAdded
   | YieldSessionCreated
@@ -267,12 +293,12 @@ export interface BusToolCall {
 // `Custom` as a discriminated object.
 
 export type BusSubAgentKind =
-  | 'Plan'
-  | 'Explore'
-  | 'Code'
-  | 'Review'
-  | 'Reflect'
-  | { Custom: string }
+  | 'plan'
+  | 'explore'
+  | 'code'
+  | 'review'
+  | 'reflect'
+  | { custom: string }
 
 export interface BusSubAgent {
   completed: boolean
@@ -309,6 +335,39 @@ export interface ContextAccounting {
   image_tokens: number
   file_tokens: number
   [k: string]: number
+}
+
+// ─── Context assembly snapshot (oneai-core::ContextSnapshot, issue #40) ─────
+// `ContextKey` is tagged `{"type": ..., "value": ...}` (serde adjacently-tagged
+// with rename_all snake_case); the unit variants carry no `value`.
+
+export type ContextKey =
+  | { type: 'base_prompt' }
+  | { type: 'context'; value: string }
+  | { type: 'task_anchor' }
+  | { type: 'plan_progress' }
+  | { type: 'decisions' }
+  | { type: 'blockers' }
+  | { type: 'skill_menu' }
+  | { type: 'active_skill' }
+  | { type: 'new_tools' }
+  | { type: 'background_tasks' }
+  | { type: 'tools' }
+  | { type: 'latest_user' }
+  | { type: 'history' }
+
+export interface ContextSection {
+  key: ContextKey
+  label: string
+  tokens: number
+  content_hash: number
+  /** Absent when unchanged since the previous iteration (hash dedup). */
+  content?: string
+}
+
+/** Stable cache/dedup key for a context section (mirrors `ContextKey::cache_key`). */
+export function contextKeyString(key: ContextKey): string {
+  return key.type === 'context' ? `context:${key.value}` : key.type
 }
 
 // ─── Working state (oneai-core working-state types) ─────────────────────────

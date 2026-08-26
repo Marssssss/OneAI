@@ -209,7 +209,7 @@ describe('ProjectionStore background-task cancel', () => {
       turn_id: 't1',
       task_id: 'bg1',
       task: 'long research',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       speaker: null,
     })
     let snap = store.getSnapshot()
@@ -218,7 +218,7 @@ describe('ProjectionStore background-task cancel', () => {
       kind: 'delegate_progress',
       turn_id: 't1',
       task_id: 'bg1',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       event: { kind: 'cancelled' },
     })
     snap = store.getSnapshot()
@@ -240,14 +240,14 @@ describe('ProjectionStore background-task cancel', () => {
       turn_id: 't1',
       task_id: 'bg1',
       task: 'long research',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       speaker: null,
     })
     y({
       kind: 'delegate_progress',
       turn_id: 't1',
       task_id: 'bg1',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       event: { kind: 'cancelled' },
     })
     expect(store.getSnapshot().backgroundTasks.find((t) => t.taskId === 'bg1')?.status).toBe(
@@ -263,7 +263,7 @@ describe('ProjectionStore background-task cancel', () => {
         budget_exceeded: false,
         tokens_used: 0,
         completed: false,
-        agent_kind: 'Explore',
+        agent_kind: 'explore',
       },
       speaker: null,
     })
@@ -291,7 +291,7 @@ describe('ProjectionStore background-task cancel', () => {
       turn_id: 't1',
       task_id: 'bg1',
       task: 'long research',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       speaker: null,
     })
 
@@ -318,7 +318,7 @@ describe('ProjectionStore background-task cancel', () => {
       turn_id: 't1',
       task_id: 'bg1',
       task: 'long research',
-      agent_kind: 'Explore',
+      agent_kind: 'explore',
       speaker: null,
     })
 
