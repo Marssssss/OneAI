@@ -21,6 +21,7 @@ import { Composer, type InteractionMode } from './Composer'
 import type { SlashInvocation } from './slashCommands'
 import { ApprovalPanel } from './ApprovalPanel'
 import { GoalBar } from './GoalBar'
+import { TrajectoryExplorer } from '../trajectory/TrajectoryExplorer'
 import type { SettingsStore } from '../settings/settingsStore'
 import { useSettings } from '../settings/settingsStore'
 import styles from './ConversationRoot.module.css'
@@ -48,6 +49,10 @@ interface ConversationRootProps {
   snapshot: ProjectionSnapshot
   connection: 'connecting' | 'open' | 'closed' | 'error'
   theme: 'light' | 'dark'
+  /** Issue #40: which center-column surface is shown — conversation or the
+   *  resident trajectory view. Toggled from the header-right button. */
+  viewMode: 'conversation' | 'trajectory'
+  onToggleView: () => void
   mode: InteractionMode
   scenarios: ScenarioEntry[]
   settingsStore: SettingsStore
@@ -102,6 +107,8 @@ export function ConversationRoot({
   snapshot,
   connection,
   theme,
+  viewMode,
+  onToggleView,
   mode,
   scenarios,
   settingsStore,
@@ -208,6 +215,11 @@ export function ConversationRoot({
               <span className={styles.paradigm}> · {snapshot.paradigm}</span>
             )}
           </span>
+          {/* Issue #40: resident trajectory toggle. In conversation mode the
+              button reads "轨迹"; in trajectory mode it reads "对话". */}
+          <button className={styles.viewToggle} onClick={onToggleView} title={viewMode === 'conversation' ? t('trajectory.tab') : t('trajectory.conversationTab')}>
+            {viewMode === 'conversation' ? t('trajectory.tab') : t('trajectory.conversationTab')}
+          </button>
         </div>
       </header>
 
@@ -218,7 +230,9 @@ export function ConversationRoot({
           </div>
         )}
         <BackgroundTasksBar tasks={snapshot.backgroundTasks} onCancel={onCancelBackground} />
-        {empty ? (
+        {viewMode === 'trajectory' ? (
+          <TrajectoryExplorer snapshot={snapshot} />
+        ) : empty ? (
           <div className={styles.empty}>
             <div className={styles.emptyBrand}>
               <img

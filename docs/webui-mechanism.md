@@ -101,6 +101,15 @@ WebUI 是一个 Vite + React 19 + TypeScript SPA（`platforms/web/`）。它不�
 - **dist 来源**：web dist 是平台无关 JS，打进 `oneai-cli` npm tarball（`npm publish` 的 `prepublishOnly` 跑 `platforms/npm/scripts/build-web.sh` 构建+stage 进 `web-dist/`，gitignore）；launcher 启动时注入 `ONEAI_WEB_DIST` 指向包内 dist。cargo/二进制用户走 `--dist` 或自动探测（`./platforms/web/dist` / `~/.oneai/web-dist`）。
 - **复用**：CLI 的 `build_engine_server`（抽自 `cmd_app_server`，建 app+pool+stores+probe+pump）被 `cmd_web` 与 `cmd_app_server` 共用，引擎构建一处。`serve_web` 内部建 `Dispatcher`+`subscribe_yields`（同 `serve_all`）。
 
+## 13.6. 轨迹视图（issue #40）
+
+对话区常驻的中央面板。右上角按钮在**对话**（显示「轨迹」）与**轨迹时间轴**（显示「对话」）之间切换整区；`/usage` 也切到它（取代旧的侧栏轨迹 tab）。composer 保持挂载，边看时间轴边继续发消息（新事件实时追加）。
+
+- **数据**：`ProjectionStore` 把轨迹相关 `EngineYield` 折进 `trajectory` ledger——每迭代推理（由 `stream_chunk`/`thinking` 累积、边界 flush 进对应 `iteration_start` 节点）、`context_assembled` 分段（按 key 缓存做 hash 去重）、工具调用↔结果配对（按 `call_id` 回填结果+耗时）、委托 DAG 边（`depends_on`）、working-state 快照、`interrupted`/`reflection`/`approval`/`error` 标记。
+- **时间轴模型**：`trajectory/timeline.ts` 把扁平 ledger 折成泳道（lane 0=主 agent，每个委托 `task_id` 一条子泳道）+ fork/join/depends 边，按墙上时钟定位。SVG 画布支持拖动平移、滚轮（以光标为锚点）缩放，并**默认跟随最新节点**，用户拖走后「回到最新」重新跟随。
+- **详情面板**：点击节点按类型渲染详情（`DetailPane`）——上下文分段、推理/思考+token、工具指令/结果+耗时、计划清单、委托摘要/关键发现、审批请求等。
+- **历史回放**：引擎按会话持久化白名单子集的 yield（`FileSessionEventStore`，`<root>/events/{id}.jsonl`，tap 注入 `ts`）；`session/load` 触发 `session/trajectory`，投影走轨迹-only 路径回放（会话节点仍来自消息 transcript）。
+
 ## 14. 深入阅读
 
 - `docs/webui-refactor-design.md`（+`_EN`）—— W1–W5 分阶段迁移路径与取舍表。

@@ -101,6 +101,15 @@ Mirrors deepseek-harness's `npx @deepseek-ai/dsh web`: **one command** lifts the
 - **Dist source**: the web dist is platform-independent JS bundled into the `oneai-cli` npm tarball (`npm publish`'s `prepublishOnly` runs `platforms/npm/scripts/build-web.sh` to build + stage into `web-dist/`, gitignored); the launcher injects `ONEAI_WEB_DIST` to the package's dist. Cargo/binary users use `--dist` or auto-detect (`./platforms/web/dist` / `~/.oneai/web-dist`).
 - **Reuse**: the CLI's `build_engine_server` (extracted from `cmd_app_server`, builds app+pool+stores+probe+pump) is shared by `cmd_web` and `cmd_app_server` — one engine-build path. `serve_web` builds its own `Dispatcher`+`subscribe_yields` (like `serve_all`).
 
+## 13.6. Trajectory view (issue #40)
+
+A resident center-column surface beside the conversation. The header-right button toggles the center between **chat** (reads "轨迹 / Trajectory") and the **trajectory timeline** (reads "对话 / Chat"); `/usage` switches to it too (it supersedes the old details-rail trajectory tab). The composer stays mounted so the user can keep sending while watching the timeline live-append.
+
+- **Data**: `ProjectionStore` folds the trajectory-relevant `EngineYield`s into a `trajectory` ledger — per-iteration reasoning (accumulated from `stream_chunk`/`thinking` and flushed into each `iteration_start` node), `context_assembled` sections (hash-deduped against a per-key cache), tool call↔result pairing (result + duration backfilled by `call_id`), delegate DAG edges (`depends_on`), working-state snapshots, `interrupted`/`reflection`/`approval`/`error` markers.
+- **Timeline model**: `trajectory/timeline.ts` folds the flat ledger into swim-lanes (lane 0 = main agent, one lane per delegated `task_id`) + fork/join/depends edges, positioned by wall-clock time. The SVG canvas pans (pointer drag) and zooms (wheel, cursor-anchored) and **auto-follows the latest node** until the user pans away ("回到最新 / Back to latest" re-enables).
+- **Detail pane**: clicking a node renders its type-specific detail (`DetailPane`) — context sections, reasoning/thinking + tokens, tool args/result + duration, plan checklist, delegate summary/key-findings, approval request, etc.
+- **History replay**: the engine persists a whitelisted subset of yields per session (`FileSessionEventStore`, `<root>/events/{id}.jsonl`, tap-injected `ts`); `session/load` triggers `session/trajectory` and the projection replays those events through a trajectory-only path (chat nodes stay sourced from the message transcript).
+
 ## 14. Further reading
 
 - `docs/webui-refactor-design.md` (+`_EN`) — the W1–W5 phased migration path and trade-off table.

@@ -34,6 +34,23 @@
   --oneai-red: #b91c1c;
   --oneai-red-bg: #fee2e2;
 
+  /* Trajectory timeline node colors (issue #40) — one hue per node kind so the
+   * timeline's legend + markers stay distinguishable in both themes. */
+  --oneai-traj-iteration: #4f46e5;
+  --oneai-traj-tool: #0891b2;
+  --oneai-traj-delegate: #d97706;
+  --oneai-traj-plan: #7c3aed;
+  --oneai-traj-context: #0d9488;
+  --oneai-traj-working: #ca8a04;
+  --oneai-traj-usage: #64748b;
+  --oneai-traj-paradigm: #db2777;
+  --oneai-traj-turn: #475569;
+  --oneai-traj-interrupt: #ea580c;
+  --oneai-traj-reflection: #2563eb;
+  --oneai-traj-error: #dc2626;
+  --oneai-traj-approval: #16a34a;
+  --oneai-traj-tools: #059669;
+
   /* Speaker name/bubble color when a group-chat member has no explicit
    * color assigned — a neutral gray that tracks the theme. (The member's
    * own chosen color is persisted scenario data, a real hex, not a token.) */
@@ -102,6 +119,22 @@ body[data-oneai-theme='dark'] {
   --oneai-green-bg: #052e16;
   --oneai-red: #f87171;
   --oneai-red-bg: #450a0a;
+
+  /* Trajectory timeline node colors — brighter for dark surfaces. */
+  --oneai-traj-iteration: #a5b4fc;
+  --oneai-traj-tool: #67e8f9;
+  --oneai-traj-delegate: #fbbf24;
+  --oneai-traj-plan: #c4b5fd;
+  --oneai-traj-context: #5eead4;
+  --oneai-traj-working: #facc15;
+  --oneai-traj-usage: #94a3b8;
+  --oneai-traj-paradigm: #f9a8d4;
+  --oneai-traj-turn: #94a3b8;
+  --oneai-traj-interrupt: #fb923c;
+  --oneai-traj-reflection: #93c5fd;
+  --oneai-traj-error: #fca5a5;
+  --oneai-traj-approval: #86efac;
+  --oneai-traj-tools: #6ee7b7;
 
   --oneai-speaker-fallback: var(--oneai-text-tertiary);
 

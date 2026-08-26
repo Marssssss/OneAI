@@ -25,7 +25,7 @@ import {
   SLASH_COMMANDS,
   type SlashInvocation,
 } from './conversation/slashCommands'
-import { DetailsPanel, type DetailsTab } from './details/DetailsPanel'
+import { DetailsPanel } from './details/DetailsPanel'
 import { SidebarRoot } from './sidebar/SidebarRoot'
 import {
   ScenarioListStore,
@@ -104,7 +104,9 @@ export default function App(): React.ReactNode {
     detailsOpen: false,
   })
   const [prefs, setPrefs] = useState<FramePrefs>(prefsRef.current)
-  const [detailsTab, setDetailsTab] = useState<DetailsTab>('tool')
+  // Issue #40: the center column is either the conversation or the resident
+  // trajectory view (toggled from the header-right button + /usage).
+  const [viewMode, setViewMode] = useState<'conversation' | 'trajectory'>('conversation')
   // Mobile nav drawer (controlled by App so pick handlers can close it).
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Workspace dropdown (popover, not a modal) — open only on the welcome
@@ -337,7 +339,6 @@ export default function App(): React.ReactNode {
   // Selecting a tool node opens the details rail and records the selection.
   const handleSelectTool = (nodeId: string) => {
     projection.selectTool(nodeId)
-    setDetailsTab('tool')
     if (!prefs.detailsOpen) {
       setPrefs({ ...prefs, detailsOpen: true })
     }
@@ -471,10 +472,9 @@ export default function App(): React.ReactNode {
         void projection.compact(10)
         break
       case 'usage':
-        // The TUI's /usage prints token usage; the web's closest analog is
-        // the details rail (usage + turn timings + trajectory ledger).
-        setDetailsTab('trajectory')
-        setPrefs({ ...prefs, detailsOpen: true })
+        // /usage → the resident trajectory view (issue #40); the token usage
+        // overview is part of the trajectory surface.
+        setViewMode('trajectory')
         break
       case 'skills':
         setModal({ kind: 'skills' })
@@ -568,6 +568,10 @@ export default function App(): React.ReactNode {
             snapshot={snap}
             connection={status}
             theme={theme}
+            viewMode={viewMode}
+            onToggleView={() =>
+              setViewMode((m) => (m === 'conversation' ? 'trajectory' : 'conversation'))
+            }
             mode={interactionMode}
             scenarios={scenarios}
             settingsStore={settings}
@@ -598,16 +602,7 @@ export default function App(): React.ReactNode {
         }
         details={
           prefs.detailsOpen ? (
-            <DetailsPanel
-              node={selectedToolNode}
-              tab={detailsTab}
-              onTabChange={setDetailsTab}
-              trajectory={snap.trajectory}
-              usage={snap.usage}
-              subagents={snap.subagents}
-              turnTimings={snap.turnTimings}
-              onClose={handleCloseDetails}
-            />
+            <DetailsPanel node={selectedToolNode} onClose={handleCloseDetails} />
           ) : undefined
         }
         prefs={prefs}

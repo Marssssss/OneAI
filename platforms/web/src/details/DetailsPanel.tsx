@@ -1,79 +1,32 @@
-// DetailsPanel — the right rail. W4 splits it into a two-tab container:
-//   • Tool   — the full args/result of the tool node selected from the chat
-//              stream (the inline ToolCallNode truncates to a preview; this
-//              rail shows the untruncated content for inspection).
-//   • Trajectory — a turn-aware event ledger + timing overview, pure-consumer
-//              of the flowing EngineYield kinds the W1–W3 projection dropped.
-//
-// AppFrame conditionally renders this <aside> based on prefs.detailsOpen; App
-// flips detailsOpen=true on selectTool (and switches to the Tool tab) and the
-// close button clears selection (App may also flip detailsOpen=false).
+// DetailsPanel — the right rail, now a single-purpose tool inspector. The
+// trajectory was promoted to a resident center-column view (issue #40) — see
+// `trajectory/TrajectoryExplorer.tsx`; this rail keeps the full args/result of
+// the tool node selected from the chat stream.
 
 import type { ReactNode } from 'react'
 import type { ChatNode } from '../store/projection'
-import type { TrajectoryEntry, UsageSnapshot, SubagentNode } from '../store/trajectory'
 import { useLocale } from '../i18n'
-import { TrajectoryView } from './TrajectoryView'
 import styles from './DetailsPanel.module.css'
-
-export type DetailsTab = 'tool' | 'trajectory'
 
 interface DetailsPanelProps {
   node: ChatNode | null
-  tab: DetailsTab
-  onTabChange: (tab: DetailsTab) => void
-  trajectory: TrajectoryEntry[]
-  usage: UsageSnapshot
-  subagents: SubagentNode[]
-  turnTimings: { turnId: string; startedAt: number | null; endedAt: number | null; iterations: number }[]
   onClose: () => void
 }
 
-export function DetailsPanel({
-  node,
-  tab,
-  onTabChange,
-  trajectory,
-  usage,
-  subagents,
-  turnTimings,
-  onClose,
-}: DetailsPanelProps): ReactNode {
+export function DetailsPanel({ node, onClose }: DetailsPanelProps): ReactNode {
   const { t } = useLocale()
 
   return (
     <div className={styles.root}>
       <header className={styles.header}>
-        <div className={styles.tabs}>
-          <button
-            className={`${styles.tab} ${tab === 'tool' ? styles.tabActive : ''}`}
-            onClick={() => onTabChange('tool')}
-          >
-            {t('details.toolTab')}
-          </button>
-          <button
-            className={`${styles.tab} ${tab === 'trajectory' ? styles.tabActive : ''}`}
-            onClick={() => onTabChange('trajectory')}
-          >
-            {t('details.trajectoryTab')}
-          </button>
-        </div>
+        <span className={styles.title}>{t('details.toolTab')}</span>
         <button className={styles.close} onClick={onClose} title="close">
           ✕
         </button>
       </header>
 
       <div className={styles.scroll}>
-        {tab === 'tool' ? (
-          <ToolDetails node={node} />
-        ) : (
-          <TrajectoryView
-            trajectory={trajectory}
-            usage={usage}
-            turnTimings={turnTimings}
-            subagents={subagents}
-          />
-        )}
+        <ToolDetails node={node} />
       </div>
     </div>
   )

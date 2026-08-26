@@ -58,6 +58,21 @@
   color: var(--oneai-brand-500);
 }
 
+/* Issue #40: resident trajectory/conversation toggle in the header right. */
+.viewToggle {
+  padding: 3px 12px;
+  font-size: 12px;
+  border: 1px solid var(--oneai-border);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+}
+.viewToggle:hover {
+  border-color: var(--oneai-border-strong);
+  background: var(--oneai-bg-subtle);
+}
+
 .body {
   flex: 1;
   min-height: 0;

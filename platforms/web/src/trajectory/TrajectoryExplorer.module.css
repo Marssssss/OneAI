@@ -1,0 +1,125 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--oneai-text-tertiary);
+  font-size: 13px;
+  padding: var(--oneai-gap-lg);
+  text-align: center;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--oneai-gap);
+  padding: 6px var(--oneai-gap);
+  border-bottom: 1px solid var(--oneai-border);
+  flex-wrap: wrap;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--oneai-text-secondary);
+}
+
+.legendDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.controls {
+  display: flex;
+  gap: 4px;
+}
+
+.btn {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid var(--oneai-border);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--oneai-border-strong);
+}
+
+.canvas {
+  flex: 1;
+  min-height: 120px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background: var(--oneai-bg-subtle);
+}
+
+.canvas:active {
+  cursor: grabbing;
+}
+
+.svg {
+  display: block;
+}
+
+.laneGuide {
+  stroke: var(--oneai-border);
+  stroke-width: 1;
+}
+
+.laneLabel {
+  font-size: 10px;
+  fill: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}
+
+.edge {
+  fill: none;
+  stroke: var(--oneai-text-tertiary);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.node {
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.node:hover {
+  opacity: 1;
+}
+
+.node:hover circle,
+.node:hover rect {
+  stroke: var(--oneai-text);
+  stroke-width: 1.5;
+}
+
+.detail {
+  flex: 0 0 auto;
+  max-height: 42%;
+  overflow: auto;
+  border-top: 1px solid var(--oneai-border);
+  background: var(--oneai-bg-elevated);
+  padding: var(--oneai-gap);
+}

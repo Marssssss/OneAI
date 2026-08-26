@@ -7,7 +7,7 @@
 // `webServer` runs `vite` with VITE_APP_SERVER_URL pointing here.
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { EngineYield } from '../src/rpc/types'
-import { singleAgentReply, groupRound, approvalPre, approvalPost } from './fixtures/scripts'
+import { singleAgentReply, groupRound, approvalPre, approvalPost, trajectoryReply } from './fixtures/scripts'
 
 const PORT = Number(process.env.ONEAI_E2E_WS_PORT ?? 8788)
 const TURN = 'turn-e2e'
@@ -72,6 +72,10 @@ export async function startMockServer(): Promise<{ close: () => Promise<void> }>
         case 'session/clear':
         case 'session/delete':
           respond(ws, id, { ok: true })
+          break
+        case 'session/trajectory':
+          // Issue #40: replay a historical session's trajectory.
+          respond(ws, id, { ok: true, events: trajectoryReply().map((e) => JSON.stringify(e)) })
           break
 
         // ── scenario / domainpack / skills / config / provider ──
@@ -174,6 +178,8 @@ export async function startMockServer(): Promise<{ close: () => Promise<void> }>
           if (text.toLowerCase().includes('approve')) {
             st.awaitingApproval = true
             replay(ws, approvalPre(TURN))
+          } else if (text.toLowerCase().includes('trajectory')) {
+            replay(ws, trajectoryReply(TURN))
           } else {
             replay(ws, singleAgentReply('Hello from the OneAI mock server!', TURN))
           }
