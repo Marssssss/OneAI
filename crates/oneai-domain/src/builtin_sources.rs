@@ -519,9 +519,9 @@ impl ContextSource for EnvironmentInfoSource {
 
     fn position(&self) -> ContextPosition {
         // `Working Directory` is the active workspace, which the model can
-        // change mid-session (shell `cd` / `switch_project`). It's a tiny
-        // block, so keep the whole source in the tail rather than splitting
-        // the stable platform/arch/shell lines out.
+        // change mid-session via shell `cd`. It's a tiny block, so keep the
+        // whole source in the tail rather than splitting the stable
+        // platform/arch/shell lines out.
         ContextPosition::Tail
     }
 }
@@ -985,9 +985,9 @@ mod tests {
         );
     }
 
-    // ─── switch_project rebind ─────────────────────────────────────────────
-    // Issue #19: path-bound sources must re-bind to a new project dir so the
-    // model can drop redundant context from the startup project.
+    // ─── rebind_project_dir ────────────────────────────────────────────────
+    // Path-bound sources re-bind to the session's workspace dir so the model
+    // sees the workspace's project context, not a stale startup project.
 
     #[tokio::test]
     async fn test_rebind_project_config_source() {

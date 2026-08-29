@@ -301,23 +301,14 @@ impl ContextAssembler {
         Ok(())
     }
 
-    /// Whether any source is path-bound (reads from a project directory).
-    ///
-    /// Gates advertising the `switch_project` meta-tool to the model — it's
-    /// only useful when at least one source would actually rebind, so a
-    /// no-domain build (mobile / macOS native) doesn't show a no-op.
-    pub fn has_path_bound_sources(&self) -> bool {
-        self.context_sources.iter().any(|s| s.is_path_bound())
-    }
-
     /// Re-bind every path-bound source to a different project directory.
     ///
-    /// Called when the model invokes the `switch_project` meta-tool (parsed in
-    /// `AgentLoop::parse_decision` → `AgentDecision::SwitchProject`). Each
-    /// path-bound source updates its interior-mutable directory; the rebound
-    /// sources' cached entries are dropped so the next `assemble()` doesn't
-    /// inject stale content from the old project — `refresh_sources()` (called
-    /// at the top of the next iteration) repopulates them from the new dir.
+    /// Called by `AppSession` to bind the context sources to the session's
+    /// workspace. Each path-bound source updates its interior-mutable
+    /// directory; the rebound sources' cached entries are dropped so the next
+    /// `assemble()` doesn't inject stale content from the old project —
+    /// `refresh_sources()` (called at the top of the next iteration)
+    /// repopulates them from the new dir.
     ///
     /// Returns the number of sources rebound (0 when the new dir equals the
     /// current one for every source, or no source is path-bound).
@@ -1030,7 +1021,7 @@ mod tests {
         );
     }
 
-    // ─── switch_project / rebind_project_dir (Issue #19) ───────────────────
+    // ─── rebind_project_dir (workspace rebind) ─────────────────────────────
 
     /// A path-bound source for testing: holds a dir in an interior-mutable
     /// cell, returns content derived from the current dir so rebind is
@@ -1063,26 +1054,6 @@ mod tests {
             *self.dir.lock().unwrap() = dir.to_path_buf();
             true
         }
-    }
-
-    #[test]
-    fn has_path_bound_sources_reflects_source_set() {
-        // Empty assembler → no path-bound sources.
-        let ca = ContextAssembler::new();
-        assert!(!ca.has_path_bound_sources());
-
-        // Ambient-only (StubSource defaults is_path_bound=false) → still none.
-        let ca = ContextAssembler::with_context_sources(vec![Arc::new(StubSource {
-            key: "stub",
-            content: "x",
-        })]);
-        assert!(!ca.has_path_bound_sources());
-
-        // A path-bound source → true.
-        let ca = ContextAssembler::with_context_sources(vec![Arc::new(PathBoundStub::new(
-            std::path::PathBuf::from("/proj-a"),
-        ))]);
-        assert!(ca.has_path_bound_sources());
     }
 
     #[tokio::test]

@@ -74,11 +74,24 @@ When you need to search the web, use web_search. When you need to read a specifi
 use web_fetch. When you need to read local files, use read_file. When your research is \
 complete, provide a comprehensive synthesis with citations.
 
-**Working on a different project:** The injected project context (project instructions, \
-file tree, project config, git status) is bound to the directory OneAI was started in. \
-If your research concerns a project at a DIFFERENT path, call `switch_project` with that \
-project's absolute root path FIRST so the project context is re-bound and you read \
-accurate (non-redundant) information. The new context is injected on the next iteration.";
+**Model-driven control tools** (call these when the task warrants them, instead of \
+just searching/fetching directly):
+- `delegate(task, agent_type, budget_tokens?)`: hand a self-contained subtask to a \
+specialized sub-agent that runs in its own fresh context window and returns a summary. \
+`agent_type` is one of `Plan` (decompose a task), `Explore` (search/understand), \
+`Code` (implement/modify), `Review` (audit). For research, `Explore` is the usual \
+choice — it searches and synthesizes independently. After calling `delegate`, the \
+main loop waits for the sub-agent's summary — do not call other tools in the same turn.
+- `switch_paradigm(paradigm)`: switch to a fixed graph flow. `paradigm` is one of \
+`plan` (structured decomposition), `reflect` (deep review of the last result), \
+`explore` (breadth-first search), `react` (return to the standard reason-then-act \
+loop). After calling, execution continues inside that paradigm's graph and the result \
+is fed back to you.
+- `enter_plan_mode(plan?)`: escalate from normal execution into plan mode. Call this \
+ONLY when the task is genuinely complex and needs step-by-step decomposition — NOT for \
+simple one-shot research questions, which you should answer directly. After calling, \
+you are switched into the plan toolset (task_create / exit_plan_mode) so you can \
+commit a plan for approval.";
 
 // ─── Research Sub-Agent Type Definitions ──────────────────────────────────────
 

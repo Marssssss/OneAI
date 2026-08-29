@@ -148,9 +148,8 @@ pub trait ContextSource: Send + Sync {
     }
 
     /// Whether this source reads from a project directory (vs. ambient data
-    /// like date/environment). Used to decide whether the `switch_project`
-    /// meta-tool is advertised to the model — it's only useful when at least
-    /// one source is path-bound, so a no-domain build doesn't show a no-op.
+    /// like date/environment). Path-bound sources can be re-bound to a
+    /// different project directory (e.g. the session's workspace).
     fn is_path_bound(&self) -> bool {
         false
     }
@@ -159,12 +158,12 @@ pub trait ContextSource: Send + Sync {
     /// when the source is path-bound and was rebound; `false` for ambient
     /// sources (date/environment), which are unaffected by a project switch.
     ///
-    /// Called by `ContextAssembler::rebind_project_dir` when the model invokes
-    /// the `switch_project` meta-tool. The next `refresh_sources()` → `load()`
-    /// reads the new directory, so the rebound project's context is injected
-    /// on the following iteration. Implementations hold the directory in an
-    /// interior-mutable cell (`Arc<RwLock<PathBuf>>`) so this is cheap and
-    /// visible to `load()` without rebuilding the source.
+    /// Called by `ContextAssembler::rebind_project_dir` when the session binds
+    /// to a workspace. The next `refresh_sources()` → `load()` reads the new
+    /// directory, so the rebound project's context is injected on the following
+    /// iteration. Implementations hold the directory in an interior-mutable
+    /// cell (`Arc<RwLock<PathBuf>>`) so this is cheap and visible to `load()`
+    /// without rebuilding the source.
     fn rebind_project_dir(&self, _dir: &Path) -> bool {
         false
     }

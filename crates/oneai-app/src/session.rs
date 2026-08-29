@@ -1191,13 +1191,13 @@ impl AppSession {
 
         // Rebind the project-scoped context sources (git status / file tree /
         // CLAUDE.md / repo map) to the session's workspace so the model sees
-        // the workspace's project context, not the app-global cwd's. Mirrors
-        // the model-driven switch_project (Issue #19) but fired per-turn from
-        // the bound workspace (deepseek-harness parity). When the session has
-        // no workspace, rebind back to the app-global cwd so a previous
-        // session's workspace doesn't leak (sources are shared across
-        // sessions). Sources whose `rebind_project_dir` is a no-op are
-        // unaffected.
+        // the workspace's project context, not the app-global cwd's. The
+        // workspace is fixed up-front — the model cannot switch projects
+        // mid-session. Fired per-turn from the bound workspace
+        // (deepseek-harness parity). When the session has no workspace, rebind
+        // back to the app-global cwd so a previous session's workspace doesn't
+        // leak (sources are shared across sessions). Sources whose
+        // `rebind_project_dir` is a no-op are unaffected.
         let rebind_to = self
             .workspace()
             .map(std::path::PathBuf::from)
