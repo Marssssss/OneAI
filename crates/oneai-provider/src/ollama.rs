@@ -92,7 +92,8 @@ impl OllamaProvider {
     /// Convert an InferenceRequest to Ollama-compatible (OpenAI format) request.
     fn to_ollama_request(&self, req: &InferenceRequest) -> Value {
         let mut messages = Vec::new();
-        for msg in &req.conversation.messages {
+        let coalesced = crate::merge_adjacent_system_messages(&req.conversation.messages);
+        for msg in &coalesced {
             let text = msg.text_content();
             let role = match msg.role {
                 Role::System => "system",

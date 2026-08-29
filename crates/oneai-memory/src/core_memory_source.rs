@@ -21,7 +21,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use oneai_core::error::Result;
 use oneai_core::MemoryFact;
-use oneai_domain::context_source::{ContextSource, RefreshPolicy};
+use oneai_domain::context_source::{ContextPosition, ContextSource, RefreshPolicy};
 use tokio::sync::RwLock;
 
 use crate::core_memory::CoreMemory;
@@ -54,7 +54,13 @@ impl CoreMemorySource {
         } else {
             let mut out = String::from("\n[Recalled Context]\n");
             for f in &facts {
-                out.push_str(&format!("- {} {}: {}\n", f.subject, f.predicate, f.content));
+                // Truncate oversized fact content: the recalled block re-enters
+                // the volatile tail every turn, so a multi-KB episodic fact
+                // (learning note, long decision) would otherwise dominate the
+                // per-turn cache-miss cost. The full fact stays recallable on
+                // demand via `memory_search`.
+                let content = truncate_fact(&f.content, MAX_RECALLED_FACT_CHARS);
+                out.push_str(&format!("- {} {}: {}\n", f.subject, f.predicate, content));
             }
             out
         };
@@ -97,6 +103,33 @@ impl ContextSource for CoreMemorySource {
     fn priority(&self) -> u32 {
         10
     }
+
+    fn position(&self) -> ContextPosition {
+        // The block renders `[Core Memory]` + the per-turn `[Recalled Context]`,
+        // and the recall section changes every iteration (per-turn recall). Keep
+        // it in the dynamic tail so a changing recall doesn't invalidate the
+        // cached durable history + base prompt sitting above it.
+        ContextPosition::Tail
+    }
+}
+
+/// Cap the length of a single recalled fact's content in the proactive
+/// `[Recalled Context]` block. The block now lives in the **frozen env region**
+/// (byte-stable within a turn and injected before the current user turn), so it
+/// no longer re-enters the always-miss volatile tail — a more generous bound
+/// keeps the recalled context complete without dragging down the prompt-prefix
+/// cache. The full fact remains recallable on demand via `memory_search`.
+const MAX_RECALLED_FACT_CHARS: usize = 2000;
+
+/// Truncate `content` to at most `max_chars` characters (char-aware), appending
+/// an ellipsis when truncated so the model knows there is more to recall.
+fn truncate_fact(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    let mut out: String = content.chars().take(max_chars).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -147,6 +180,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_recall_truncates_oversized_facts() {
+        let cm = Arc::new(CoreMemory::new(2048));
+        let src = CoreMemorySource::new(cm);
+        let mut big = fact("user.learning", "x");
+        big.content = "a".repeat(3000);
+        src.set_recall(vec![big]).await;
+        let loaded = src.load().await.unwrap();
+        assert!(loaded.contains("[Recalled Context]"));
+        let recalled = loaded.split("[Recalled Context]").nth(1).unwrap();
+        assert!(
+            recalled.contains('…'),
+            "must signal truncation: {recalled:?}"
+        );
+        assert!(
+            recalled.chars().count() <= MAX_RECALLED_FACT_CHARS + 40,
+            "recall block must stay bounded"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_recall_omits_section() {
         let cm = Arc::new(CoreMemory::new(2048));
         let src = CoreMemorySource::new(cm);
@@ -162,5 +215,8 @@ mod tests {
         let src = CoreMemorySource::new(cm);
         assert_eq!(src.refresh_policy(), RefreshPolicy::EveryIteration);
         assert!(src.priority() < 100);
+        // Per-turn recall changes the block every iteration — must be Tail so it
+        // can't invalidate the cached durable history.
+        assert_eq!(src.position(), ContextPosition::Tail);
     }
 }

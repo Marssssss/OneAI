@@ -29,8 +29,7 @@ use oneai_workflow::{
 };
 
 use crate::builtin_sources::{
-    DateSource, EnvironmentInfoSource, FileTreeSource, GitStatusSource, ProjectConfigSource,
-    ProjectInstructionsSource,
+    DateSource, EnvironmentInfoSource, GitStatusSource, ProjectInstructionsSource,
 };
 use crate::compression_template::CompressionTemplate;
 use crate::domain_pack::DomainPack;
@@ -391,8 +390,13 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             Arc::new(ProjectInstructionsSource::new(project_dir)), // Highest priority — project instructions
             Arc::new(RepoMapSource::new(project_dir)),            // Structural code summary (priority 8)
             Arc::new(GitStatusSource::new(project_dir)),
-            Arc::new(FileTreeSource::new(project_dir)),
-            Arc::new(ProjectConfigSource::new(project_dir)),
+            // FileTreeSource dropped: its directory listing is subsumed by
+            // RepoMapSource (which lists source files + their symbols); the
+            // remaining dirs/non-source files are reachable via `list_directory`.
+            // ProjectConfigSource dropped: it just dumps the first 50 lines of
+            // Cargo.toml/package.json (or "no recognized config file found"),
+            // which duplicates project_instructions + repo_map — pure cache-miss
+            // noise for zero reasoning value.
             Arc::new(DateSource::new()),
             Arc::new(EnvironmentInfoSource::new()),
         ],
@@ -1226,7 +1230,7 @@ mod tests {
         assert_eq!(pack.name, "coding");
         assert_eq!(pack.tools.len(), 12); // 9 original + ApplyPatchTool + WebSearchTool + FileWriteTool
         assert_eq!(pack.tool_decorators.len(), 12); // 8 original + apply_patch + web_search + write_file + code_interpreter
-        assert_eq!(pack.context_sources.len(), 7); // 6 original + RepoMapSource
+        assert_eq!(pack.context_sources.len(), 5); // ProjectInstructions + RepoMap + GitStatus + Date + Environment (FileTreeSource + ProjectConfigSource dropped)
         assert!(!pack.system_prompt_template.is_empty());
     }
 

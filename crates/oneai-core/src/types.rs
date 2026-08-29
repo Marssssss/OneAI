@@ -2121,6 +2121,13 @@ pub struct RecallConfig {
     pub strategy: RecallStrategy,
     /// Maximum number of facts to recall per turn.
     pub top_k: usize,
+    /// Minimum absolute relevance a fact must clear to be recalled. Facts below
+    /// this floor are dropped *before* min-max normalization, so proactive
+    /// recall returns nothing when nothing is actually relevant (rather than
+    /// surfacing unrelated-but-important facts). Applies to both the keyword
+    /// relevance and embedding-cosine paths. Default `0.25`.
+    #[serde(default = "default_min_relevance")]
+    pub min_relevance: f32,
     /// Whether to apply time-decay weighting during recall.
     pub time_decay: bool,
     /// Weight of the relevance factor in the three-factor scorer
@@ -2161,12 +2168,16 @@ fn default_recency_half_life_secs() -> u64 {
 fn default_normalize_factors() -> bool {
     true
 }
+fn default_min_relevance() -> f32 {
+    0.25
+}
 
 impl Default for RecallConfig {
     fn default() -> Self {
         Self {
             strategy: RecallStrategy::Hybrid,
             top_k: 5,
+            min_relevance: default_min_relevance(),
             time_decay: true,
             relevance_weight: default_relevance_weight(),
             recency_weight: default_recency_weight(),
@@ -2196,6 +2207,12 @@ impl RecallConfig {
     /// Toggle min-max normalization of the three factors.
     pub fn normalize_factors(mut self, on: bool) -> Self {
         self.normalize_factors = on;
+        self
+    }
+
+    /// Set the minimum relevance floor for recall.
+    pub fn min_relevance(mut self, v: f32) -> Self {
+        self.min_relevance = v.clamp(0.0, 1.0);
         self
     }
 }
@@ -2534,6 +2551,34 @@ pub fn keyword_matches_any_token(text: &str, query: &str) -> bool {
         }
     }
     false
+}
+
+/// Quality-scaled keyword relevance for recall (0.0 = no match, up to 0.6 =
+/// strong match). Unlike the boolean [`keyword_matches_any_token`], this scores
+/// match strength as the fraction of meaningful query tokens present in `text`.
+/// A broad CJK query whose single-char tokens merely scatter across a long
+/// document scores low, so a `min_relevance` floor can drop unrelated facts.
+pub fn keyword_relevance(text: &str, query: &str) -> f32 {
+    let text_l = text.to_lowercase();
+    let tokens: Vec<String> = tokenize_keywords(query)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .filter(|t| {
+            let is_cjk = t.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+            is_cjk || !STOPWORDS.iter().any(|s| *s == t)
+        })
+        .collect();
+    if tokens.is_empty() {
+        return 0.0;
+    }
+    let matched = tokens
+        .iter()
+        .filter(|t| text_l.contains(t.as_str()))
+        .count();
+    if matched == 0 {
+        return 0.0;
+    }
+    0.6 * (matched as f32) / (tokens.len() as f32)
 }
 
 // ─── Lifecycle Hooks ──────────────────────────────────────────────────────────
@@ -2963,6 +3008,25 @@ mod tests {
             "使用 pnpm 管理依赖",
             "package manager pnpm"
         ));
+    }
+
+    #[test]
+    fn keyword_relevance_scores_match_strength_not_binary() {
+        // A specific query matching its fact scores high.
+        let strong = keyword_relevance("用户偏好包管理器", "包管理器");
+        // A broad CJK query scattering single chars across an unrelated short
+        // text scores low (this is what makes `min_relevance` able to drop
+        // unrelated facts under no-embedding keyword recall).
+        let weak = keyword_relevance("苹果是一种水果", "帮我写一个python计算器程序");
+        assert!(
+            strong > 0.3,
+            "strong match should clear a relevance floor: {strong}"
+        );
+        assert!(
+            weak < 0.3,
+            "scattered CJK match should fall below the floor: {weak}"
+        );
+        assert!(strong > weak);
     }
 
     #[test]

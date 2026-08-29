@@ -178,6 +178,7 @@ impl EpisodicMemory {
         if !self.outcome.is_empty() {
             content.push_str(&format!("\nOutcome: {}", self.outcome));
         }
+        let (content, _) = crate::fact_store::truncate_fact_content(&content);
         MemoryFact {
             id: self.id.clone(),
             user_id: String::new(),

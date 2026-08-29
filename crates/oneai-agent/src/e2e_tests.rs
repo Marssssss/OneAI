@@ -829,6 +829,50 @@ async fn e2e_scenario_4c_paradigm_switch_preserves_stable_prefix() {
     );
 }
 
+// ─── Scenario 4e: base prompt anchors the cache at index 0 ───────────────────
+
+/// The base prompt (system) must be the FIRST message of the durable log, before
+/// the user task. Otherwise the user task sits at byte 0 and every new task
+/// invalidates the provider's prompt-prefix cache for the base prompt + durable
+/// history in one shot (the "cache hit rate ~5%" failure mode).
+#[tokio::test]
+async fn e2e_scenario_4e_base_prompt_first_not_user_task() {
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("done")]);
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(5),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("build a thing", &observer)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.conversation.messages[0].role,
+        Role::System,
+        "base prompt must be the first message: {:?}",
+        result.conversation.messages[0].role
+    );
+    assert_eq!(
+        result.conversation.messages[1].role,
+        Role::User,
+        "user task must follow the base prompt"
+    );
+    assert_eq!(
+        result.conversation.messages[1].text_content(),
+        "build a thing",
+        "the original user task must survive the reorder"
+    );
+}
+
 // ─── Scenario 4d: empty-response retry preserves prompt_cache_policy ────────
 
 /// The empty-response retry must carry `prompt_cache_policy` into the
@@ -3969,10 +4013,12 @@ async fn e2e_recovery_escalate_note_follows_tool_result() {
         }
     }
 
-    // The escalation note itself is still present (deferred, not dropped).
+    // The escalation note itself is still present (deferred, not dropped). It is
+    // a USER message now — mid-conversation system notes are hoisted to the
+    // front by DeepSeek and would break the prompt-prefix cache.
     assert!(
         msgs.iter().any(|m| {
-            m.role == oneai_core::Role::System && m.text_content().contains("Error escalated")
+            m.role == oneai_core::Role::User && m.text_content().contains("Error escalated")
         }),
         "the escalation note should still be injected (after the tool result)"
     );

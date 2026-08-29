@@ -66,6 +66,10 @@ pub struct MemoryManagerConfig {
     pub compression_threshold_tokens: usize,
     /// Number of recent turns to keep intact during compression.
     pub compression_keep_recent_turns: usize,
+    /// Token budget for the always-in-context core-memory block. Overflow is
+    /// evicted (lowest-importance first) to the archival tier — so this caps the
+    /// per-turn tail cost without losing facts.
+    pub core_memory_budget_tokens: usize,
 }
 
 impl Default for MemoryManagerConfig {
@@ -73,6 +77,7 @@ impl Default for MemoryManagerConfig {
         Self {
             compression_threshold_tokens: 4000,
             compression_keep_recent_turns: 6,
+            core_memory_budget_tokens: 256,
         }
     }
 }
@@ -181,12 +186,13 @@ impl MemoryManager {
     /// persistence backend, memory is purely in-memory (lost on restart).
     /// Without an embedding service, recall is keyword-based.
     pub fn new() -> Self {
+        let budget = MemoryManagerConfig::default().core_memory_budget_tokens;
         Self {
             reflection: None,
             config: MemoryManagerConfig::default(),
             persistence: None,
             embedding_service: None,
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -196,12 +202,13 @@ impl MemoryManager {
 
     /// Create a new memory manager with custom configuration.
     pub fn with_config(config: MemoryManagerConfig) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: None,
             config,
             persistence: None,
             embedding_service: None,
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -218,12 +225,13 @@ impl MemoryManager {
         config: MemoryManagerConfig,
         summarizer: Arc<dyn LlmProvider>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
             config,
             persistence: None,
             embedding_service: None,
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -236,12 +244,13 @@ impl MemoryManager {
         config: MemoryManagerConfig,
         persistence: Arc<dyn MemoryPersistence>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: None,
             config,
             persistence: Some(persistence),
             embedding_service: None,
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -259,12 +268,13 @@ impl MemoryManager {
         summarizer: Arc<dyn LlmProvider>,
         persistence: Arc<dyn MemoryPersistence>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
             config,
             persistence: Some(persistence),
             embedding_service: None,
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -281,12 +291,13 @@ impl MemoryManager {
         config: MemoryManagerConfig,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: None,
             config,
             persistence: None,
             embedding_service: Some(embedding_service),
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -300,12 +311,13 @@ impl MemoryManager {
         summarizer: Arc<dyn LlmProvider>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
             config,
             persistence: None,
             embedding_service: Some(embedding_service),
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -325,12 +337,13 @@ impl MemoryManager {
         persistence: Arc<dyn MemoryPersistence>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
+        let budget = config.core_memory_budget_tokens;
         Self {
             reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
             config,
             persistence: Some(persistence),
             embedding_service: Some(embedding_service),
-            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(budget)),
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
@@ -638,6 +651,16 @@ impl MemoryManager {
                 } else {
                     self.fact_archive.upsert(f).await;
                 }
+            }
+            // Reloading core-tier facts bypasses the `core_memory_edit` write
+            // path (the only other place the budget is enforced), so a session
+            // restart re-inflates the always-in-context block beyond its
+            // 2048-token budget with stale facts. Enforce here too — evicted
+            // facts are re-tagged archival and paged out, exactly like the tool
+            // path, so the `[Core Memory]` block stays bounded across restarts.
+            let evicted = self.core_memory.enforce_budget().await;
+            if !evicted.is_empty() {
+                self.archive_facts(evicted).await;
             }
         }
         // This session's episodic facts (always archival-tier — episodic

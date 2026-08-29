@@ -15,7 +15,7 @@ use oneai_core::error::Result;
 use regex::Regex;
 use tokio::sync::RwLock;
 
-use crate::context_source::{ContextSource, RefreshPolicy};
+use crate::context_source::{ContextPosition, ContextSource, RefreshPolicy};
 
 // ─── Language Detection ─────────────────────────────────────────────────────
 
@@ -733,6 +733,12 @@ impl ContextSource for RepoMapSource {
     fn priority(&self) -> u32 {
         8
     }
+    fn position(&self) -> ContextPosition {
+        // The repo map changes whenever the agent adds/edits source files, so it
+        // must sit in the dynamic tail — a changing repo map in the cached prefix
+        // would invalidate the entire durable history on every file edit.
+        ContextPosition::Tail
+    }
     fn is_path_bound(&self) -> bool {
         true
     }
@@ -753,6 +759,13 @@ mod tests {
         assert_eq!(Language::from_ext("ts"), Language::TypeScript);
         assert_eq!(Language::from_ext("go"), Language::Go);
         assert_eq!(Language::from_ext("txt"), Language::Unknown);
+    }
+
+    #[test]
+    fn repo_map_source_sits_in_dynamic_tail() {
+        let src = RepoMapSource::new(".");
+        assert_eq!(src.key(), "repo_map");
+        assert_eq!(src.position(), ContextPosition::Tail);
     }
 
     #[test]

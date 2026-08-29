@@ -26,6 +26,24 @@ use tokio::sync::RwLock;
 /// "current truth" is the single live row (the Mem0 invariant).
 pub const SUPERSEDED_HISTORY_KEY: &str = "_superseded_history";
 
+/// Max length (chars) of a single fact's `content` when written to memory. A
+/// fact is an atomic assertion, not a document — oversized content (a multi-KB
+/// learning note) both bloats proactive recall and matches almost any query
+/// under CJK single-char tokenization. Cap at write time; the full material
+/// belongs in working state / files, not the memory fact store.
+pub(crate) const MAX_FACT_CONTENT_CHARS: usize = 200;
+
+/// Truncate fact content to [`MAX_FACT_CONTENT_CHARS`] (char-aware), appending
+/// an ellipsis when truncated. Returns `(content, was_truncated)`.
+pub(crate) fn truncate_fact_content(content: &str) -> (String, bool) {
+    if content.chars().count() <= MAX_FACT_CONTENT_CHARS {
+        return (content.to_string(), false);
+    }
+    let mut out: String = content.chars().take(MAX_FACT_CONTENT_CHARS).collect();
+    out.push('…');
+    (out, true)
+}
+
 /// Outcome of a conflict-resolved upsert.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -551,19 +569,17 @@ impl MemoryFactStore {
                         }
                     }
                     None => {
-                        // Token-level keyword match (no-embedding recall
-                        // upgrade): see `search_keyword_with` for rationale.
-                        if oneai_core::keyword_matches_any_token(&f.content, query_text)
-                            || oneai_core::keyword_matches_any_token(&f.subject, query_text)
-                            || oneai_core::keyword_matches_any_token(&f.predicate, query_text)
-                        {
-                            0.6
-                        } else {
-                            0.0
-                        }
+                        // Keyword relevance is quality-scaled (fraction of
+                        // matching query tokens), so a broad CJK query that
+                        // merely scatters single chars across a long fact scores
+                        // low and is dropped by `min_relevance`. Best match
+                        // across content / subject / predicate.
+                        oneai_core::keyword_relevance(&f.content, query_text)
+                            .max(oneai_core::keyword_relevance(&f.subject, query_text))
+                            .max(oneai_core::keyword_relevance(&f.predicate, query_text))
                     }
                 };
-                if relevance <= 0.0 {
+                if relevance < cfg.min_relevance {
                     return None;
                 }
                 let recency = if cfg.time_decay {
@@ -749,6 +765,18 @@ mod tests {
             superseded_at: None,
             pinned: false,
         }
+    }
+
+    #[test]
+    fn truncate_fact_content_caps_oversized_content() {
+        let (out, truncated) = truncate_fact_content(&"a".repeat(5000));
+        assert!(truncated);
+        assert_eq!(out.chars().count(), MAX_FACT_CONTENT_CHARS + 1); // + ellipsis
+        assert!(out.ends_with('…'));
+
+        let (out2, truncated2) = truncate_fact_content("short fact");
+        assert!(!truncated2);
+        assert_eq!(out2, "short fact");
     }
 
     #[tokio::test]
@@ -1027,6 +1055,7 @@ mod tests {
         let cfg = oneai_core::RecallConfig {
             strategy: oneai_core::RecallStrategy::Hybrid,
             top_k: 2,
+            min_relevance: 0.0,
             time_decay: true,
             relevance_weight: 0.0,
             recency_weight: 1.0,

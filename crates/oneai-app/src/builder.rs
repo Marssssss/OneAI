@@ -144,6 +144,9 @@ pub struct AppBuilder {
     parser: Option<Arc<dyn OutputParser>>,
     /// Memory manager.
     memory_manager: Option<Arc<MemoryManager>>,
+    /// Core-memory token budget (always-in-context tier). Overrides the default
+    /// (256) when the builder constructs the memory manager.
+    core_memory_budget_tokens: Option<usize>,
     /// RAG document index.
     rag_index: Option<Arc<DocumentIndex>>,
     /// Skill selector.
@@ -337,6 +340,7 @@ impl AppBuilder {
             engine_bus: None,
             parser: None,
             memory_manager: None,
+            core_memory_budget_tokens: None,
             rag_index: None,
             skill_selector: None,
             skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
@@ -633,6 +637,29 @@ impl AppBuilder {
         self
     }
 
+    /// Set the token budget for the always-in-context core-memory block.
+    ///
+    /// The core block holds the agent's curated identity/preference facts and
+    /// is re-sent every turn (it lives in the volatile tail), so keeping it
+    /// small directly cuts per-turn cache-miss tokens. Overflow beyond this
+    /// budget is evicted (lowest-importance first) to the archival tier and
+    /// recalled on demand via `memory_search`. Defaults to 256 tokens.
+    pub fn core_memory_budget(mut self, tokens: usize) -> Self {
+        self.core_memory_budget_tokens = Some(tokens);
+        self
+    }
+
+    /// The memory-manager config, with any builder-overridden core-memory
+    /// budget applied over the defaults. Takes the `Copy` budget field rather
+    /// than `&self` so it stays callable after `self` is partially moved.
+    fn memory_manager_config(budget: Option<usize>) -> MemoryManagerConfig {
+        let mut config = MemoryManagerConfig::default();
+        if let Some(b) = budget {
+            config.core_memory_budget_tokens = b;
+        }
+        config
+    }
+
     /// Set the RAG document index.
     pub fn rag_index(mut self, index: Arc<DocumentIndex>) -> Self {
         self.rag_index = Some(index);
@@ -775,7 +802,7 @@ impl AppBuilder {
     /// ```
     pub fn with_memory_reflection(mut self) -> Self {
         if let Some(provider) = &self.provider {
-            let config = MemoryManagerConfig::default();
+            let config = Self::memory_manager_config(self.core_memory_budget_tokens);
             self.memory_manager = Some(Arc::new(MemoryManager::with_compressor_and_reflection(
                 config,
                 provider.clone(),
@@ -1466,7 +1493,7 @@ impl AppBuilder {
 
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
-            let config = MemoryManagerConfig::default();
+            let config = Self::memory_manager_config(self.core_memory_budget_tokens);
             self.memory_manager = Some(Arc::new(MemoryManager::with_persistence(config, store)));
         } else {
             // If a MemoryManager was already created (e.g., with_compressor_and_reflection),
@@ -1495,7 +1522,7 @@ impl AppBuilder {
 
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
-            let config = MemoryManagerConfig::default();
+            let config = Self::memory_manager_config(self.core_memory_budget_tokens);
             self.memory_manager = Some(Arc::new(MemoryManager::with_persistence(config, store)));
         }
 
@@ -2347,16 +2374,17 @@ impl AppBuilder {
         });
 
         // Wire embedding service into MemoryManager if configured
+        let memory_manager_config = Self::memory_manager_config(self.core_memory_budget_tokens);
         let memory_manager = if embedding_service.is_some() && self.memory_manager.is_none() {
             // Create MemoryManager with embedding service
-            let config = MemoryManagerConfig::default();
             Arc::new(MemoryManager::with_embedding(
-                config,
+                memory_manager_config,
                 embedding_service.clone().unwrap(),
             ))
         } else {
-            self.memory_manager
-                .unwrap_or_else(|| Arc::new(MemoryManager::new()))
+            self.memory_manager.unwrap_or_else(|| {
+                Arc::new(MemoryManager::with_config(memory_manager_config.clone()))
+            })
         };
 
         // Default retrieval stack (oneai-vector): wire an InMemoryVectorBackend

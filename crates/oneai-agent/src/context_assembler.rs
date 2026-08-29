@@ -117,6 +117,14 @@ impl ContextAssembler {
     /// reference); older ones over `MAX_STALE_TOOL_RESULT_CHARS` are capped to a
     /// snippet + a pointer. Idempotent + no-op on short results / small convs.
     ///
+    /// **Cache stability**: only tool results *before* the current user turn
+    /// (marked `CURRENT_TURN_KEY`) are considered stale. That set is fixed
+    /// within a turn, so the truncation is byte-stable across iterations. A
+    /// sliding "last N of the ever-growing tool count" window would re-truncate
+    /// one more old result each iteration — a tool output flips full→truncated
+    /// mid-turn, changing the frozen history right where the provider's
+    /// prompt-prefix cache holds it.
+    ///
     /// `memory_search` only searches archived facts, not raw tool outputs, so
     /// the pointer tells the model to re-run the tool for the full output (the
     /// durable transcript has it, but it's not in context anymore) — never a
@@ -126,11 +134,15 @@ impl ContextAssembler {
         const MAX_STALE_TOOL_RESULT_CHARS: usize = 2000;
         const KEEP_FULL_RECENT: usize = 4;
 
-        // Indexes of Tool-role messages, in order.
+        // Indexes of Tool-role messages that precede the current user turn, in
+        // order. The current turn's own tool results (after the mark) are the
+        // active batch and always stay full; only prior-turn results are capped.
+        let turn_idx = current_user_turn_idx(conversation).unwrap_or(conversation.messages.len());
         let tool_idx: Vec<usize> = conversation
             .messages
             .iter()
             .enumerate()
+            .take(turn_idx)
             .filter(|(_, m)| m.role == oneai_core::Role::Tool)
             .map(|(i, _)| i)
             .collect();
@@ -192,29 +204,83 @@ impl ContextAssembler {
             }
             if let Some(content) = self.cached_context.get(source.key()) {
                 if !content.is_empty() {
-                    let context_msg = oneai_core::Message::system(format!(
-                        "[Context: {}] {}",
-                        source.key(),
-                        content
-                    ));
+                    let text = format!("[Context: {}] {}", source.key(), content);
                     match source.position() {
-                        ContextPosition::Prefix => prefix.push(context_msg),
-                        ContextPosition::Tail => tail.push(context_msg),
+                        ContextPosition::Prefix => prefix.push(oneai_core::Message::system(text)),
+                        // Tail sources are injected as USER messages, not system:
+                        // DeepSeek (and some OpenAI-compatible endpoints) hoist
+                        // every system message to the front, which would drag the
+                        // volatile tail into the cached prefix. A user-role block
+                        // stays in-order at the end, so a changing tail only
+                        // invalidates the tail itself, not the durable history.
+                        ContextPosition::Tail => tail.push(oneai_core::Message::user(text)),
                         // `ContextPosition` is #[non_exhaustive] — unknown
                         // positions default to the stable, cache-friendly prefix.
-                        _ => prefix.push(context_msg),
+                        _ => prefix.push(oneai_core::Message::system(text)),
                     }
                 }
             }
         }
 
-        // Prepend prefix sources (iterated in reverse so the ascending-priority
-        // order survives the index-0 inserts), then append the tail sources.
-        for msg in prefix.into_iter().rev() {
-            conversation.messages.insert(0, msg);
+        // Diagnosis: the dynamic tail is the dominant prompt-cache-miss cost —
+        // a source here (git status / file tree / repo map) changes after every
+        // file edit and invalidates the provider's cache. Log the per-block
+        // size so oversized volatile sources can be shrunk.
+        if !tail.is_empty() {
+            let mut parts = Vec::with_capacity(tail.len());
+            for m in &tail {
+                let text = m.text_content();
+                let key = if let Some(rest) = text.strip_prefix("[Context: ") {
+                    rest.split(']').next().unwrap_or("?").to_string()
+                } else {
+                    text.lines()
+                        .next()
+                        .unwrap_or("?")
+                        .chars()
+                        .take(20)
+                        .collect::<String>()
+                };
+                parts.push(format!("{key}:{}ch", text.chars().count()));
+            }
+            tracing::info!("context tail: {}", parts.join(", "));
         }
-        for msg in tail {
-            conversation.add_message(msg);
+
+        // Insert prefix sources immediately AFTER the durable base prompt, not
+        // at index 0. The base prompt is the single largest + most byte-stable
+        // block in the request, so it must sit at the very front to anchor the
+        // provider's prompt-prefix cache — a prefix source injected *before* it
+        // would shift it right and, if that source ever changed, invalidate the
+        // cached base prompt + full durable history sitting below it. We find
+        // the first system message (the base prompt) and insert after it
+        // (iterated in reverse so ascending-priority order survives the
+        // fixed-index inserts); falls back to index 0 when there is no base
+        // prompt yet. Tail sources are appended at the end, as before.
+        let insert_at = conversation
+            .messages
+            .iter()
+            .position(|m| m.role == oneai_core::Role::System)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        for msg in prefix.into_iter().rev() {
+            conversation.messages.insert(insert_at, msg);
+        }
+        // Insert the tail (env) sources immediately BEFORE the current user
+        // turn (marked with CURRENT_TURN_KEY) so the frozen env sits inside the
+        // cacheable prefix — before the turn — rather than after it in the
+        // always-miss tail. Inserted in reverse so the ascending-priority order
+        // survives the fixed-index inserts. Falls back to appending when no turn
+        // is marked (hand-assembled test conversations).
+        match current_user_turn_idx(conversation) {
+            Some(idx) => {
+                for msg in tail.into_iter().rev() {
+                    conversation.messages.insert(idx, msg);
+                }
+            }
+            None => {
+                for msg in tail {
+                    conversation.add_message(msg);
+                }
+            }
         }
     }
 
@@ -273,6 +339,132 @@ impl Default for ContextAssembler {
     }
 }
 
+/// Volatility rank for a dynamic-tail segment (lower = more stable, injected
+/// earlier). The tail is ordered low→high volatility so that when a volatile
+/// segment changes mid-session (git status after an edit, per-turn recall), it
+/// only invalidates the segments *after* it — the stable segments ahead of it
+/// stay cached. This is what keeps the provider's prompt-prefix cache warm.
+pub fn tail_volatility_rank(text: &str) -> u32 {
+    if let Some(rest) = text.strip_prefix("[Context: ") {
+        let key = rest.split(']').next().unwrap_or("");
+        return match key {
+            "core_memory" => 0,
+            "date" => 1,
+            "repo_map" => 3,
+            "git_status" => 4,
+            "environment" => 5,
+            "project_config" => 7,
+            _ => 100,
+        };
+    }
+    if text.starts_with("[Paradigm switch]") || text.starts_with("# Active skill") {
+        return 2;
+    }
+    if text.starts_with("[Plan & Progress]") {
+        return 3;
+    }
+    if text.starts_with("[Decisions Made]") {
+        return 4;
+    }
+    if text.starts_with("[Blockers]") {
+        return 5;
+    }
+    if text.starts_with("# Newly available tools") {
+        return 12;
+    }
+    if text.starts_with("[Background tasks]") {
+        return 13;
+    }
+    100
+}
+
+/// Whether a message is a dynamic-tail segment (a context source or a pinned
+/// block). Real user turns never carry these prefixes, so this cleanly
+/// separates the ephemeral tail from the durable history once the tail is
+/// injected as `Role::User`. `pub(crate)` so callers (e.g. the group-chat
+/// moderator's "last user message" heuristic) can skip tail segments.
+pub(crate) fn is_tail_segment(text: &str) -> bool {
+    text.starts_with("[Context: ")
+        || text.starts_with("[Paradigm switch]")
+        || text.starts_with("[Plan & Progress]")
+        || text.starts_with("[Decisions Made]")
+        || text.starts_with("[Blockers]")
+        || text.starts_with("# Active skill")
+        || text.starts_with("# Newly available tools")
+        || text.starts_with("[Background tasks]")
+}
+
+/// Metadata key marking the message that started the current user turn.
+///
+/// Set when `LoopState::new`/`from_conversation` appends the incoming user
+/// message; cleared from prior messages on a fresh turn. The env context
+/// sources are injected immediately BEFORE the marked message so the frozen env
+/// sits inside the cacheable prefix (before the turn) rather than in the
+/// always-miss tail.
+pub(crate) const CURRENT_TURN_KEY: &str = "oneai_current_turn";
+
+/// Index of the current user turn message (marked with [`CURRENT_TURN_KEY`]).
+///
+/// Returns `None` when no message is marked — e.g. a hand-assembled test
+/// conversation. Callers fall back to appending in that case.
+pub(crate) fn current_user_turn_idx(conv: &Conversation) -> Option<usize> {
+    conv.messages
+        .iter()
+        .position(|m| m.metadata.contains_key(CURRENT_TURN_KEY))
+}
+
+/// Sort the dynamic tail (context sources + pinned blocks, both injected as
+/// user messages at the end of the assembled request) by volatility, low→high.
+/// The tail is a contiguous suffix of tail-prefixed messages, so we find its
+/// start and stable-sort just that suffix.
+pub fn sort_tail_by_volatility(conv: &mut Conversation) {
+    let n = conv.messages.len();
+    let mut start = n;
+    while start > 0 && is_tail_segment(&conv.messages[start - 1].text_content()) {
+        start -= 1;
+    }
+    if start == n {
+        return;
+    }
+    let mut tail: Vec<oneai_core::Message> = conv.messages.split_off(start);
+    tail.sort_by_key(|m| tail_volatility_rank(&m.text_content()));
+    conv.messages.extend(tail);
+}
+
+/// Merge the dynamic tail (a contiguous suffix of user messages, already sorted
+/// by volatility) into a single user message, truncated to `max_chars` from the
+/// END — so the most-volatile segments are dropped first. The tail re-enters
+/// every turn and always misses the provider's prompt-prefix cache, so one
+/// bounded message (a) removes N-1 role markers and (b) caps the always-miss
+/// region to a caller-derived fraction of the context window.
+pub fn merge_tail_into_single_message(conv: &mut Conversation, max_chars: usize) {
+    let n = conv.messages.len();
+    let mut start = n;
+    while start > 0 && is_tail_segment(&conv.messages[start - 1].text_content()) {
+        start -= 1;
+    }
+    if start == n {
+        return;
+    }
+    let tail: Vec<oneai_core::Message> = conv.messages.split_off(start);
+    let mut merged = tail
+        .into_iter()
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let truncated = merged.chars().count() > max_chars;
+    if truncated {
+        let cut: String = merged.chars().take(max_chars).collect();
+        merged = format!("{cut}\n…[tail truncated to {max_chars} chars]");
+    }
+    tracing::info!(
+        "tail merged: {} chars{} (budget {max_chars} chars)",
+        merged.chars().count(),
+        if truncated { " [truncated]" } else { "" }
+    );
+    conv.add_message(oneai_core::Message::user(merged));
+}
+
 /// Build the sectioned context snapshot for one iteration (issue #40
 /// trajectory panel).
 ///
@@ -306,38 +498,54 @@ pub fn build_context_snapshot(
     let mut latest_user: Option<String> = None;
     let (mut n_user, mut n_assistant, mut n_tool) = (0usize, 0usize, 0usize);
 
+    // A context section (context source or pinned block) can now ride as either
+    // a system message (stable prefix) or a user message (volatile tail), so the
+    // classifier must handle both roles. Only an un-classified system message is
+    // the base prompt; an un-classified user message is a real user turn.
+    let classify = |text: &str| -> Option<ContextKey> {
+        if let Some(rest) = text.strip_prefix("[Context: ") {
+            let source_key = rest.split(']').next().unwrap_or("").to_string();
+            return Some(ContextKey::Context(source_key));
+        }
+        if text.starts_with("[Task Anchor]") {
+            return Some(ContextKey::TaskAnchor);
+        }
+        if text.starts_with("[Plan & Progress]") {
+            return Some(ContextKey::PlanProgress);
+        }
+        if text.starts_with("[Decisions Made]") {
+            return Some(ContextKey::Decisions);
+        }
+        if text.starts_with("[Blockers]") {
+            return Some(ContextKey::Blockers);
+        }
+        if text.starts_with("# Available skills") {
+            return Some(ContextKey::SkillMenu);
+        }
+        if text.starts_with("# Active skill") {
+            return Some(ContextKey::ActiveSkill);
+        }
+        if text.starts_with("# Newly available tools") {
+            return Some(ContextKey::NewTools);
+        }
+        if text.starts_with("[Background tasks]") {
+            return Some(ContextKey::BackgroundTasks);
+        }
+        None
+    };
+
     for msg in &conversation.messages {
         match msg.role {
-            Role::System => {
+            Role::System | Role::User => {
                 let text = msg.text_content();
-                let key = if let Some(rest) = text.strip_prefix("[Context: ") {
-                    let source_key = rest.split(']').next().unwrap_or("").to_string();
-                    ContextKey::Context(source_key)
-                } else if text.starts_with("[Task Anchor]") {
-                    ContextKey::TaskAnchor
-                } else if text.starts_with("[Plan & Progress]") {
-                    ContextKey::PlanProgress
-                } else if text.starts_with("[Decisions Made]") {
-                    ContextKey::Decisions
-                } else if text.starts_with("[Blockers]") {
-                    ContextKey::Blockers
-                } else if text.starts_with("# Available skills") {
-                    ContextKey::SkillMenu
-                } else if text.starts_with("# Active skill") {
-                    ContextKey::ActiveSkill
-                } else if text.starts_with("# Newly available tools") {
-                    ContextKey::NewTools
-                } else if text.starts_with("[Background tasks]") {
-                    ContextKey::BackgroundTasks
-                } else {
+                if let Some(key) = classify(&text) {
+                    sections.push((key, text));
+                } else if msg.role == Role::System {
                     base_parts.push(text);
-                    continue;
-                };
-                sections.push((key, text));
-            }
-            Role::User => {
-                n_user += 1;
-                latest_user = Some(msg.text_content());
+                } else {
+                    n_user += 1;
+                    latest_user = Some(text);
+                }
             }
             Role::Assistant => n_assistant += 1,
             Role::Tool => n_tool += 1,
@@ -692,6 +900,45 @@ mod tests {
         assert!(
             text2.contains("STUB-BASELINE-CONTENT"),
             "OnceAtStart source must be re-injected every turn (ephemeral model): {text2}"
+        );
+    }
+
+    /// The durable base prompt (the largest + most byte-stable block) must stay
+    /// at index 0 of the assembled request — a Prefix context source is inserted
+    /// AFTER it, never before it. Prepending a prefix source at index 0 would
+    /// shift the base prompt right and, if that source ever changed, invalidate
+    /// the cached base prompt + durable history sitting below it.
+    #[tokio::test]
+    async fn prefix_source_inserted_after_base_prompt_not_before() {
+        let sources: Vec<Arc<dyn ContextSource>> = vec![Arc::new(StubSource {
+            key: "stable_instructions",
+            content: "STABLE-INSTRUCTIONS",
+        })];
+        let mut ca = ContextAssembler::with_context_sources(sources);
+        ca.refresh_sources().await.unwrap();
+
+        let mut state = LoopState::new("do something");
+        // Simulate the durable base prompt at index 0 (as run_with_observer
+        // writes it before the loop starts).
+        state
+            .conversation
+            .messages
+            .insert(0, oneai_core::Message::system("BASE-PROMPT"));
+
+        let conv = ca.assemble(&state).unwrap();
+
+        // Base prompt still first; the prefix source lands after it.
+        assert_eq!(conv.messages[0].role, oneai_core::Role::System);
+        assert_eq!(conv.messages[0].text_content(), "BASE-PROMPT");
+        assert!(
+            conv.messages[1]
+                .text_content()
+                .contains("STABLE-INSTRUCTIONS"),
+            "prefix source must follow the base prompt, not precede it: {:?}",
+            conv.messages
+                .iter()
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>()
         );
     }
 

@@ -31,6 +31,13 @@ async fn build_fact(
     content: String,
     importance: f32,
 ) -> MemoryFact {
+    let (content, truncated) = crate::fact_store::truncate_fact_content(&content);
+    if truncated {
+        tracing::warn!(
+            "fact content truncated to {} chars (subject={subject})",
+            crate::fact_store::MAX_FACT_CONTENT_CHARS
+        );
+    }
     MemoryFact {
         id: format!("fact_{}", uuid::Uuid::new_v4()),
         user_id: mm.user_id().await,
@@ -287,7 +294,9 @@ impl Tool for CoreMemoryEditTool {
         to use, modules never to touch, token/step budgets, coding standards \
         — should be written here so they stay salient every turn and do NOT \
         depend on being recalled from history (long context degrades \
-        attention to early constraints)."
+        attention to early constraints). Content is capped at 200 characters \
+        — keep facts concise assertions; store longer material as a file, not \
+        memory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -297,7 +306,7 @@ impl Tool for CoreMemoryEditTool {
                 "fact_type": { "type": "string", "description": "Category (e.g. user_tooling_pref, decision, open_task)" },
                 "subject": { "type": "string", "description": "What the fact is about, e.g. 'user.package_manager'" },
                 "predicate": { "type": "string", "description": "The assertion, e.g. 'prefers', 'decided_to', 'status_is'" },
-                "content": { "type": "string", "description": "The fact's value, e.g. 'pnpm'" },
+                "content": { "type": "string", "description": "The fact's value, e.g. 'pnpm'. Capped at 200 characters." },
                 "importance": { "type": "number", "description": "Optional salience 0.0–1.0 for recall ranking; omit to use the per-type default" }
             },
             "required": ["fact_type", "subject", "predicate", "content"]
@@ -388,7 +397,9 @@ impl Tool for ArchivalInsertTool {
     fn description(&self) -> &str {
         "Store a fact in archival memory for later recall via memory_search. \
         Use this for facts worth keeping but not needed every turn (e.g. a \
-        resolved decision, a reference, a one-off observation)."
+        resolved decision, a reference, a one-off observation). Content is \
+        capped at 200 characters — keep facts concise; store longer material \
+        as a file, not memory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -398,7 +409,7 @@ impl Tool for ArchivalInsertTool {
                 "fact_type": { "type": "string", "description": "Category (e.g. decision, source, claim)" },
                 "subject": { "type": "string", "description": "What the fact is about" },
                 "predicate": { "type": "string", "description": "The assertion" },
-                "content": { "type": "string", "description": "The fact's value" },
+                "content": { "type": "string", "description": "The fact's value. Capped at 200 characters." },
                 "importance": { "type": "number", "description": "Optional salience 0.0–1.0 for recall ranking; omit to use the per-type default" }
             },
             "required": ["fact_type", "subject", "predicate", "content"]

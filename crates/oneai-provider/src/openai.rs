@@ -38,6 +38,18 @@ pub struct OpenAIProvider {
     compat: crate::compat::Compat,
 }
 
+/// FNV-1a 64-bit hash — cheap, dependency-free, deterministic. Used by the
+/// prompt-cache diagnostic to compare byte-identity of the front-of-prompt
+/// (system message + tools) across turns.
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 impl OpenAIProvider {
     /// Create a new OpenAI provider with the given configuration.
     ///
@@ -107,7 +119,11 @@ impl OpenAIProvider {
     /// Convert an InferenceRequest to OpenAI API format.
     fn to_openai_request(&self, req: &InferenceRequest) -> Value {
         let mut messages = Vec::new();
-        for msg in &req.conversation.messages {
+        // Coalesce adjacent system messages (context sources / pinned blocks are
+        // each their own `Message::system`) into one `system` block per region so
+        // the wire request doesn't carry N per-turn system blocks.
+        let coalesced = crate::merge_adjacent_system_messages(&req.conversation.messages);
+        for msg in &coalesced {
             let role = match msg.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -301,6 +317,29 @@ impl OpenAIProvider {
                 }
             });
         }
+
+        // Prompt-cache diagnostic: hash the front-of-prompt bytes (system
+        // message + tools) so we can tell whether they are byte-stable across
+        // turns — a change here (not in the volatile tail) is what breaks
+        // DeepSeek's prefix cache and shows up as a low `prompt_cache_hit_tokens`.
+        let sys_content = body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|a| a.first())
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        let tools_json = body.get("tools").map(|t| t.to_string()).unwrap_or_default();
+        tracing::info!(
+            "cache-diag: sys_chars={} sys_hash={:016x} tools_count={} tools_hash={:016x}",
+            sys_content.chars().count(),
+            fnv1a(sys_content.as_bytes()),
+            body.get("tools")
+                .and_then(|t| t.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0),
+            fnv1a(tools_json.as_bytes()),
+        );
 
         body
     }
@@ -957,9 +996,13 @@ impl LlmProvider for OpenAIProvider {
 /// `cached_tokens / prompt_tokens`. Returns 0 when the provider/endpoint
 /// doesn't report prompt-cache details (e.g. some OpenAI-compatible servers).
 fn openai_cached_tokens(u: &Value) -> u32 {
+    // OpenAI reports cache hits under `prompt_tokens_details.cached_tokens`;
+    // DeepSeek (and some OpenAI-compatible endpoints) use a flat
+    // `prompt_cache_hit_tokens`. Both are the cache-read (hit) count.
     u.get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
+        .or_else(|| u.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64()))
         .unwrap_or(0) as u32
 }
 
@@ -975,10 +1018,16 @@ fn parse_openai_usage(u: &Value) -> Option<TokenUsage> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        // OpenAI prompt-cache hits (`prompt_tokens_details.cached_tokens`).
-        // No creation field → stays 0; ratio = cached / prompt_tokens.
+        // Prompt-cache hits: OpenAI `prompt_tokens_details.cached_tokens`, or
+        // DeepSeek `prompt_cache_hit_tokens`. DeepSeek also reports the miss as
+        // `prompt_cache_miss_tokens` (the non-cached input that gets written to
+        // cache), folded into cache_creation — consistent with the Anthropic
+        // normalization `prompt = read + creation`.
         cache_read_tokens: openai_cached_tokens(u),
-        ..Default::default()
+        cache_creation_tokens: u
+            .get("prompt_cache_miss_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
     })
 }
 
@@ -1213,6 +1262,40 @@ mod probe_tests {
         // No `usage` key → None (don't fabricate zero usage).
         let event = json!({ "id": "chatcmpl-x", "choices": [] });
         assert!(parse_openai_usage(&event).is_none());
+    }
+
+    #[test]
+    fn test_openai_cached_tokens_deepseek() {
+        // DeepSeek reports cache hits under a flat `prompt_cache_hit_tokens`
+        // (not OpenAI's `prompt_tokens_details.cached_tokens`).
+        let u = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 750,
+            "prompt_cache_miss_tokens": 250
+        });
+        assert_eq!(openai_cached_tokens(&u), 750);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_deepseek_cache() {
+        // DeepSeek's cache fields map to read (hit) + creation (miss), so the
+        // hit ratio `cache_read / prompt_tokens` is uniform with OpenAI/Anthropic.
+        let event = json!({
+            "id": "chatcmpl-x",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_cache_hit_tokens": 750,
+                "prompt_cache_miss_tokens": 250
+            }
+        });
+        let u = parse_openai_usage(&event).expect("usage must parse");
+        assert_eq!(u.prompt_tokens, 1000);
+        assert_eq!(u.cache_read_tokens, 750);
+        assert_eq!(u.cache_creation_tokens, 250);
     }
 }
 

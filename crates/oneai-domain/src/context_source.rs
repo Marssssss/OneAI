@@ -65,13 +65,17 @@ pub enum RefreshPolicy {
 /// prompt-prefix cache can hold the byte-stable front while per-turn churn is
 /// confined to a small trailing region:
 /// - [`ContextPosition::Prefix`] — injected before the conversation history
-///   (the cache-friendly region). Reserved for sources whose bytes are stable
-///   across iterations, or that change only as a rare consequence of the
-///   agent's own mutations (project file tree / repo map / git status).
+///   (the cache-friendly region). Reserved ONLY for sources whose bytes are
+///   stable across iterations (e.g. project instructions). Anything the agent
+///   can mutate mid-session — git status, file tree, repo map, core memory —
+///   must NOT sit here: those change every turn the agent does real work, and a
+///   single change invalidates the entire cached prefix (durable history +
+///   base prompt) below it.
 /// - [`ContextPosition::Tail`] — injected after the history (the non-cached
-///   region). Sources whose bytes change every turn (the current date) or that
-///   the agent can mutate mid-session (the working directory) must report
-///   `Tail`, or a single changing source would invalidate the whole prefix.
+///   region). Sources whose bytes change every turn (the current date, recalled
+///   memory) or that the agent can mutate mid-session (git status, file tree,
+///   repo map, the working directory) must report `Tail`, or a single changing
+///   source would invalidate the whole prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContextPosition {

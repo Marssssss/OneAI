@@ -1224,12 +1224,18 @@ mod tests {
         }
 
         fn respond(&self, req: &oneai_core::InferenceRequest) -> String {
+            // Skip the ephemeral dynamic tail (context sources / pinned blocks,
+            // injected as user messages) — it sits after the task and must not be
+            // mistaken for the pick instruction ("主持人").
             let last_user = req
                 .conversation
                 .messages
                 .iter()
                 .rev()
-                .find(|m| m.role == Role::User)
+                .find(|m| {
+                    m.role == Role::User
+                        && !crate::context_assembler::is_tail_segment(&m.text_content())
+                })
                 .map(|m| m.text_content())
                 .unwrap_or_default();
             if last_user.contains("主持人") {

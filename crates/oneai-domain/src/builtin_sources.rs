@@ -173,6 +173,13 @@ impl ContextSource for GitStatusSource {
         10
     }
 
+    fn position(&self) -> ContextPosition {
+        // Git status changes after every file edit (the agent's own work), so a
+        // stable prefix can't hold it — in the prefix, the first edit would
+        // invalidate the entire cached durable history. Keep it in the tail.
+        ContextPosition::Tail
+    }
+
     fn is_path_bound(&self) -> bool {
         true
     }
@@ -268,6 +275,12 @@ impl ContextSource for FileTreeSource {
         20
     }
 
+    fn position(&self) -> ContextPosition {
+        // Re-scanned every turn; a new file added by the agent changes it and
+        // would break the cached prefix. Keep it in the dynamic tail.
+        ContextPosition::Tail
+    }
+
     fn is_path_bound(&self) -> bool {
         true
     }
@@ -360,6 +373,12 @@ impl ContextSource for ProjectConfigSource {
 
     fn priority(&self) -> u32 {
         30
+    }
+
+    fn position(&self) -> ContextPosition {
+        // Small block, but it's re-read every turn and a dependency/config edit
+        // changes it — keep it out of the cached prefix for the same reason.
+        ContextPosition::Tail
     }
 
     fn is_path_bound(&self) -> bool {
@@ -623,6 +642,14 @@ impl ContextSource for ProjectInstructionsSource {
         1
     } // Highest priority — project instructions are the primary context
 
+    fn position(&self) -> ContextPosition {
+        // Project instructions are a large per-project block that the model
+        // doesn't need in the cross-session-stable system prefix. Keeping them
+        // in the tail (frozen at turn start) preserves the provider's cached
+        // system prefix + tools while still surfacing the instructions every turn.
+        ContextPosition::Tail
+    }
+
     fn is_path_bound(&self) -> bool {
         true
     }
@@ -880,6 +907,7 @@ mod tests {
     async fn test_project_config_source() {
         let source = ProjectConfigSource::new("/Users/maxf/github/new/OneAI");
         assert_eq!(source.key(), "project_config");
+        assert_eq!(source.position(), ContextPosition::Tail);
 
         let content = source.load().await.unwrap();
         assert!(content.contains("Project Config"));
@@ -889,6 +917,7 @@ mod tests {
     async fn test_file_tree_source() {
         let source = FileTreeSource::new("/Users/maxf/github/new/OneAI");
         assert_eq!(source.key(), "file_tree");
+        assert_eq!(source.position(), ContextPosition::Tail);
 
         let content = source.load().await.unwrap();
         assert!(content.contains("Project Structure"));
@@ -898,6 +927,8 @@ mod tests {
     async fn test_git_status_source() {
         let source = GitStatusSource::new("/Users/maxf/github/new/OneAI");
         assert_eq!(source.key(), "git_status");
+        // Volatile (changes after every edit) — must live in the dynamic tail.
+        assert_eq!(source.position(), ContextPosition::Tail);
 
         let content = source.load().await.unwrap();
         assert!(

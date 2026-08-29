@@ -76,13 +76,17 @@ impl CoreMemory {
 
         while self.estimated_tokens().await > self.budget_tokens {
             let mut facts = self.facts().await;
-            // Evict the least-recently-updated non-pinned fact.
+            // Evict the least core-worthy non-pinned fact first: lowest
+            // `importance`, tiebroken by oldest `updated_at`. This keeps the
+            // highest-salience facts (identity, constraints, decisions)
+            // resident within the budget, rather than the LRU victim which
+            // could be an old-but-critical identity fact.
             facts.retain(|f| !f.pinned);
             if facts.is_empty() {
                 break; // only pinned facts left and still over budget — keep them.
             }
-            facts.sort_by_key(|f| f.updated_at);
-            let victim = facts.into_iter().next().unwrap();
+            facts.sort_by(core_rank_cmp);
+            let victim = facts.pop().unwrap();
             self.store
                 .remove(&victim.user_id, &victim.subject, &victim.predicate)
                 .await;
@@ -144,16 +148,33 @@ impl CoreMemory {
     /// ...
     /// ```
     pub async fn render(&self) -> String {
-        let facts = self.facts().await;
+        let mut facts = self.facts().await;
         if facts.is_empty() {
             return String::new();
         }
+        // Deterministic, most-core-worthy-first ordering (see `core_rank_cmp`)
+        // so the block is byte-stable across turns (prompt-prefix caching) and
+        // the model sees the highest-salience facts first.
+        facts.sort_by(core_rank_cmp);
         let mut out = String::from("[Core Memory]\n");
         for f in &facts {
             out.push_str(&format!("- {} {}: {}\n", f.subject, f.predicate, f.content));
         }
         out
     }
+}
+
+/// Rank facts for core residency, most core-worthy first: higher `importance`
+/// (the explicit salience signal), then fresher `updated_at`, then a
+/// deterministic `subject`/`predicate` tiebreak so the rendered `[Core Memory]`
+/// block is byte-stable for prompt-prefix caching.
+fn core_rank_cmp(a: &MemoryFact, b: &MemoryFact) -> std::cmp::Ordering {
+    b.importance
+        .partial_cmp(&a.importance)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| b.updated_at.cmp(&a.updated_at))
+        .then_with(|| a.subject.cmp(&b.subject))
+        .then_with(|| a.predicate.cmp(&b.predicate))
 }
 
 #[cfg(test)]
@@ -222,10 +243,34 @@ mod tests {
 
         let evicted = cm.enforce_budget().await;
         assert!(!evicted.is_empty());
-        // Oldest (user.pm) should be the first evicted.
+        // Equal importance (both default 0.5) → tiebreak by oldest updated_at.
         assert!(evicted.iter().any(|f| f.subject == "user.pm"));
         // Core is now within budget (or only pinned facts remain).
         assert!(cm.estimated_tokens().await <= cm.budget_tokens() || cm.facts().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enforce_budget_evicts_lowest_importance_first() {
+        // Core residency is importance-primary, not LRU: a high-importance old
+        // fact survives over a low-importance recent fact.
+        let cm = CoreMemory::new(60);
+        let old = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let recent = chrono::Utc::now();
+        let mut high_old = fact("user.name", "Alice", old);
+        high_old.importance = 0.9;
+        let mut low_recent = fact("trivia", "noise", recent);
+        low_recent.importance = 0.1;
+        cm.upsert(high_old).await;
+        cm.upsert(low_recent).await;
+
+        let evicted = cm.enforce_budget().await;
+        assert!(!evicted.is_empty());
+        assert!(evicted.iter().any(|f| f.subject == "trivia"));
+        let remaining: Vec<_> = cm.facts().await.into_iter().map(|f| f.subject).collect();
+        assert!(
+            remaining.contains(&"user.name".to_string()),
+            "high-importance old fact must survive over low-importance recent fact: {remaining:?}"
+        );
     }
 
     #[tokio::test]

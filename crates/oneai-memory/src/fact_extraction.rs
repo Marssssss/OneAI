@@ -153,6 +153,7 @@ fn parse_facts(
                 .importance
                 .filter(|v| (0.0..=1.0).contains(v))
                 .unwrap_or_else(|| default_importance_for_type(fact_type.as_str()));
+            let (content, _) = crate::fact_store::truncate_fact_content(&r.content);
             MemoryFact {
                 id: format!("fact_{}", uuid::Uuid::new_v4()),
                 user_id: user_id.to_string(),
@@ -160,7 +161,7 @@ fn parse_facts(
                 fact_type,
                 subject: r.subject,
                 predicate: r.predicate,
-                content: r.content,
+                content,
                 embedding: None,
                 metadata: std::collections::HashMap::new(),
                 importance,

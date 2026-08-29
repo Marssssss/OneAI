@@ -1664,9 +1664,20 @@ impl Tool for EnvironmentTool {
         let mut info = Vec::new();
 
         if info_type == "all" || info_type == "cwd" {
-            let cwd = std::env::current_dir()
+            // Prefer the session's active workspace (set at turn start from
+            // metadata["workspace"]) over the process cwd. This must match the
+            // EnvironmentInfoSource context's "Working Directory" — reporting
+            // the process cwd (the binary's launch dir) while the file/shell
+            // tools resolve against the workspace makes the model operate in
+            // the wrong directory and its calls fail.
+            let cwd = oneai_core::active_cwd::active_cwd()
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             info.push(format!("Working Directory: {}", cwd));
         }
 

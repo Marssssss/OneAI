@@ -738,7 +738,12 @@ impl LoopState {
         conversation
             .metadata
             .insert("task_anchor".to_string(), task.to_string());
-        conversation.add_message(Message::user(task.to_string()));
+        let mut user_msg = Message::user(task.to_string());
+        user_msg.metadata.insert(
+            crate::context_assembler::CURRENT_TURN_KEY.to_string(),
+            "1".to_string(),
+        );
+        conversation.add_message(user_msg);
         Self {
             original_task: task.to_string(),
             conversation,
@@ -772,9 +777,33 @@ impl LoopState {
     /// while appending the new user input as the latest message.
     pub fn from_conversation(conversation: Conversation, task: &str) -> Self {
         let mut conv = conversation;
+        // The task anchor must stay pinned to the session's FIRST user request,
+        // not the current turn's message — a changing anchor sits ahead of the
+        // frozen history, so it breaks the provider's prompt-prefix cache for
+        // everything that follows it. Preserve the existing anchor (seeded by
+        // the first turn's `new`, or restored from the working state's goal by
+        // `hydrate_working_state`); only seed it when absent (hand-assembled
+        // conversations).
+        let original_task = conv
+            .metadata
+            .get("task_anchor")
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| task.to_string());
         conv.metadata
-            .insert("task_anchor".to_string(), task.to_string());
-        conv.add_message(Message::user(task.to_string()));
+            .insert("task_anchor".to_string(), original_task.clone());
+        // A fresh turn's user message is the single current turn; the previous
+        // turn's marked message is now frozen history.
+        for m in conv.messages.iter_mut() {
+            m.metadata
+                .remove(crate::context_assembler::CURRENT_TURN_KEY);
+        }
+        let mut user_msg = Message::user(task.to_string());
+        user_msg.metadata.insert(
+            crate::context_assembler::CURRENT_TURN_KEY.to_string(),
+            "1".to_string(),
+        );
+        conv.add_message(user_msg);
         // Q3 reseed: restore the live plan list from metadata so a reloaded /
         // compacted session continues the in-flight task instead of losing it.
         let plan_state = conv
@@ -785,16 +814,16 @@ impl LoopState {
         // lives in the cross-session event log (WorkingStateStore), read on
         // session start / resume via the store. `task_id` (a pointer) is the
         // only thing carried in metadata; the caller rehydrates `working_state`
-        // from the store using it. `original_task` keeps the new user message
-        // for the durable log; the pinned `[Task Anchor]` prefers the working
-        // state's `goal` when available (the canonical original goal).
+        // from the store using it. `original_task` is the session's first user
+        // request (stable across turns); the pinned `[Task Anchor]` prefers the
+        // working state's `goal` when available (the canonical original goal).
         let task_id = conv
             .metadata
             .get("task_id")
             .cloned()
             .filter(|s| !s.is_empty());
         Self {
-            original_task: task.to_string(),
+            original_task,
             conversation: conv,
             global_state: oneai_core::GlobalState::new(),
             iterations: 0,
@@ -1729,13 +1758,18 @@ impl AgentLoop {
             .iter()
             .any(|m| m.role == Role::System)
         {
-            // Append the runtime context block (current date/time + a nudge to use
-            // web_search for time-sensitive questions) so the model always knows
-            // "today" and reaches for search tools rather than stale memory.
-            // The base prompt is resolved through `build_system_prompt`, which
-            // substitutes the `{{TOOL_PREFERENCE_RULES}}` marker with rules
-            // derived from the actual tool registry — so the prompt never
-            // references tools the model cannot call.
+            // Insert the base prompt (system prompt + runtime context block) at
+            // index 0, BEFORE the user task. The base prompt is the largest +
+            // most byte-stable block in the request, so it must anchor the
+            // provider's prompt-prefix cache at the very front — if the user
+            // task sat first, every new task would change byte 0 and invalidate
+            // the cached base prompt + durable history in one shot. (LoopState
+            // already appended the user task, so this re-orders to
+            // [base prompt][user task][…].) The base prompt is resolved through
+            // `build_system_prompt`, which substitutes the
+            // `{{TOOL_PREFERENCE_RULES}}` marker with rules derived from the
+            // actual tool registry — so the prompt never references tools the
+            // model cannot call.
             let system_prompt = format!(
                 "{}{}",
                 self.build_system_prompt().await,
@@ -1743,7 +1777,8 @@ impl AgentLoop {
             );
             state
                 .conversation
-                .add_message(Message::system(system_prompt));
+                .messages
+                .insert(0, Message::system(system_prompt));
         }
 
         self.run_loop(state, observer).await
@@ -1769,9 +1804,10 @@ impl AgentLoop {
             .iter()
             .any(|m| m.role == Role::System)
         {
-            // See run_with_observer: append current date/time + search guidance,
-            // and resolve the `{{TOOL_PREFERENCE_RULES}}` marker against the
-            // actual tool registry.
+            // See run_with_observer: insert the base prompt at index 0 (BEFORE
+            // the user task) so it anchors the prompt-prefix cache, and resolve
+            // the `{{TOOL_PREFERENCE_RULES}}` marker against the actual tool
+            // registry.
             let system_prompt = format!(
                 "{}{}",
                 self.build_system_prompt().await,
@@ -1779,7 +1815,8 @@ impl AgentLoop {
             );
             state
                 .conversation
-                .add_message(Message::system(system_prompt));
+                .messages
+                .insert(0, Message::system(system_prompt));
         }
 
         // Materialize a frontend-forced paradigm (Directive::SwitchParadigm →
@@ -1998,7 +2035,15 @@ impl AgentLoop {
             // (Previously `assembled` was dropped on non-compression iterations
             // and the request used the bare durable log, so no ContextSource
             // injection ever reached the model on normal turns.)
-            {
+            // Refresh the context sources ONCE at turn start, then freeze them
+            // for the rest of the turn's iterations. The env block (git status,
+            // repo map, environment, core memory, date, project instructions)
+            // must be byte-stable within a turn so it sits inside the provider's
+            // prompt-prefix cache — re-probing every iteration would let an
+            // in-turn file edit change git_status and invalidate the whole env
+            // region. `state.iterations` was already incremented to 1 for the
+            // first iteration (see the `+= 1` at the top of the loop).
+            if state.iterations == 1 {
                 let mut ca = self.context_assembler.write().await;
                 ca.refresh_sources().await?;
             }
@@ -2171,7 +2216,10 @@ impl AgentLoop {
                         InteractionModification::InjectSystemMessage(msg) => {
                             // Ephemeral injection for this iteration only — do
                             // NOT write to the durable log (would accumulate).
-                            request.conversation.add_message(Message::system(msg));
+                            // User role: a mid-conversation system message is
+                            // hoisted to the front by DeepSeek and breaks the
+                            // prompt-prefix cache.
+                            request.conversation.add_message(Message::user(msg));
                         }
                         InteractionModification::ReplaceRequest(new_req) => {
                             request = new_req;
@@ -2188,7 +2236,7 @@ impl AgentLoop {
                         request.conversation.add_message(Message::user(feedback));
                     }
                     InteractionResponse::Abort { reason } => {
-                        state.conversation.add_message(Message::system(format!(
+                        state.conversation.add_message(Message::user(format!(
                             "Inference aborted by PreInfer gate: {}",
                             reason
                         )));
@@ -2488,6 +2536,22 @@ impl AgentLoop {
                 response.usage.cache_creation_tokens,
             );
 
+            // Per-turn prompt-cache hit rate (cache-instability diagnosis).
+            // `cache_read_tokens` is the cache-hit subset; `prompt_tokens` is the
+            // total input footprint (which, for OpenAI/DeepSeek, already includes
+            // the cached subset). A low/volatile ratio here is the direct signal
+            // that a changing block sits ahead of the durable history.
+            if response.usage.prompt_tokens > 0 {
+                let hit = response.usage.cache_read_tokens;
+                let total = response.usage.prompt_tokens;
+                tracing::info!(
+                    "prompt-cache hit: {}/{} tokens ({:.1}%)",
+                    hit,
+                    total,
+                    (hit as f64 / total as f64) * 100.0
+                );
+            }
+
             // 4b'. Snapshot the concrete inference (request + response + latency)
             // for the trajectory panel (issue #40 follow-up). `request_snapshot`
             // is the pre-inference request clone; `response` is the final
@@ -2499,6 +2563,16 @@ impl AgentLoop {
                 // drill-in shows the wire shape, not just the message list.
                 let trimmed_messages =
                     trim_request_messages(&request_snapshot.conversation.messages);
+                // The provider coalesces adjacent system messages at
+                // serialization time (`merge_adjacent_system_messages` in the
+                // OpenAI/Ollama builders; Anthropic/Gemini fold into a single
+                // system field). Apply the same coalesce here so the "API
+                // request" drill-in shows the wire shape — one stable prefix
+                // block + one volatile tail block — rather than the per-section
+                // assembly. Otherwise the panel shows N system blocks that never
+                // actually crossed the wire as separate messages.
+                let wire_messages =
+                    oneai_provider::merge_adjacent_system_messages(&trimmed_messages);
                 let mut request_body = serde_json::Map::new();
                 request_body.insert(
                     "model".to_string(),
@@ -2506,7 +2580,7 @@ impl AgentLoop {
                 );
                 request_body.insert(
                     "messages".to_string(),
-                    serde_json::to_value(&trimmed_messages).unwrap_or_default(),
+                    serde_json::to_value(&wire_messages).unwrap_or_default(),
                 );
                 request_body.insert(
                     "tools".to_string(),
@@ -2537,8 +2611,8 @@ impl AgentLoop {
                         .iter()
                         .map(|t| t.name.clone())
                         .collect(),
-                    message_count: request_snapshot.conversation.messages.len(),
-                    request_messages: trimmed_messages,
+                    message_count: wire_messages.len(),
+                    request_messages: wire_messages,
                     request_body: serde_json::Value::Object(request_body),
                     response: response.clone(),
                     response_body: serde_json::to_value(&response).unwrap_or_default(),
@@ -2832,10 +2906,10 @@ impl AgentLoop {
                                     config.max_retries,
                                     validation.error_summary()
                                 );
-                                // Inject the validation error as a system message
-                                state
-                                    .conversation
-                                    .add_message(Message::system(retry_prompt));
+                                // Inject the validation error as a user message
+                                // (mid-conversation system notes get hoisted to
+                                // the front by DeepSeek, breaking the cache).
+                                state.conversation.add_message(Message::user(retry_prompt));
                                 // Don't finalize the answer — continue the loop for re-generation
                                 // Note: we don NOT increment iterations for retries
                                 continue;
@@ -3136,7 +3210,7 @@ impl AgentLoop {
                                 .to_string();
                             self.set_plan_mode(true);
                             if !sketch.is_empty() {
-                                state.conversation.add_message(Message::system(format!(
+                                state.conversation.add_message(Message::user(format!(
                                     "[Entered plan mode — initial sketch]: {}",
                                     sketch
                                 )));
@@ -3626,7 +3700,10 @@ impl AgentLoop {
                     // immediately after its assistant `tool_calls` message, so
                     // escalation/retry feedback is appended afterwards instead.
                     for note in recovery_notes {
-                        state.conversation.add_message(Message::system(note));
+                        // User role, not system: a mid-conversation system note
+                        // (e.g. "Error escalated: …") is hoisted to the front by
+                        // DeepSeek, invalidating the whole prompt-prefix cache.
+                        state.conversation.add_message(Message::user(note));
                     }
 
                     // ─── Self-extension diff (evolution-plan §3.4) ────────
@@ -4215,9 +4292,11 @@ impl AgentLoop {
             .iter()
             .any(|m| m.role == Role::System)
         {
+            // Base prompt first (before the user task) — anchors the cache.
             initial_state
                 .conversation
-                .add_message(Message::system(self.config.system_prompt.clone()));
+                .messages
+                .insert(0, Message::system(self.config.system_prompt.clone()));
         }
         initial_state
             .variables
@@ -6512,7 +6591,15 @@ impl AgentLoop {
         };
 
         let mut sorted_tools: Vec<&Arc<dyn Tool>> = filtered_tools;
-        sorted_tools.sort_by_key(|tool| tier_order(tool.name()));
+        // Tier, then name — fully deterministic. `tier_order` alone leaves tools
+        // within the same tier in HashMap iteration order (random per process),
+        // which would make the `tools` array byte-different across runs and
+        // break the provider's prompt-prefix cache.
+        sorted_tools.sort_by(|a, b| {
+            tier_order(a.name())
+                .cmp(&tier_order(b.name()))
+                .then_with(|| a.name().cmp(b.name()))
+        });
 
         // Apply domain pack tool decorators if present
         let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
@@ -6676,6 +6763,10 @@ impl AgentLoop {
                     .unwrap_or(true)
             });
         }
+        // Deterministic order (the registry is a HashMap — iteration order is
+        // randomized per process, which would make the system message byte-
+        // different across runs and break the provider's prompt-prefix cache).
+        visible.sort_by(|a, b| a.name.cmp(&b.name));
         if visible.is_empty() {
             return None;
         }
@@ -6694,12 +6785,15 @@ impl AgentLoop {
     }
 
     /// Inject the ephemeral pinned blocks onto a conversation clone, split by
-    /// cache stability into a **prefix** and a **tail**:
+    /// cache stability into **segment 1 (system)**, **segment 2 (user)**, and a
+    /// **volatile tail**:
     ///
-    /// - **Prefix** (prepended, before the history — the cache-friendly front):
-    ///   the original-task anchor (Q2) and the skill menu. Byte-stable across
-    ///   iterations (or changing only on rare user action), so they belong in
-    ///   the prompt-prefix cache region.
+    /// - **Segment 1** (system, right after the base prompt): the skill menu.
+    ///   Byte-stable across iterations and sessions (given the same skill set),
+    ///   so it belongs in the system prefix the provider caches.
+    /// - **Segment 2** (user, right after segment 1): the original-task anchor
+    ///   (Q2). Per-session, so it must be a user message — a system anchor would
+    ///   break the cross-session cache of the base prompt + skill menu + tools.
     /// - **Tail** (appended, after the history — the dynamic region): the
     ///   paradigm mode line, live plan/progress (Q1), decisions, blockers, the
     ///   active skill, self-extension notes, and background-task status. These
@@ -6718,26 +6812,32 @@ impl AgentLoop {
     /// The `plan_state` is also mirrored to `conversation.metadata["plan_state"]`
     /// (persisted + copied by every compressor) for legacy Q3 reseed on reload.
     async fn inject_pinned_blocks(&self, conv: &mut Conversation, state: &LoopState) {
-        let mut prefix: Vec<Message> = Vec::new();
         let mut tail: Vec<Message> = Vec::new();
+        let mut skill_menu: Option<String> = None;
 
-        // ── Prefix: stable, cache-friendly ──────────────────────────────
-        // Task anchor — the original goal, never changes.
-        if let Some(ws) = &state.working_state {
-            prefix.push(Message::system(
-                crate::context_assembler::task_anchor_block_from_working_state(ws),
-            ));
+        // ── Segment 2: task anchor (USER role, not system) ─────────────
+        // The anchor is per-session (it doesn't cross sessions), so it must NOT
+        // sit in the system prefix — a system anchor would break the
+        // cross-session cache of the base prompt + skill menu + tools. As a user
+        // message in its own segment it keeps the system prefix byte-stable.
+        let task_anchor = if let Some(ws) = &state.working_state {
+            crate::context_assembler::task_anchor_block_from_working_state(ws)
         } else {
-            // Legacy path — no WorkingStateStore configured (or no task bound).
-            prefix.push(Message::system(
-                crate::context_assembler::task_anchor_block(
-                    &state.original_task,
-                    &state.conversation.metadata,
-                ),
-            ));
-        }
+            crate::context_assembler::task_anchor_block(
+                &state.original_task,
+                &state.conversation.metadata,
+            )
+        };
 
         // ── Tail: per-turn / mutable ────────────────────────────────────
+        // Tail blocks are injected as USER messages, not system: DeepSeek (and
+        // some OpenAI-compatible endpoints) hoist every system message to the
+        // front, which would drag this volatile block into the cached prefix.
+        // A user-role block stays in-order at the end, so a changing tail only
+        // invalidates the tail itself. Sorted low→high volatility at the end
+        // (`sort_tail_by_volatility`) so a change only re-sends the segments
+        // after the change point.
+        //
         // Paradigm mode line — changes when the model switches paradigm. Use the
         // active config when set, else the default config for the current kind
         // (so a never-switched ReAct loop still sees its mode).
@@ -6746,26 +6846,26 @@ impl AgentLoop {
             .clone()
             .unwrap_or_else(|| ParadigmConfig::for_paradigm(state.active_paradigm));
         if !paradigm_config.decision_hint.is_empty() {
-            tail.push(Message::system(format!(
+            tail.push(Message::user(format!(
                 "[Paradigm switch]: {}",
                 paradigm_config.decision_hint
             )));
         }
         // Plan/progress + decisions + blockers — evolve as the task progresses.
         if let Some(ws) = &state.working_state {
-            tail.push(Message::system(
+            tail.push(Message::user(
                 crate::context_assembler::plan_progress_block_from_working_state(ws),
             ));
             let decisions = crate::context_assembler::decisions_block(ws);
             if !decisions.is_empty() {
-                tail.push(Message::system(decisions));
+                tail.push(Message::user(decisions));
             }
             let blockers = crate::context_assembler::blockers_block(ws);
             if !blockers.is_empty() {
-                tail.push(Message::system(blockers));
+                tail.push(Message::user(blockers));
             }
         } else if let Some(plan) = &state.plan_state {
-            tail.push(Message::system(
+            tail.push(Message::user(
                 crate::context_assembler::plan_progress_block(&state.original_task, plan),
             ));
         }
@@ -6778,9 +6878,7 @@ impl AgentLoop {
             // (`AppBuilder::build()` wires the tool everywhere an App is
             // built; this gate protects hand-assembled AgentLoops.)
             if self.tools.read().await.contains_key("skill") {
-                if let Some(menu) = self.build_skill_menu().await {
-                    prefix.push(Message::system(menu));
-                }
+                skill_menu = self.build_skill_menu().await;
             }
             if let Some(name) = &self.active_skill {
                 if let Some(skill) = self.skill_registry.find_by_name(name).await {
@@ -6788,7 +6886,7 @@ impl AgentLoop {
                         "# Active skill: {}\n{}\n\n(Follow these instructions for this task.)",
                         skill.name, skill.prompt_template
                     );
-                    tail.push(Message::system(inject));
+                    tail.push(Message::user(inject));
                 } else {
                     tracing::warn!("Active skill '{}' not in registry; clearing", name);
                 }
@@ -6806,7 +6904,7 @@ impl AgentLoop {
                     .map(|n| format!("- `{n}`"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                tail.push(Message::system(format!(
+                tail.push(Message::user(format!(
                     "# Newly available tools\n\
                      The following tools became available after the last step:\n\
                      {list}\n\n\
@@ -6843,7 +6941,7 @@ impl AgentLoop {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                tail.push(Message::system(format!(
+                tail.push(Message::user(format!(
                     "[Background tasks] (live)\n{body}\n\
                      These sub-agents are running detached in PARALLEL with you. You WILL be \
                      auto-resumed (a new turn) when each finishes — its result will arrive as a \
@@ -6855,14 +6953,46 @@ impl AgentLoop {
             }
         }
 
-        // ── Inject: prefix prepended (reversed so the stable order survives
-        //    the index-0 inserts), tail appended ─────────────────────────
-        for msg in prefix.into_iter().rev() {
-            conv.messages.insert(0, msg);
+        // ── Inject: segment 1 (system) then segment 2 (user) ─────────────
+        // The base prompt + any prefix context sources form a leading block of
+        // system messages; insert the skill menu (system) after it, then the
+        // task anchor (user) after that, so the final order is
+        // [base][skill menu][task anchor][history…][env][turn][volatile tail].
+        // The base prompt stays at index 0 to anchor the provider's
+        // prompt-prefix cache.
+        let system_end = conv
+            .messages
+            .iter()
+            .position(|m| m.role != Role::System)
+            .unwrap_or(conv.messages.len());
+        let mut anchor_idx = system_end;
+        if let Some(menu) = skill_menu {
+            conv.messages.insert(system_end, Message::system(menu));
+            anchor_idx += 1;
         }
+        conv.messages.insert(anchor_idx, Message::user(task_anchor));
         for msg in tail {
             conv.add_message(msg);
         }
+        // Sort the dynamic tail (context sources + these pinned blocks) by
+        // volatility low→high, so the most-stable segments sit closest to the
+        // cached prefix and a volatile change (git status after an edit) only
+        // invalidates the segments after it.
+        crate::context_assembler::sort_tail_by_volatility(conv);
+        // Merge the sorted tail into a single bounded user message. The tail
+        // always misses the prompt cache, so capping it (5% of the session
+        // token budget) keeps the always-miss region small regardless of how
+        // large the volatile sources (repo map, background tasks, …) grow.
+        crate::context_assembler::merge_tail_into_single_message(conv, self.tail_char_budget());
+    }
+
+    /// Max size (chars) of the dynamic tail: 5% of the session token budget,
+    /// ×4 chars/token. The tail is re-sent every turn and never hits the prompt
+    /// cache, so this bounds the always-miss region to a small fraction of the
+    /// context.
+    fn tail_char_budget(&self) -> usize {
+        let total = self.context_budget.budget().total as usize;
+        (total / 20).max(1) * 4
     }
 
     /// Select a recovery strategy based on the type of tool call failure.
@@ -7196,9 +7326,12 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         };
 
         let mut conversation = state.conversation.clone();
-        // Inject system prompt if not already present
+        // Inject the base prompt at index 0 (before the user task) if not
+        // already present, so it anchors the provider's prompt-prefix cache.
         if !conversation.messages.iter().any(|m| m.role == Role::System) {
-            conversation.add_message(Message::system(&system_prompt));
+            conversation
+                .messages
+                .insert(0, Message::system(&system_prompt));
         }
 
         // Build tool definitions if requested
@@ -7427,17 +7560,23 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             _ => ParadigmKind::ReAct,
         });
 
-        // Replace system prompt in conversation
+        // Replace system prompt in conversation. The new paradigm prompt is the
+        // new base prompt, so it must sit at the FRONT (index 0) — appended at
+        // the end it would still be hoisted front by DeepSeek, but keeping it a
+        // stable front system message is what the prompt-prefix cache anchors on.
         state
             .conversation
             .messages
             .retain(|m| m.role != Role::System);
         state
             .conversation
-            .add_message(Message::system(&paradigm_config.system_prompt));
+            .messages
+            .insert(0, Message::system(&paradigm_config.system_prompt));
 
         if !paradigm_config.decision_hint.is_empty() {
-            state.conversation.add_message(Message::system(format!(
+            // User role: a mid-conversation system note would be hoisted to the
+            // front by DeepSeek and break the prompt-prefix cache.
+            state.conversation.add_message(Message::user(format!(
                 "[Paradigm switch]: {}",
                 paradigm_config.decision_hint
             )));
@@ -7716,7 +7855,7 @@ impl AgentLoopGraphActionExecutor {
         };
 
         // Footprint gate — see `build_tool_definitions_for_paradigm`.
-        let filtered_tools: Vec<&Arc<dyn Tool>> = filtered_tools
+        let mut filtered_tools: Vec<&Arc<dyn Tool>> = filtered_tools
             .into_iter()
             .filter(|tool| tool.service_available())
             // #27 exposure gate — keep only model-visible-initial exposures.
@@ -7731,6 +7870,9 @@ impl AgentLoopGraphActionExecutor {
                     .is_model_visible_initial()
             })
             .collect();
+        // Deterministic order (name) — the registry is a HashMap, so iteration
+        // order is randomized per process and would break the prompt cache.
+        filtered_tools.sort_by(|a, b| a.name().cmp(b.name()));
 
         // Apply domain pack tool decorators
         let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
@@ -8417,6 +8559,32 @@ mod dynamic_tool_prompt_tests {
         let mut state = LoopState::from_conversation(conv, "x");
         assert_eq!(loop_.activate_forced_paradigm(&mut state), None);
         assert_eq!(state.active_paradigm, ParadigmKind::ReAct);
+    }
+
+    #[test]
+    fn from_conversation_preserves_session_task_anchor() {
+        // The task anchor must stay pinned to the session's FIRST user request.
+        // A multi-turn session persists the first turn's anchor in
+        // conversation.metadata["task_anchor"]; a later turn must NOT overwrite
+        // it with the new turn's message — a changing anchor sits ahead of the
+        // frozen history, so it breaks the provider's prompt-prefix cache.
+        let mut conv = oneai_core::Conversation::new();
+        conv.metadata
+            .insert("task_anchor".to_string(), "first user request".to_string());
+        let state = LoopState::from_conversation(conv, "second user request");
+        assert_eq!(state.original_task, "first user request");
+        assert_eq!(
+            state
+                .conversation
+                .metadata
+                .get("task_anchor")
+                .map(|s| s.as_str()),
+            Some("first user request")
+        );
+
+        // A fresh conversation with no anchor seeds it from the incoming task.
+        let state = LoopState::from_conversation(oneai_core::Conversation::new(), "only turn");
+        assert_eq!(state.original_task, "only turn");
     }
 }
 
