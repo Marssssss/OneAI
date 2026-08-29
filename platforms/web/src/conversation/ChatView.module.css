@@ -28,12 +28,26 @@
   word-break: break-word;
 }
 
-.userBubble {
+.userColumn {
   margin-left: auto;
   max-width: 80%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.userBubble {
+  max-width: 100%;
   background: var(--oneai-brand-500);
   color: var(--oneai-accent-fg);
   border-bottom-right-radius: 4px;
+}
+
+.assistantColumn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .assistantBubble {
@@ -243,6 +257,14 @@
   gap: 8px;
   margin-top: 4px;
   padding: 0 4px;
+}
+
+/* Generation time — muted, tabular so the clock digits don't jitter. */
+.time {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* 👍/👎 stay a secondary, hover-revealed affordance (the row's dim→bright

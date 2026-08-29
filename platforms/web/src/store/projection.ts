@@ -98,6 +98,15 @@ export interface ChatNode {
   feedback?: FeedbackEntry
   /** Optimistic flag while feedback/submit is in flight. */
   feedbackPending?: boolean
+  /** Wall-clock generation time (epoch ms) of this message. Set for live user
+   *  sends + assistant outputs; historical transcript messages carry it only if
+   *  the engine persisted a timestamp (issue #42 follow-up). */
+  createdAt?: number
+  /** True when this node is the turn's terminal answer (the node the engine's
+   *  `direct_answer` produced) — the only node eligible for the time/copy/👍👎
+   *  meta row. Intermediate iteration text outputs (finalized by `tool_calls`)
+   *  are not final and render no meta row (issue #42 follow-up). */
+  isFinal?: boolean
 }
 
 export interface ApprovalItem {
@@ -168,9 +177,9 @@ export interface SessionMetrics {
   /** Mean ms from turn_start to the first stream_chunk, across turns that
    *  produced text. null when no turn has streamed yet. */
   firstTokenMs: number | null
-  /** Sum of completion tokens across turns (for tok/s). */
+  /** Sum of completion tokens across turns (总输出 / total output). */
   totalCompletion: number
-  /** Sum of prompt tokens across turns (input total). */
+  /** Sum of prompt tokens across turns (总输入 / total input). */
   totalPrompt: number
   /** Cache hit % of the most recent inference step (the latest token_usage
    *  record) — `cache_read / prompt_tokens`. `prompt_tokens` is the total
@@ -178,7 +187,8 @@ export interface SessionMetrics {
    *  layer's normalization), so the denominator is `prompt_tokens` alone.
    *  null until the first usage record arrives. */
   cacheHitPct: number | null
-  /** Sum of completed-turn wall durations (ms). */
+  /** Sum of completed-turn wall durations (ms) — "用时" (engine processing
+   *  time, i.e. the time the agent actually spent running). */
   totalDurationMs: number
   /** The most recent inference step's total input footprint (the latest
    *  `token_usage` record's `prompt_tokens`) — i.e. the current context size
@@ -186,6 +196,10 @@ export interface SessionMetrics {
    *  whether to compact / start a fresh session (issue #35). null until the
    *  first usage record arrives. */
   contextTokens: number | null
+  /** Throughput of the most recent inference call (issue #42): streamed output
+   *  tokens (the snapshot's `completion_tokens`) over that inference's wall
+   *  duration. null until the first `inference` event arrives. */
+  latestTokPerS: number | null
 }
 
 interface WorkingState {
@@ -220,6 +234,9 @@ interface WorkingState {
    *  latest-step cache-hit % metric (a rate, not a cumulative sum). Updated on
    *  every token_usage event; cleared on session reset. */
   latestUsage: BusUsageRecord | null
+  /** The most recent inference call's streamed completion tokens + wall
+   *  duration — drives the latest-inference tok/s metric (issue #42). */
+  latestInference: { completionTokens: number; durationMs: number } | null
   /** Auto-accept mode: silently Proceed on incoming ToolApproval requests
    *  (mirrors the TUI's InteractionMode::AutoAccept) instead of queueing them
    *  for the approval bar. Other variants (plan/network/elicitation) still
@@ -245,6 +262,7 @@ const EMPTY_METRICS: SessionMetrics = {
   cacheHitPct: null,
   totalDurationMs: 0,
   contextTokens: null,
+  latestTokPerS: null,
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -290,6 +308,88 @@ function upsertBackgroundTask(
 
 let approvalSeq = 0
 
+/** Reconstruct a historical session's metrics from its persisted bus-event log
+ *  (issue #42 follow-up). Live turns feed `computeMetrics` via the perf/usage
+ *  maps; a session loaded from history has none of those, so the strip would
+ *  otherwise hide. The persisted events carry `ts` (epoch ms) + `token_usage` /
+ *  `inference`, enough to rebuild turns/steps/token totals/durations — except
+ *  first-token latency (`stream_chunk` is not persisted), which stays null.
+ *  Returns null when the log has no turn boundary (nothing to show). */
+function metricsFromEvents(events: EngineYield[]): SessionMetrics | null {
+  let turns = 0
+  let steps = 0
+  let totalDurationMs = 0
+  let totalPrompt = 0
+  let totalCompletion = 0
+  let currentTurnId: string | null = null
+  const turnStartTs = new Map<string, number>()
+  // Latest `token_usage` per turn wins — mirrors the live path's `turnUsage`
+  // (the provider reports a running total, so the last record = the turn total).
+  const turnUsage = new Map<string, BusUsageRecord>()
+  let latestUsage: BusUsageRecord | null = null
+  let latestInference: { completionTokens: number; durationMs: number } | null = null
+
+  for (const y of events) {
+    const rawTs = (y as { ts?: unknown }).ts
+    const ts = typeof rawTs === 'number' ? rawTs : null
+    switch (y.kind) {
+      case 'turn_start':
+        turns += 1
+        currentTurnId = y.turn_id
+        if (ts !== null) turnStartTs.set(y.turn_id, ts)
+        break
+      case 'iteration_start':
+        steps += 1
+        break
+      case 'token_usage':
+        latestUsage = y.usage
+        if (currentTurnId !== null) turnUsage.set(currentTurnId, y.usage)
+        break
+      case 'inference':
+        latestInference = {
+          completionTokens: y.snapshot.response.usage.completion_tokens,
+          durationMs: y.snapshot.duration_ms,
+        }
+        break
+      case 'turn_complete': {
+        const start = turnStartTs.get(y.turn_id)
+        if (start !== undefined && ts !== null) totalDurationMs += ts - start
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  if (turns === 0) return null
+  for (const u of turnUsage.values()) {
+    totalPrompt += u.prompt_tokens
+    totalCompletion += u.completion_tokens
+  }
+  let cacheHitPct: number | null = null
+  let contextTokens: number | null = null
+  if (latestUsage !== null && latestUsage.prompt_tokens > 0) {
+    cacheHitPct = (latestUsage.cache_read_tokens / latestUsage.prompt_tokens) * 100
+    contextTokens = latestUsage.prompt_tokens
+  }
+  let latestTokPerS: number | null = null
+  if (latestInference !== null && latestInference.durationMs > 0) {
+    latestTokPerS = latestInference.completionTokens / (latestInference.durationMs / 1000)
+  }
+
+  return {
+    turns,
+    steps,
+    firstTokenMs: null,
+    totalCompletion,
+    totalPrompt,
+    cacheHitPct,
+    totalDurationMs,
+    contextTokens,
+    latestTokPerS,
+  }
+}
+
 export class ProjectionStore {
   private rpc: OneAiRpcClient
   private state: WorkingState = {
@@ -315,6 +415,7 @@ export class ProjectionStore {
     firstTokenPerf: new Map(),
     turnUsage: new Map(),
     latestUsage: null,
+    latestInference: null,
     autoApprove: false,
     metricsBaseline: { ...EMPTY_METRICS },
   }
@@ -465,6 +566,15 @@ export class ProjectionStore {
       // the last turn. Drives the "上下文" metric in the strip (issue #35).
       contextTokens = latest.prompt_tokens
     }
+    // Tok/s from the LATEST inference (issue #42): streamed completion tokens
+    // over that inference's wall duration — a per-inference throughput, not the
+    // cumulative total-completion/total-duration average (which dilutes the
+    // signal across turns with differing tool/idle time).
+    let latestTokPerS: number | null = null
+    const inf = this.state.latestInference
+    if (inf !== null && inf.durationMs > 0) {
+      latestTokPerS = inf.completionTokens / (inf.durationMs / 1000)
+    }
     return {
       turns: turnTimings.length,
       steps,
@@ -474,6 +584,7 @@ export class ProjectionStore {
       cacheHitPct,
       totalDurationMs,
       contextTokens,
+      latestTokPerS,
     }
   }
 
@@ -494,6 +605,9 @@ export class ProjectionStore {
       cacheHitPct: hasLiveUsage ? live.cacheHitPct : baseline.cacheHitPct,
       totalDurationMs: baseline.totalDurationMs + live.totalDurationMs,
       contextTokens: hasLiveUsage ? live.contextTokens : baseline.contextTokens,
+      // Latest-inference tok/s is a per-step rate, like cache hit %; fall back
+      // to the baseline's last-known value when this switch saw no inference.
+      latestTokPerS: live.latestTokPerS ?? baseline.latestTokPerS,
     }
   }
 
@@ -654,6 +768,7 @@ export class ProjectionStore {
     this.state.firstTokenPerf.clear()
     this.state.turnUsage.clear()
     this.state.latestUsage = null
+    this.state.latestInference = null
     this.iterBuffer = null
     this.ctxCache.clear()
     this.currentIterSeq = null
@@ -812,7 +927,26 @@ export class ProjectionStore {
         // skip a corrupt line (the store already guards against this)
       }
     }
+    // Reconstruct the session's metrics from the persisted log (issue #42
+    // follow-up) so a historical session's strip shows turns/time/tokens even
+    // though its turns were never seen live. Run before replayEvents so its
+    // trailing emitNow picks up both.
+    this.restoreHistoricalMetrics(sessionId, events)
     this.replayEvents(events)
+  }
+
+  /** Backfill the metrics cache + baseline for a historical session that has no
+   *  cached metrics yet (issue #42 follow-up). A session visited live this
+   *  browser session already has accurate cached metrics — reconstructing from
+   *  the log there could clobber turns not yet flushed to the event log. */
+  private restoreHistoricalMetrics(sessionId: string, events: EngineYield[]): void {
+    if (this.metricsCache.has(sessionId)) return
+    const metrics = metricsFromEvents(events)
+    if (metrics === null) return
+    this.metricsCache.set(sessionId, metrics)
+    if (this.state.sessionId === sessionId) {
+      this.state.metricsBaseline = metrics
+    }
   }
 
   /** Trajectory-only consumption path for replayed (historical) events — feeds
@@ -1073,6 +1207,7 @@ export class ProjectionStore {
         turnId: null,
         state: 'done',
         attachments,
+        createdAt: Date.now(),
       },
     ]
     this.emitNow()
@@ -1107,6 +1242,7 @@ export class ProjectionStore {
       speaker,
       turnId,
       state: 'streaming',
+      createdAt: Date.now(),
     }
     this.state.nodes = [...this.state.nodes, node]
     this.state.currentSpeaker = speaker
@@ -1271,12 +1407,12 @@ export class ProjectionStore {
         this.finalizeStreamingThinking(y.turn_id)
         const node = this.streamingNodeFor(y.turn_id, y.speaker)
         if (node !== null) {
-          this.replaceNode(node.id, { text: y.text, state: 'done' })
+          this.replaceNode(node.id, { text: y.text, state: 'done', isFinal: true })
         } else {
           this.seedAssistant(y.turn_id, y.speaker)
           const seeded = this.streamingNodeFor(y.turn_id, y.speaker)
           if (seeded !== null) {
-            this.replaceNode(seeded.id, { text: y.text, state: 'done' })
+            this.replaceNode(seeded.id, { text: y.text, state: 'done', isFinal: true })
           }
         }
         this.finalizeIterBuffer()
@@ -1793,6 +1929,12 @@ export class ProjectionStore {
         // (context < infer < tool), NOT by re-anchoring `at` — the streaming
         // path emits `tool_calls` mid-stream BEFORE `inference` fires, so a
         // wall-clock anchor would place infer AFTER tool.
+        // Issue #42: also capture the streamed completion tokens + duration so
+        // the metrics strip can show the latest inference's tok/s.
+        this.state.latestInference = {
+          completionTokens: y.snapshot.response.usage.completion_tokens,
+          durationMs: y.snapshot.duration_ms,
+        }
         const iterSeq = this.currentIterSeq
         if (iterSeq !== null) {
           const entry = this.state.trajectory.find((e) => e.seq === iterSeq)
@@ -2331,13 +2473,23 @@ export class ProjectionStore {
 function messagesToNodes(messages: unknown[]): ChatNode[] {
   const out: ChatNode[] = []
   for (const m of messages) {
-    const msg = m as { role?: string; content?: ContentBlock[] } | null
+    const msg = m as {
+      role?: string
+      content?: ContentBlock[]
+      metadata?: Record<string, string>
+    } | null
     if (msg === null || typeof msg !== 'object') continue
     // Don't replay the system prompt or tool-result messages as chat bubbles —
     // the system prompt is engine context, not conversation, and tool results
     // get their own rendering in W2.
     if (msg.role === 'system' || msg.role === 'tool') continue
     const role = roleOf(msg.role)
+    // A persisted timestamp (if the engine stored one in message metadata)
+    // survives into the replayed node; absent today, so historical bubbles
+    // simply hide the time label (future-proof for a transcript-level ts).
+    const tsRaw = msg.metadata?.ts ?? msg.metadata?.timestamp ?? msg.metadata?.created_at
+    const tsNum = tsRaw !== undefined ? Number(tsRaw) : NaN
+    const createdAt = Number.isFinite(tsNum) ? tsNum : undefined
     // W4: collect image blocks for a user node's attachment thumbnails.
     const attachments: ContentBlock[] = (msg.content ?? []).filter(
       (b) => b.type === 'image' || b.type === 'file',
@@ -2353,6 +2505,7 @@ function messagesToNodes(messages: unknown[]): ChatNode[] {
           turnId: null,
           state: 'done',
           attachments: role === 'user' && attachments.length > 0 ? attachments : undefined,
+          createdAt,
         })
       } else if (block.type === 'thinking') {
         out.push({

@@ -186,7 +186,19 @@ impl Conversation {
     }
 
     /// Add a message to the conversation.
-    pub fn add_message(&mut self, message: Message) {
+    ///
+    /// User/assistant messages are stamped with a wall-clock `metadata["ts"]`
+    /// (epoch ms) so a persisted + replayed conversation can surface each
+    /// message's generation time (issue #42). System/tool messages are skipped
+    /// (not user-visible). The stamp is idempotent — a message that already
+    /// carries `ts` (e.g. reloaded from the store) keeps it.
+    pub fn add_message(&mut self, mut message: Message) {
+        if matches!(message.role, Role::User | Role::Assistant) {
+            message
+                .metadata
+                .entry("ts".to_string())
+                .or_insert_with(|| chrono::Utc::now().timestamp_millis().to_string());
+        }
         self.messages.push(message);
     }
 

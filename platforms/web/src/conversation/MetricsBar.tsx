@@ -1,6 +1,7 @@
 // MetricsBar — the composer strip showing session aggregates: turns/steps,
-// first-token latency + throughput, cache hit %, in/out tokens. Pure consumer
-// of the projection's `metrics` snapshot — no engine data of its own.
+// first-token latency + throughput, cache hit %, context size, processing
+// time, total in/out tokens. Pure consumer of the projection's `metrics`
+// snapshot — no engine data of its own.
 //
 // Renders inline in the composer chips row (between attach and model). Hides
 // itself on a fresh session (no turns yet) so the empty-state composer stays
@@ -20,8 +21,10 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
   if (metrics.turns === 0) return null
 
   const firstTokenS = metrics.firstTokenMs !== null ? metrics.firstTokenMs / 1000 : null
-  const seconds = metrics.totalDurationMs / 1000
-  const tokPerS = seconds > 0 ? metrics.totalCompletion / seconds : null
+  // Tok/s is the LATEST inference's throughput (issue #42): the projection
+  // computes it from the most recent `inference` snapshot's streamed output
+  // tokens over its wall duration — not a cumulative total/duration average.
+  const tokPerS = metrics.latestTokPerS
   // Cache hit is the LATEST inference step's rate (projection computes it from
   // the most recent token_usage record), not a session cumulative — token
   // counts below stay cumulative (total spend).
@@ -66,10 +69,15 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
           上下文 <span className={styles.value}>{fmtK(contextTokens)}</span>
         </span>
       )}
+      {metrics.totalDurationMs > 0 && (
+        <span className={styles.group}>
+          用时 <span className={styles.value}>{fmtDur(metrics.totalDurationMs)}</span>
+        </span>
+      )}
       <span className={styles.group}>
-        输入 <span className={styles.value}>{fmtK(metrics.totalPrompt)}</span>
+        总输入 <span className={styles.value}>{fmtK(metrics.totalPrompt)}</span>
         <span className={styles.sep}>·</span>
-        输出 <span className={styles.value}>{fmtK(metrics.totalCompletion)}</span>
+        总输出 <span className={styles.value}>{fmtK(metrics.totalCompletion)}</span>
       </span>
     </div>
   )
@@ -79,4 +87,18 @@ export const MetricsBar = memo(function MetricsBar({ metrics }: MetricsBarProps)
 function fmtK(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
   return String(n)
+}
+
+/** Format a millisecond duration compactly: "12.4s" / "2m05s" / "1h03m". */
+function fmtDur(ms: number): string {
+  const s = ms / 1000
+  if (s < 60) return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) {
+    const rs = Math.round(s % 60)
+    return rs > 0 ? `${m}m${rs}s` : `${m}m`
+  }
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm > 0 ? `${h}h${rm}m` : `${h}h`
 }

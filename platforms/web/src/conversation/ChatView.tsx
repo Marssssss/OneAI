@@ -18,6 +18,7 @@ import type { ReactNode } from 'react'
 import type { BusScenarioMember, FeedbackKind } from '../rpc/types'
 import type { ChatNode } from '../store/projection'
 import { useLocale } from '../i18n'
+import type { Locale } from '../i18n'
 import { IncrementalMarkdown } from './IncrementalMarkdown'
 import { ToolCallNode } from './ToolCallNode'
 import { PlanNode } from './PlanNode'
@@ -87,23 +88,11 @@ export function ChatView({
   return (
     <div className={styles.scroll} ref={scrollRef}>
       <div className={styles.list}>
-        {/* The 👍/👎 affordance belongs only to a turn's final text output, not
-         * to every intermediate step's text (the agent loop often emits several
-         * text blocks across iterations before its terminal answer). Walk the
-         * node list once to mark, per turn_id, the last assistant text node —
-         * ChatNodeSeat gates the feedback row on `isTurnFinal`. */}
+        {/* The time/copy/👍👎 meta row belongs only to a turn's terminal answer
+         * — the node the engine's `direct_answer` produced (marked `isFinal`),
+         * not every intermediate step's text (the agent loop often emits several
+         * text blocks across iterations before its terminal answer). */}
         {(() => {
-          const finalByTurn = new Map<string, string>()
-          for (let i = nodes.length - 1; i >= 0; i -= 1) {
-            const n = nodes[i]
-            if (
-              n.kind === 'text' &&
-              n.role === 'assistant' &&
-              n.turnId !== null
-            ) {
-              if (!finalByTurn.has(n.turnId)) finalByTurn.set(n.turnId, n.id)
-            }
-          }
           // Speaker-header merging (UI-1): a single speaker within one turn
           // may emit several blocks — a thinking fragment, then the final
           // text answer (and possibly tool cards). Tagging each block with
@@ -134,9 +123,7 @@ export function ChatView({
               onSelect={onSelectTool}
               onOpenImage={onOpenImage}
               onSubmitFeedback={onSubmitFeedback}
-              isTurnFinal={
-                n.turnId !== null && finalByTurn.get(n.turnId) === n.id
-              }
+              isTurnFinal={n.isFinal === true}
               isSpeakerHead={headIds.has(n.id)}
             />
           ))
@@ -212,30 +199,46 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
    *  per block (UI-1). */
   isSpeakerHead: boolean
 }): ReactNode {
-  const { t } = useLocale()
+  const { t, locale } = useLocale()
   if (node.role === 'user') {
     const images = (node.attachments ?? []).filter(
       (b) => b.type === 'image' || b.type === 'file',
     )
     return (
       <div className={styles.row}>
-        <div className={`${styles.bubble} ${styles.userBubble}`}>
-          {node.text.length > 0 && <div>{node.text}</div>}
-          {images.length > 0 && (
-            <div className={styles.attachments}>
-              {images.map((b, i) => {
-                const src = imagePreviewSrc(b)
-                if (src.length === 0) return null
-                return (
-                  <img
-                    key={i}
-                    className={styles.attachmentThumb}
-                    src={src}
-                    alt="attachment"
-                    onClick={() => onOpenImage(src, 'attachment')}
-                  />
-                )
-              })}
+        <div className={styles.userColumn}>
+          <div className={`${styles.bubble} ${styles.userBubble}`}>
+            {node.text.length > 0 && <div>{node.text}</div>}
+            {images.length > 0 && (
+              <div className={styles.attachments}>
+                {images.map((b, i) => {
+                  const src = imagePreviewSrc(b)
+                  if (src.length === 0) return null
+                  return (
+                    <img
+                      key={i}
+                      className={styles.attachmentThumb}
+                      src={src}
+                      alt="attachment"
+                      onClick={() => onOpenImage(src, 'attachment')}
+                    />
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          {(node.createdAt !== undefined || node.text.length > 0) && (
+            <div className={styles.feedbackRow}>
+              {node.createdAt !== undefined && (
+                <span className={styles.time}>{fmtTime(node.createdAt, locale)}</span>
+              )}
+              {node.text.length > 0 && (
+                <CopyButton
+                  text={node.text}
+                  copyLabel={t('chat.copy')}
+                  copiedLabel={t('chat.copied')}
+                />
+              )}
             </div>
           )}
         </div>
@@ -313,55 +316,60 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   return (
     <div className={styles.row}>
       {showSpeaker && <SpeakerHeader meta={speaker} />}
-      <div className={`${styles.bubble} ${styles.assistantBubble}`}>
-        {empty ? (
-          <span className={styles.placeholder}>…</span>
-        ) : (
-          <IncrementalMarkdown text={node.text} theme={theme} />
-        )}
-        {node.state === 'streaming' && !empty && <span className={styles.cursor} />}
-      </div>
-      {node.deliverables !== undefined && node.deliverables.length > 0 && (
-        <DeliverableStrip artifacts={node.deliverables} onOpenImage={onOpenImage} />
-      )}
-      {(feedbackDone || showCopy) && (
-        <div className={styles.feedbackRow}>
-          {showCopy && (
-            <CopyButton
-              text={node.text}
-              copyLabel={t('chat.copy')}
-              copiedLabel={t('chat.copied')}
-            />
+      <div className={styles.assistantColumn}>
+        <div className={`${styles.bubble} ${styles.assistantBubble}`}>
+          {empty ? (
+            <span className={styles.placeholder}>…</span>
+          ) : (
+            <IncrementalMarkdown text={node.text} theme={theme} />
           )}
-          {feedbackDone && (
-            <div className={styles.feedbackGroup}>
-              <button
-                className={`${styles.feedbackBtn} ${
-                  currentKind === 'up' ? styles.feedbackOn : ''
-                } ${node.feedbackPending ? styles.feedbackPending : ''}`}
-                onClick={() => onSubmitFeedback(node.id, 'up')}
-                aria-label="thumbs up"
-                disabled={node.feedbackPending === true}
-              >
-                👍
-              </button>
-              <button
-                className={`${styles.feedbackBtn} ${
-                  currentKind === 'down' ? styles.feedbackOn : ''
-                } ${node.feedbackPending ? styles.feedbackPending : ''}`}
-                onClick={() => onSubmitFeedback(node.id, 'down')}
-                aria-label="thumbs down"
-                disabled={node.feedbackPending === true}
-              >
-                👎
-              </button>
-              {node.feedback?.text !== undefined && (
-                <span className={styles.feedbackNote}>{node.feedback.text}</span>
-              )}
-            </div>
-          )}
+          {node.state === 'streaming' && !empty && <span className={styles.cursor} />}
         </div>
-      )}
+        {node.deliverables !== undefined && node.deliverables.length > 0 && (
+          <DeliverableStrip artifacts={node.deliverables} onOpenImage={onOpenImage} />
+        )}
+        {(feedbackDone || showCopy) && (
+          <div className={styles.feedbackRow}>
+            {node.createdAt !== undefined && (
+              <span className={styles.time}>{fmtTime(node.createdAt, locale)}</span>
+            )}
+            {showCopy && (
+              <CopyButton
+                text={node.text}
+                copyLabel={t('chat.copy')}
+                copiedLabel={t('chat.copied')}
+              />
+            )}
+            {feedbackDone && (
+              <div className={styles.feedbackGroup}>
+                <button
+                  className={`${styles.feedbackBtn} ${
+                    currentKind === 'up' ? styles.feedbackOn : ''
+                  } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+                  onClick={() => onSubmitFeedback(node.id, 'up')}
+                  aria-label="thumbs up"
+                  disabled={node.feedbackPending === true}
+                >
+                  👍
+                </button>
+                <button
+                  className={`${styles.feedbackBtn} ${
+                    currentKind === 'down' ? styles.feedbackOn : ''
+                  } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+                  onClick={() => onSubmitFeedback(node.id, 'down')}
+                  aria-label="thumbs down"
+                  disabled={node.feedbackPending === true}
+                >
+                  👎
+                </button>
+                {node.feedback?.text !== undefined && (
+                  <span className={styles.feedbackNote}>{node.feedback.text}</span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 })
@@ -537,6 +545,26 @@ function firstSentence(text: string): string {
   const m = t.split(/[。.!?\n]/)[0] ?? ''
   const s = m.trim().replace(/\s+/g, ' ')
   return s.length > 120 ? s.slice(0, 119) + '…' : s
+}
+
+/** Wall-clock generation time (locale-aware). Same-day → "HH:MM"; otherwise
+ *  prepends a date ("M/D", plus year when it differs from the current year). */
+function fmtTime(ts: number, locale: Locale): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const loc = locale === 'zh' ? 'zh-CN' : 'en-US'
+  const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' })
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  if (sameDay) return time
+  const date = d.toLocaleDateString(loc, {
+    month: 'numeric',
+    day: 'numeric',
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  })
+  return `${date} ${time}`
 }
 
 function TypingDots(): ReactNode {

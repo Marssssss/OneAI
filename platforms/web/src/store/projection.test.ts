@@ -1,19 +1,50 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectionStore } from './projection'
-import type { EngineYield } from '../rpc/types'
+import type { EngineYield, InferenceSnapshot } from '../rpc/types'
 import type { OneAiRpcClient } from '../rpc/client'
 
 // Drives ProjectionStore.consume with scripted EngineYield sequences and
 // asserts the projected ChatNode tree + approval queue + trajectory. No real
 // ws — a fake rpc is cast in (consume never touches it; attach() isn't called).
 
-function fakeRpc(): OneAiRpcClient {
+function fakeRpc(overrides?: Partial<OneAiRpcClient>): OneAiRpcClient {
   return {
     onEvent: () => () => {},
     onStatus: () => () => {},
     getStatus: () => 'closed',
     call: () => Promise.resolve({} as never),
+    ...overrides,
   } as unknown as OneAiRpcClient
+}
+
+/** Build a minimal `InferenceSnapshot` carrying the two fields the metrics
+ *  strip reads for tok/s: streamed completion tokens + wall duration. */
+function inferenceSnapshot(completion: number, durationMs: number): InferenceSnapshot {
+  return {
+    iteration: 0,
+    model: 'test',
+    temperature: null,
+    max_tokens: null,
+    top_p: null,
+    thinking_budget: null,
+    tool_names: [],
+    message_count: 0,
+    request_messages: [],
+    request_body: {},
+    response: {
+      message: { role: 'assistant', content: [] },
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: completion,
+        total_tokens: 1000 + completion,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'test',
+    },
+    response_body: {},
+    duration_ms: durationMs,
+  }
 }
 
 describe('ProjectionStore.consume', () => {
@@ -412,6 +443,95 @@ describe('ProjectionStore session metrics (#35)', () => {
     const m = store.getSnapshot().metrics
     expect(m.turns).toBe(1)
     expect(m.totalPrompt).toBe(100)
+  })
+
+  it('computes tok/s from the latest inference stream (issue #42)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    // 300 completion tokens streamed over 6000ms → 50 tok/s.
+    y({ kind: 'inference', turn_id: 't1', snapshot: inferenceSnapshot(300, 6000) })
+    y({ kind: 'turn_complete', turn_id: 't1', summary: null })
+    expect(store.getSnapshot().metrics.latestTokPerS).toBeCloseTo(50, 5)
+  })
+
+  it('tok/s reflects the most recent inference, not the cumulative average (#42)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({ kind: 'inference', turn_id: 't1', snapshot: inferenceSnapshot(300, 6000) }) // 50 tok/s
+    y({ kind: 'turn_complete', turn_id: 't1', summary: null })
+    y({ kind: 'turn_start', turn_id: 't2', task: 'go' })
+    y({ kind: 'inference', turn_id: 't2', snapshot: inferenceSnapshot(100, 1000) }) // 100 tok/s
+    y({ kind: 'turn_complete', turn_id: 't2', summary: null })
+    // Latest inference wins (100), not the cumulative 400/7000 ≈ 57.
+    expect(store.getSnapshot().metrics.latestTokPerS).toBeCloseTo(100, 5)
+  })
+
+  it('stamps a generation time on user + assistant messages (issue #42)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    store.pushUserMessage('hello')
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    y({ kind: 'stream_chunk', turn_id: 't1', text: 'hi', speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    const nodes = store.getSnapshot().nodes
+    const user = nodes.find((n) => n.kind === 'user')
+    const assistant = nodes.find((n) => n.role === 'assistant' && n.kind === 'text')
+    expect(user?.createdAt).toBeTypeOf('number')
+    expect(assistant?.createdAt).toBeTypeOf('number')
+  })
+
+  it('marks only the terminal answer as final (issue #42)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    // Intermediate iteration: text finalized by a tool call (not final).
+    y({ kind: 'stream_chunk', turn_id: 't1', text: 'checking', speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    y({ kind: 'tool_calls', turn_id: 't1', calls: [{ id: 'c1', name: 'shell', args: {} }], speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    // Final iteration: text finalized by direct_answer (terminal).
+    y({ kind: 'stream_chunk', turn_id: 't1', text: 'answer', speaker: null })
+    vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame()
+    y({ kind: 'direct_answer', turn_id: 't1', text: 'answer', speaker: null })
+    const textNodes = store.getSnapshot().nodes.filter(
+      (n) => n.kind === 'text' && n.role === 'assistant',
+    )
+    expect(textNodes).toHaveLength(2)
+    expect(textNodes[0].isFinal).toBeFalsy()
+    expect(textNodes[1].isFinal).toBe(true)
+  })
+
+  it('reconstructs metrics for a historical session from the event log (issue #42)', async () => {
+    const events = [
+      JSON.stringify({ kind: 'turn_start', turn_id: 't1', task: 'go', ts: 1000 }),
+      JSON.stringify({ kind: 'iteration_start', turn_id: 't1', iteration: 1, paradigm: 're_act', ts: 1100 }),
+      JSON.stringify({
+        kind: 'token_usage',
+        usage: { prompt_tokens: 1200, completion_tokens: 50, cache_read_tokens: 600, cache_creation_tokens: 0 },
+        ts: 1500,
+      }),
+      JSON.stringify({ kind: 'inference', turn_id: 't1', snapshot: inferenceSnapshot(300, 6000), ts: 1500 }),
+      JSON.stringify({ kind: 'turn_complete', turn_id: 't1', ts: 2000 }),
+    ]
+    const rpc = fakeRpc({ call: () => Promise.resolve({ ok: true, events } as never) })
+    const store = new ProjectionStore(rpc)
+    store.consume({ kind: 'session_loaded', id: 'A', messages: [] })
+    await vi.runAllTimersAsync()
+    await Promise.resolve()
+
+    const m = store.getSnapshot().metrics
+    expect(m.turns).toBe(1)
+    expect(m.steps).toBe(1)
+    expect(m.totalPrompt).toBe(1200)
+    expect(m.totalCompletion).toBe(50)
+    expect(m.totalDurationMs).toBe(1000) // turn_complete 2000 - turn_start 1000
+    expect(m.cacheHitPct).toBeCloseTo(50, 5) // 600 / 1200
+    expect(m.latestTokPerS).toBeCloseTo(50, 5) // 300 / (6000 / 1000)
   })
 })
 
