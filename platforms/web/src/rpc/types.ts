@@ -1029,10 +1029,36 @@ export interface ProviderOpResult {
   error?: string
 }
 
-/** `provider/models` params (issue #37 — the add-provider form's model
- *  dropdown). All optional: unset fields inherit the engine env server-side
- *  (`ONEAI_API_KEY` / `ONEAI_BASE_URL`), mirroring `provider/add`. */
+/** `provider/detect` params (issue #41) — auto-detect the protocol from a bare
+ *  base URL. No API key required. */
+export interface ProviderDetectParams {
+  base_url?: string
+}
+
+/** `provider/detect` result — the detected wire kind, its protocol label, and
+ *  the normalized base URL the engine will request against. */
+export interface ProviderDetectResult {
+  kind: string
+  label: string
+  base_url?: string
+}
+
+/** `provider/set_model` params (issue #41) — switch the active model under one
+ *  provider entry (persisted to config.toml + hot-swapped into the pool). */
+export interface ProviderSetModelParams {
+  name: string
+  model: string
+}
+
+/** `provider/models` params (issue #37/#41 — the add-provider form's + the
+ *  composer switcher's model dropdown). When `name` is present the server
+ *  resolves that configured entry's full stored config (incl. its api_key);
+ *  otherwise the kind/api_key/base_url fields describe the endpoint, with
+ *  unset fields inheriting the engine env (`ONEAI_API_KEY` /
+ *  `ONEAI_BASE_URL`). */
 export interface ProviderModelsParams {
+  /** Configured entry name (resolves its stored api_key/kind/base_url). */
+  name?: string
   /** Protocol kind ("openai"/"anthropic"/"gemini"/"ollama"). */
   kind?: string
   api_key?: string

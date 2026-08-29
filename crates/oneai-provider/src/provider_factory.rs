@@ -39,11 +39,18 @@ impl ProviderFactory {
     /// resolved profile. Behavior is identical to the prior `match cloud_kind`
     /// dispatch — see `factory_dispatch_*` tests.
     pub fn create(config: ModelConfig) -> Box<dyn LlmProvider> {
-        let resolved = Self::resolve_provider(config);
+        let mut resolved = Self::resolve_provider(config);
         if matches!(resolved.provider_type, ProviderType::Transformers) {
             panic!("Transformers provider not yet implemented. Use Local (Ollama) instead.");
         }
         let compat = Compat::from_config(&resolved);
+        // Normalize the base URL for the resolved family (issue #41): append a
+        // missing version segment, collapse duplicates, strip a pasted endpoint.
+        // Written back so `provider.config()` (and thus the URL builders and the
+        // app-server probe's display) all agree on one effective URL.
+        resolved.base_url = resolved
+            .base_url
+            .map(|u| crate::normalize_base_url(compat.family, &u));
         match compat.family {
             CompatFamily::AnthropicCompat => {
                 Box::new(AnthropicProvider::with_compat(resolved, compat))

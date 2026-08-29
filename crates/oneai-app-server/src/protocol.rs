@@ -131,11 +131,17 @@ pub mod method {
     pub const CONFIG_GET: &str = "config/get";
     pub const PROVIDER_LIST: &str = "provider/list";
     pub const PROVIDER_ADD: &str = "provider/add";
+    pub const PROVIDER_UPDATE: &str = "provider/update";
     pub const PROVIDER_DELETE: &str = "provider/delete";
     pub const PROVIDER_SET_ACTIVE: &str = "provider/set_active";
-    /// List the models an endpoint serves (kind/api_key/base_url query — the
-    /// add-provider form's model dropdown data source, issue #37).
+    pub const PROVIDER_SET_MODEL: &str = "provider/set_model";
+    /// List the models an endpoint serves (kind/api_key/base_url query, or a
+    /// `name` that resolves a configured entry — the add-provider form's and
+    /// the composer switcher's model dropdown data source, issue #37/#41).
     pub const PROVIDER_MODELS: &str = "provider/models";
+    /// Auto-detect the protocol family + normalized base URL from a base_url
+    /// (no API key required) — issue #41.
+    pub const PROVIDER_DETECT: &str = "provider/detect";
     pub const DOMAINPACK_LIST: &str = "domainpack/list";
     pub const THINKING_GET: &str = "thinking/get";
     pub const THINKING_SET: &str = "thinking/set";

@@ -34,7 +34,7 @@ use oneai_bus::{
 use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo};
 
 use crate::dispatcher::Dispatcher;
-use crate::probe::{ProviderEntryDto, ProviderModelsQuery, SharedAppProbe};
+use crate::probe::{ProviderDetectQuery, ProviderEntryDto, ProviderModelsQuery, SharedAppProbe};
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
 use crate::{
     SharedConversationStore, SharedFeedbackStore, SharedHostAllowlistRpc, SharedScenarioStore,
@@ -625,6 +625,39 @@ async fn handle_request(
                 serde_json::to_value(res).unwrap_or(json!({"ok": false})),
             )
         }
+        method::PROVIDER_UPDATE => {
+            let entry = match field::<ProviderEntryDto>(&params, "entry") {
+                Ok(e) => e,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.provider_update(entry).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
+        method::PROVIDER_SET_MODEL => {
+            let name = match field::<String>(&params, "name") {
+                Ok(n) => n,
+                Err(e) => return Response::err(id, e),
+            };
+            let model = match field::<String>(&params, "model") {
+                Ok(m) => m,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.provider_set_model(&name, &model).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
+        method::PROVIDER_DETECT => {
+            let query = ProviderDetectQuery {
+                base_url: opt_field(&params, "base_url"),
+            };
+            let res = probe.provider_detect(query).await;
+            Response::ok(id, serde_json::to_value(res).unwrap_or(json!({})))
+        }
         method::PROVIDER_DELETE => {
             let name = match field::<String>(&params, "name") {
                 Ok(n) => n,
@@ -648,9 +681,11 @@ async fn handle_request(
             )
         }
         method::PROVIDER_MODELS => {
-            // All three fields optional — unset ones inherit the engine env
-            // (CLI impl), mirroring `provider/add`.
+            // All fields optional — unset ones inherit the engine env (CLI
+            // impl), mirroring `provider/add`. `name` (when present) resolves a
+            // configured entry's full stored config (incl. its api_key).
             let query = ProviderModelsQuery {
+                name: opt_field(&params, "name"),
                 kind: opt_field(&params, "kind"),
                 api_key: opt_field(&params, "api_key"),
                 base_url: opt_field(&params, "base_url"),
@@ -1054,6 +1089,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_models_reads_name_field() {
+        let resp = probe_response("provider/models", json!({"name": "bailian"})).await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["models"].is_array());
+    }
+
+    #[tokio::test]
+    async fn provider_detect_routes_and_returns_shape() {
+        let resp = probe_response(
+            "provider/detect",
+            json!({"base_url": "https://api.openai.com"}),
+        )
+        .await;
+        assert!(resp.error.is_none(), "provider/detect should not RPC-error");
+        let res = resp.result.unwrap();
+        assert!(res["kind"].is_string());
+        assert!(res["label"].is_string());
+        // base_url is skipped when empty (NullAppProbe) — non-empty when the
+        // CLI impl detects a URL.
+        assert!(res["base_url"].is_null() || res["base_url"].is_string());
+    }
+
+    #[tokio::test]
+    async fn provider_update_routes_and_returns_op_result() {
+        let resp = probe_response(
+            "provider/update",
+            json!({"entry": {"name": "bailian", "model": "qwen-max"}}),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["ok"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn provider_update_missing_entry_is_invalid_params() {
+        let resp = probe_response("provider/update", json!({})).await;
+        assert_eq!(resp.error.unwrap().code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn provider_set_model_routes_and_returns_op_result() {
+        let resp = probe_response(
+            "provider/set_model",
+            json!({"name": "bailian", "model": "qwen-max"}),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["ok"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn provider_set_model_missing_fields_is_invalid_params() {
+        let resp = probe_response("provider/set_model", json!({"name": "x"})).await;
+        assert_eq!(resp.error.unwrap().code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
     async fn config_read_returns_path_and_content() {
         let resp = probe_response("config/read", json!({})).await;
         assert!(resp.error.is_none());
@@ -1416,6 +1508,29 @@ mod tests {
             crate::probe::ProviderModelsResult {
                 ok: false,
                 models: Vec::new(),
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_detect(
+            &self,
+            _: crate::probe::ProviderDetectQuery,
+        ) -> crate::probe::ProviderDetectResult {
+            crate::probe::ProviderDetectResult::default()
+        }
+        async fn provider_update(
+            &self,
+            _: crate::probe::ProviderEntryDto,
+        ) -> crate::probe::ProviderOpResult {
+            crate::probe::ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some("test probe".into()),
+            }
+        }
+        async fn provider_set_model(&self, _: &str, _: &str) -> crate::probe::ProviderOpResult {
+            crate::probe::ProviderOpResult {
+                ok: false,
+                providers: None,
                 error: Some("test probe".into()),
             }
         }

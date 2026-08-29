@@ -173,6 +173,12 @@ pub struct ProviderOpResult {
 /// `provider/add` would do.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderModelsQuery {
+    /// Configured entry name — when present, resolve the entry's full stored
+    /// config (incl. its config.toml api_key) and list THAT endpoint's models
+    /// (the composer's per-provider model switcher, issue #41). When absent,
+    /// use the kind/api_key/base_url fields (the add-provider form).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Protocol kind ("openai"/"anthropic"/"gemini"/"ollama"); absent ⇒
     /// auto-detect from the base URL host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,6 +187,27 @@ pub struct ProviderModelsQuery {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+}
+
+/// Query for `provider/detect` (issue #41) — auto-detect the protocol family +
+/// normalized base URL from a bare `base_url`, no API key required.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderDetectQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Result of `provider/detect` — the wire `kind`, its display label, and the
+/// normalized base URL the engine will actually request against.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ProviderDetectResult {
+    /// Detected protocol kind ("openai"/"anthropic"/"gemini"/"ollama").
+    pub kind: String,
+    /// Human protocol label (e.g. "OpenAI Completions").
+    pub label: String,
+    /// The normalized base URL (version segment ensured / endpoint stripped).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
 }
 
 /// Result of `provider/models` (issue #37 — the model dropdown's data
@@ -283,9 +310,20 @@ pub trait AppProbe: Send + Sync {
     /// `active_provider` to config. Returns the post-op provider list.
     async fn provider_set_active(&self, name: &str) -> ProviderOpResult;
     /// List the models served by the endpoint described by `query` (the
-    /// add-provider form fields) — the settings UI's model dropdown data
-    /// source (issue #37). Backed by `LlmProvider::list_models`.
+    /// add-provider form fields, or a configured entry by `name`) — the
+    /// settings UI's model dropdown data source (issue #37/#41). Backed by
+    /// `LlmProvider::list_models`.
     async fn provider_models(&self, query: ProviderModelsQuery) -> ProviderModelsResult;
+    /// Auto-detect the protocol family + normalized base URL from a bare
+    /// `base_url` (issue #41). No API key required.
+    async fn provider_detect(&self, query: ProviderDetectQuery) -> ProviderDetectResult;
+    /// Update a provider entry by name — writes to config.toml (replacing the
+    /// entry) and rebuilds the live pool entry (preserving priority/active).
+    /// `api_key: None` retains the stored key.
+    async fn provider_update(&self, entry: ProviderEntryDto) -> ProviderOpResult;
+    /// Set the model of a provider entry by name — writes to config.toml +
+    /// rebuilds the live pool entry. Preserves priority + active status.
+    async fn provider_set_model(&self, name: &str, model: &str) -> ProviderOpResult;
     /// Read the raw config file (path + contents) for the "open config file"
     /// affordance.
     async fn config_read(&self) -> ConfigFileView;
@@ -379,6 +417,23 @@ impl AppProbe for NullAppProbe {
             ok: false,
             models: Vec::new(),
             error: Some("provider models not supported by this probe".to_string()),
+        }
+    }
+    async fn provider_detect(&self, _query: ProviderDetectQuery) -> ProviderDetectResult {
+        ProviderDetectResult::default()
+    }
+    async fn provider_update(&self, _entry: ProviderEntryDto) -> ProviderOpResult {
+        ProviderOpResult {
+            ok: false,
+            providers: None,
+            error: Some("provider update not supported by this probe".to_string()),
+        }
+    }
+    async fn provider_set_model(&self, _name: &str, _model: &str) -> ProviderOpResult {
+        ProviderOpResult {
+            ok: false,
+            providers: None,
+            error: Some("provider set-model not supported by this probe".to_string()),
         }
     }
     async fn config_read(&self) -> ConfigFileView {

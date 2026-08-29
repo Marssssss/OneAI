@@ -307,6 +307,22 @@ impl ProviderPool {
         }
     }
 
+    /// Replace a provider entry's provider in place (write lock), preserving
+    /// its position and priority. Unlike [`ProviderPool::add_entry`] — which
+    /// replaces by name but rewrites priority to the caller-supplied value —
+    /// this keeps the existing priority so a live model/endpoint edit
+    /// (`provider/update` · `provider/set_model`) doesn't reorder the pool.
+    /// Returns `true` if an entry with `name` existed (and was replaced).
+    pub fn replace_entry(&self, name: &str, provider: Arc<dyn LlmProvider>) -> bool {
+        let mut entries = self.entries.write().expect("entries lock poisoned");
+        let Some(pos) = entries.iter().position(|e| e.name == name) else {
+            return false;
+        };
+        let priority = entries[pos].priority();
+        entries[pos] = ProviderEntry::new(name.to_string(), provider, priority);
+        true
+    }
+
     /// Remove a provider entry by name (write lock + retain). If the removed
     /// entry was active, `active_index` is reset to 0 (the next primary).
     pub fn remove_entry(&self, name: &str) {
@@ -1992,6 +2008,27 @@ mod tests {
         pool.remove_entry("anthropic");
         assert_eq!(pool.provider_names().len(), 1);
         assert_eq!(pool.active_provider_name(), "openai");
+    }
+
+    /// `replace_entry` swaps the provider in place while keeping priority (and
+    /// therefore position) — the backing for `provider/update`/`set_model`.
+    #[tokio::test]
+    async fn replace_entry_preserves_priority_and_position() {
+        let pool = two_entry_pool();
+        // anthropic is at priority 1 (index 1); replace it with a new model.
+        let replaced = TestProvider::from_config(ModelConfig {
+            model_name: Some("claude-opus-4-8".into()),
+            ..anthropic_cfg()
+        });
+        assert!(pool.replace_entry("anthropic", Arc::new(replaced)));
+        // Position + priority preserved: openai (0) still first, anthropic (1) second.
+        assert_eq!(pool.provider_names(), vec!["openai", "anthropic"]);
+        assert_eq!(pool.active_model_name(), "gpt-4"); // active still openai
+                                                       // Selecting the replaced entry now reports the new model.
+        pool.set_active_by_name("anthropic").expect("selectable");
+        assert_eq!(pool.active_model_name(), "claude-opus-4-8");
+        // Unknown name → false.
+        assert!(!pool.replace_entry("nope", openai_test_provider()));
     }
 
     // ── issue #37: a manual `set_active` must survive inference ────────────

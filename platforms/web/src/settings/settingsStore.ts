@@ -13,17 +13,35 @@ import type {
   AppConfigSnapshot,
   ConfigFileView,
   DomainPackList,
+  ProviderDetectParams,
+  ProviderDetectResult,
   ProviderEntryDto,
   ProviderInfo,
   ProviderModelsParams,
   ProviderModelsResult,
   ProviderOpResult,
+  ProviderSetModelParams,
   SkillInfo,
   SkillOpParams,
   SkillOpResult,
   ThinkingEffort,
   ThinkingEffortSetParams,
 } from '../rpc/types'
+
+/** Protocol display labels for wire `kind` strings (issue #41). The wire
+ *  `kind` values are unchanged — these are display-only protocol names, not
+ *  vendor names. */
+export const PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI Completions',
+  anthropic: 'Anthropic Messages',
+  gemini: 'Gemini Protocol',
+  ollama: 'Ollama Protocol',
+}
+
+/** Human protocol label for a `kind` string (falls back to the raw kind). */
+export function providerKindLabel(kind: string): string {
+  return PROVIDER_LABELS[kind] ?? kind
+}
 
 export interface SettingsSnapshot {
   config: AppConfigSnapshot | null
@@ -132,6 +150,62 @@ export class SettingsStore {
     } catch (e) {
       this.set({ lastError: errMsg(e, 'provider/delete') })
       return false
+    }
+  }
+
+  /** Update a provider entry by name — writes to config.toml + rebuilds the
+   *  live pool entry (preserving priority/active). `api_key` left undefined
+   *  retains the stored key (cards don't echo the plaintext key). */
+  async providerUpdate(entry: ProviderEntryDto): Promise<boolean> {
+    try {
+      const res = await this.rpc.call<{ entry: ProviderEntryDto }, ProviderOpResult>(
+        'provider/update',
+        { entry },
+      )
+      if (res.ok && res.providers !== undefined) {
+        this.set({ providers: res.providers, lastError: null })
+        return true
+      }
+      this.set({ lastError: res.error ?? 'provider update failed' })
+      return false
+    } catch (e) {
+      this.set({ lastError: errMsg(e, 'provider/update') })
+      return false
+    }
+  }
+
+  /** Set the model of one provider entry (issue #41 — switch model under the
+   *  same provider). Persisted + hot-swapped; the server returns the post-op
+   *  provider list so the active-model display updates. */
+  async providerSetModel(name: string, model: string): Promise<boolean> {
+    try {
+      const res = await this.rpc.call<ProviderSetModelParams, ProviderOpResult>(
+        'provider/set_model',
+        { name, model },
+      )
+      if (res.ok && res.providers !== undefined) {
+        this.set({ providers: res.providers, lastError: null })
+        return true
+      }
+      this.set({ lastError: res.error ?? 'provider set-model failed' })
+      return false
+    } catch (e) {
+      this.set({ lastError: errMsg(e, 'provider/set_model') })
+      return false
+    }
+  }
+
+  /** Auto-detect the protocol + normalized base URL from a bare base URL
+   *  (issue #41). No API key required. Returns null on any failure (the UI
+   *  just shows no detection hint). */
+  async providerDetect(baseUrl: string): Promise<ProviderDetectResult | null> {
+    try {
+      return await this.rpc.call<ProviderDetectParams, ProviderDetectResult>(
+        'provider/detect',
+        { base_url: baseUrl },
+      )
+    } catch {
+      return null
     }
   }
 

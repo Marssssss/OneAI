@@ -20,7 +20,7 @@ import { Modal } from '../scenario/Modal'
 import { useLocale } from '../i18n'
 import type { HostListResult } from '../rpc/types'
 import type { SettingsStore } from './settingsStore'
-import { useSettings } from './settingsStore'
+import { providerKindLabel, useSettings } from './settingsStore'
 import styles from './SettingsRoot.module.css'
 
 type Section = 'general' | 'models' | 'permissions' | 'network'
@@ -170,8 +170,20 @@ function GeneralSection({
 }
 
 /** The fixed protocol kinds the engine understands (issue #37 — a dropdown,
- *  not free text). `ollama` maps to `ProviderType::Local` server-side. */
+ *  not free text). `ollama` maps to `ProviderType::Local` server-side. These
+ *  are wire values; the UI shows protocol labels via `providerKindLabel`. */
 const PROVIDER_KINDS = ['openai', 'anthropic', 'gemini', 'ollama'] as const
+
+/** A provider entry's editable fields (shared by the add + edit forms). */
+interface ProviderDraft {
+  name: string
+  kind: string
+  api_key: string
+  base_url: string
+  model: string
+}
+
+const EMPTY_DRAFT: ProviderDraft = { name: '', kind: '', api_key: '', base_url: '', model: '' }
 
 function ModelsSection({
   store,
@@ -182,7 +194,7 @@ function ModelsSection({
 }): ReactNode {
   const { t } = useLocale()
   const [showAdd, setShowAdd] = useState(false)
-  const [draft, setDraft] = useState({ name: '', kind: 'openai', api_key: '', base_url: '', model: '' })
+  const [draft, setDraft] = useState<ProviderDraft>(EMPTY_DRAFT)
   const [showConfig, setShowConfig] = useState(false)
   // Issue #37 — model dropdown data: fetched from the endpoint via
   // `provider/models`; manual entry stays possible (the input keeps working
@@ -190,6 +202,11 @@ function ModelsSection({
   const [modelOptions, setModelOptions] = useState<string[]>([])
   const [modelsFetching, setModelsFetching] = useState(false)
   const [modelsError, setModelsError] = useState<string | null>(null)
+  // Issue #41 — auto-detect hint from `provider/detect` (when kind is Auto).
+  const [detected, setDetected] = useState<string | null>(null)
+  // Issue #41 — inline edit state (edit form keyed by the entry name).
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<ProviderDraft>(EMPTY_DRAFT)
 
   /** Pull the endpoint's model list for the given kind/key/url (the draft's
    *  fields). Unset fields inherit the engine env server-side. */
@@ -197,7 +214,7 @@ function ModelsSection({
     setModelsFetching(true)
     setModelsError(null)
     const res = await store.providerModels({
-      kind,
+      kind: kind === '' ? undefined : kind,
       api_key: apiKey.trim().length > 0 ? apiKey.trim() : undefined,
       base_url: baseUrl.trim().length > 0 ? baseUrl.trim() : undefined,
     })
@@ -210,28 +227,75 @@ function ModelsSection({
     }
   }
 
+  /** Auto-detect the protocol from the base URL (issue #41) when kind is Auto.
+   *  Best-effort — a null result just clears the hint. */
+  const runDetect = async (baseUrl: string) => {
+    const url = baseUrl.trim()
+    if (url.length === 0) {
+      setDetected(null)
+      return
+    }
+    const res = await store.providerDetect(url)
+    setDetected(res !== null && res.kind !== '' ? res.label : null)
+  }
+
   /** Protocol kind is form-wide state — switching it invalidates the fetched
    *  model list (different protocol ⇒ different catalog). */
   const changeKind = (kind: string) => {
     setDraft({ ...draft, kind, model: '' })
     setModelOptions([])
     setModelsError(null)
+    if (kind !== '') setDetected(null)
   }
 
   const submit = async () => {
     if (draft.name.trim().length === 0) return
     const ok = await store.providerAdd({
       name: draft.name.trim(),
-      kind: draft.kind,
+      kind: draft.kind === '' ? undefined : draft.kind,
       api_key: draft.api_key.trim().length > 0 ? draft.api_key.trim() : undefined,
       base_url: draft.base_url.trim().length > 0 ? draft.base_url.trim() : undefined,
       model: draft.model.trim().length > 0 ? draft.model.trim() : undefined,
     })
     if (ok) {
-      setDraft({ name: '', kind: 'openai', api_key: '', base_url: '', model: '' })
+      setDraft(EMPTY_DRAFT)
       setModelOptions([])
       setModelsError(null)
+      setDetected(null)
       setShowAdd(false)
+    }
+  }
+
+  /** Open the inline edit form, pre-filled from a card (api_key left blank —
+   *  cards don't echo the plaintext key; blank = keep stored key). */
+  const startEdit = (p: { name: string; kind: string; model: string; base_url?: string }) => {
+    setEditing(p.name)
+    setEditDraft({
+      name: p.name,
+      kind: p.kind,
+      api_key: '',
+      base_url: p.base_url ?? '',
+      model: p.model,
+    })
+    setModelOptions([])
+    setModelsError(null)
+    setDetected(null)
+  }
+
+  const submitEdit = async () => {
+    if (editDraft.name.trim().length === 0) return
+    const ok = await store.providerUpdate({
+      name: editDraft.name.trim(),
+      kind: editDraft.kind === '' ? undefined : editDraft.kind,
+      api_key: editDraft.api_key.trim().length > 0 ? editDraft.api_key.trim() : undefined,
+      base_url: editDraft.base_url.trim().length > 0 ? editDraft.base_url.trim() : undefined,
+      model: editDraft.model.trim().length > 0 ? editDraft.model.trim() : undefined,
+    })
+    if (ok) {
+      setEditing(null)
+      setEditDraft(EMPTY_DRAFT)
+      setModelOptions([])
+      setModelsError(null)
     }
   }
 
@@ -269,37 +333,112 @@ function ModelsSection({
       {snap.providers.length === 0 && (
         <div className={styles.empty}>{t('settings.noProvider')}</div>
       )}
-      {snap.providers.map((p) => (
-        <div key={p.name} className={`${styles.card} ${p.active ? styles.cardActive : ''}`}>
-          <div className={styles.packHead}>
-            {/* name is the entry's unique key (set_active/delete operate on it
-                — issue #37); kind rides along as a secondary badge. */}
-            <code className={styles.code}>{p.name}</code>
-            <span className={styles.providerKind}>{p.kind}</span>
-            {p.active && <span className={styles.activeBadge}>{t('settings.active')}</span>}
-            <span className={styles.providerModel}>{p.model || t('settings.inherited')}</span>
+      {snap.providers.map((p) =>
+        editing === p.name ? (
+          <div key={p.name} className={styles.addForm}>
+            <div className={styles.addRow}>
+              <input
+                className={styles.input}
+                placeholder={t('settings.fldName')}
+                value={editDraft.name}
+                onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })}
+              />
+              <select
+                className={styles.select}
+                aria-label={t('settings.fldKind')}
+                value={editDraft.kind}
+                onChange={(e) => {
+                  setEditDraft({ ...editDraft, kind: e.target.value, model: '' })
+                  setModelOptions([])
+                  setModelsError(null)
+                }}
+              >
+                <option value="">{t('settings.kindAuto')}</option>
+                {PROVIDER_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {providerKindLabel(k)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <input
+              className={styles.input}
+              placeholder={t('settings.fldApiKeyKeep')}
+              value={editDraft.api_key}
+              onChange={(e) => setEditDraft({ ...editDraft, api_key: e.target.value })}
+            />
+            <input
+              className={styles.input}
+              placeholder={t('settings.fldBaseUrl')}
+              value={editDraft.base_url}
+              onChange={(e) => setEditDraft({ ...editDraft, base_url: e.target.value })}
+            />
+            <div className={styles.modelRow}>
+              <input
+                className={styles.input}
+                placeholder={t('settings.fldModel')}
+                value={editDraft.model}
+                list="oneai-settings-edit-model-options"
+                onChange={(e) => setEditDraft({ ...editDraft, model: e.target.value })}
+              />
+              <button
+                className={styles.miniBtn}
+                disabled={modelsFetching}
+                onClick={() => void fetchModels(editDraft.kind, editDraft.api_key, editDraft.base_url)}
+              >
+                {modelsFetching ? t('settings.fetchingModels') : t('settings.fetchModels')}
+              </button>
+            </div>
+            <datalist id="oneai-settings-edit-model-options">
+              {modelOptions.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+            {modelsError !== null && <div className={styles.hint}>{modelsError}</div>}
+            <div className={styles.skillActions}>
+              <button className={styles.miniBtn} onClick={() => void submitEdit()}>
+                {t('settings.save')}
+              </button>
+              <button className={styles.miniBtn} onClick={() => setEditing(null)}>
+                {t('settings.cancel')}
+              </button>
+            </div>
           </div>
-          {p.base_url !== undefined && p.base_url !== '' && (
-            <div className={styles.packDesc}>{p.base_url}</div>
-          )}
-          <div className={styles.skillActions}>
-            <button
-              className={styles.miniBtn}
-              onClick={() => void store.providerSetActive(p.name)}
-              disabled={p.active}
-            >
-              {t('settings.setActive')}
-            </button>
-            <button
-              className={`${styles.miniBtn} ${styles.danger}`}
-              onClick={() => void store.providerDelete(p.name)}
-              disabled={snap.providers.length <= 1}
-            >
-              {t('settings.delete')}
-            </button>
+        ) : (
+          <div key={p.name} className={`${styles.card} ${p.active ? styles.cardActive : ''}`}>
+            <div className={styles.packHead}>
+              {/* name is the entry's unique key (set_active/delete operate on it
+                  — issue #37); kind shows its protocol label (issue #41). */}
+              <code className={styles.code}>{p.name}</code>
+              <span className={styles.providerKind}>{providerKindLabel(p.kind)}</span>
+              {p.active && <span className={styles.activeBadge}>{t('settings.active')}</span>}
+              <span className={styles.providerModel}>{p.model || t('settings.inherited')}</span>
+            </div>
+            {p.base_url !== undefined && p.base_url !== '' && (
+              <div className={styles.packDesc}>{p.base_url}</div>
+            )}
+            <div className={styles.skillActions}>
+              <button
+                className={styles.miniBtn}
+                onClick={() => void store.providerSetActive(p.name)}
+                disabled={p.active}
+              >
+                {t('settings.setActive')}
+              </button>
+              <button className={styles.miniBtn} onClick={() => startEdit(p)}>
+                {t('settings.edit')}
+              </button>
+              <button
+                className={`${styles.miniBtn} ${styles.danger}`}
+                onClick={() => void store.providerDelete(p.name)}
+                disabled={snap.providers.length <= 1}
+              >
+                {t('settings.delete')}
+              </button>
+            </div>
           </div>
-        </div>
-      ))}
+        ),
+      )}
 
       {/* Add provider form. */}
       {showAdd ? (
@@ -311,16 +450,18 @@ function ModelsSection({
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             />
-            {/* Protocol kind is a fixed dropdown, not free text (issue #37). */}
+            {/* Protocol kind: Auto (from URL) by default, explicit override
+                optional (issue #41). */}
             <select
               className={styles.select}
               aria-label={t('settings.fldKind')}
               value={draft.kind}
               onChange={(e) => changeKind(e.target.value)}
             >
+              <option value="">{t('settings.kindAuto')}</option>
               {PROVIDER_KINDS.map((k) => (
                 <option key={k} value={k}>
-                  {k}
+                  {providerKindLabel(k)}
                 </option>
               ))}
             </select>
@@ -336,7 +477,11 @@ function ModelsSection({
             placeholder={t('settings.fldBaseUrl')}
             value={draft.base_url}
             onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
+            onBlur={(e) => {
+              if (draft.kind === '') void runDetect(e.target.value)
+            }}
           />
+          {detected !== null && <div className={styles.hint}>{detected}</div>}
           {/* Model name: pick from the endpoint's fetched catalog (datalist
               keeps manual entry as a fallback — issue #37). */}
           <div className={styles.modelRow}>

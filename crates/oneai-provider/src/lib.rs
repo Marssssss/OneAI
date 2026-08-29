@@ -26,7 +26,7 @@ pub mod retry;
 pub mod smart_router;
 
 pub use anthropic::AnthropicProvider;
-pub use compat::{Compat, CompatFamily};
+pub use compat::{normalize_base_url, Compat, CompatFamily};
 pub use gemini::GeminiProvider;
 pub use model_router::{ModelRouter, RouteDecision, RouteProviderKind, RouteRule};
 pub use ollama::OllamaProvider;

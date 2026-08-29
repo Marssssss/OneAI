@@ -1,8 +1,8 @@
-// ModelSelect — the composer's provider/model switcher. A popover listing the
-// configured providers (from `provider/list`); picking one calls
-// `provider/set_active`, which live-switches the pool's `active_index` (takes
-// effect on the next turn — no `App.provider` swap, no restart). Active
-// provider marked. Mirrors the deepseek-harness model-selection menu.
+// ModelSelect — the composer's model switcher. It lists only the models served
+// by the ACTIVE provider (the one chosen in Settings); picking a model calls
+// `provider/set_model` for that provider (persisted + hot-swapped, next turn).
+// Provider selection itself lives in Settings — this control does NOT switch
+// providers (issue #41 follow-up).
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -20,11 +20,32 @@ export function ModelSelect({ store }: ModelSelectProps): ReactNode {
   const snap = useSettings(store)
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const [models, setModels] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  // Refresh the provider list when the popover opens (catch live add/delete).
+  const active = snap.providers.find((p) => p.active) ?? snap.providers[0] ?? null
+
+  // Fetch the active provider's model list whenever the popover opens.
   useEffect(() => {
-    if (open) void store.refresh()
-  }, [open, store])
+    if (!open || active === null) return
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    void store.providerModels({ name: active.name }).then((res) => {
+      if (cancelled) return
+      setLoading(false)
+      if (res.ok) {
+        setModels(res.models)
+      } else {
+        setModels([])
+        setError(res.error ?? 'provider/models failed')
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open, active, store])
 
   // Close on outside click.
   useEffect(() => {
@@ -38,11 +59,10 @@ export function ModelSelect({ store }: ModelSelectProps): ReactNode {
     return () => window.removeEventListener('mousedown', onDown)
   }, [open])
 
-  const active = snap.providers.find((p) => p.active) ?? snap.providers[0] ?? null
-
-  const pick = async (name: string) => {
+  const pick = async (model: string) => {
+    if (active === null) return
     setOpen(false)
-    await store.providerSetActive(name)
+    await store.providerSetModel(active.name, model)
   }
 
   return (
@@ -63,20 +83,33 @@ export function ModelSelect({ store }: ModelSelectProps): ReactNode {
       </button>
       {open && (
         <div className={styles.popover}>
-          {snap.providers.length === 0 ? (
+          {active === null ? (
             <div className={styles.empty}>{t('modelSelect.none')}</div>
           ) : (
-            snap.providers.map((p, i) => (
-              <button
-                key={i}
-                className={`${styles.item} ${p.active ? styles.itemActive : ''}`}
-                onClick={() => void pick(p.name)}
-              >
-                <span className={styles.itemKind}>{p.name}</span>
-                {p.model !== '' && <span className={styles.itemModel}>{p.model}</span>}
-                {p.active && <span className={styles.itemActiveDot}>●</span>}
-              </button>
-            ))
+            <>
+              <div className={styles.head}>{active.name}</div>
+              {loading ? (
+                <div className={styles.empty}>{t('modelSelect.loading')}</div>
+              ) : error !== null ? (
+                <div className={styles.empty}>{error}</div>
+              ) : models.length === 0 ? (
+                <div className={styles.empty}>{t('modelSelect.noModels')}</div>
+              ) : (
+                models.map((m) => {
+                  const isCurrent = m === active.model
+                  return (
+                    <button
+                      key={m}
+                      className={`${styles.item} ${isCurrent ? styles.itemActive : ''}`}
+                      onClick={() => void pick(m)}
+                    >
+                      <span className={styles.itemModel}>{m}</span>
+                      {isCurrent && <span className={styles.itemActiveDot}>●</span>}
+                    </button>
+                  )
+                })
+              )}
+            </>
           )}
         </div>
       )}

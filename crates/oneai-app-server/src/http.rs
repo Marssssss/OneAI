@@ -16,6 +16,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::{header::CACHE_CONTROL, HeaderValue},
     response::IntoResponse,
     routing::get,
     Router,
@@ -24,7 +25,9 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tower::Layer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use oneai_bus::{EngineBus, InProcessBus};
 
@@ -90,9 +93,16 @@ pub async fn serve_web(
     if let Some(dir) = static_dir {
         // SPA history fallback: a path with no matching file returns
         // index.html so the client router owns deep links.
-        router = router.fallback_service(
-            ServeDir::new(dir.clone()).fallback(ServeFile::new(dir.join("index.html"))),
-        );
+        let spa = ServeDir::new(dir.clone()).fallback(ServeFile::new(dir.join("index.html")));
+        // `ServeDir` sends no Cache-Control, so a browser heuristically caches
+        // `index.html` and pins the old hashed JS bundle after a `npm run build`
+        // (the hash changes but the stale entry file still references the old
+        // asset). Force revalidation on every request — `index.html` is tiny,
+        // and the hashed `/assets/*` still benefit from ETag/Last-Modified.
+        let spa =
+            SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .layer(spa);
+        router = router.fallback_service(spa);
     }
     let app = router.with_state(state);
 

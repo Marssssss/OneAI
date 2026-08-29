@@ -22,9 +22,9 @@ use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
     default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError,
     BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView, DomainPackInfo, DomainPackList,
-    FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo, ProviderModelsQuery,
-    ProviderModelsResult, ProviderOpResult, SessionTrajectoryResult, SharedAppProbe,
-    SharedScenarioStore, SkillInfo, SkillOpResult,
+    FileScenarioStore, ListenSpec, ProviderDetectQuery, ProviderDetectResult, ProviderEntryDto,
+    ProviderInfo, ProviderModelsQuery, ProviderModelsResult, ProviderOpResult,
+    SessionTrajectoryResult, SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
@@ -481,7 +481,13 @@ fn provider_kind_str(mc: &ModelConfig) -> Option<String> {
     if let Some(kind) = mc.cloud_kind {
         return Some(cloud_kind_str(kind).to_string());
     }
-    Some(provider_type_str(mc.provider_type).to_string())
+    match mc.provider_type {
+        // The only Local family in practice is Ollama — surface its wire kind
+        // ("ollama") rather than the generic "local", so the UI's protocol
+        // label lookup and the add-form dropdown agree (issue #41).
+        ProviderType::Local => Some("ollama".to_string()),
+        other => Some(provider_type_str(other).to_string()),
+    }
 }
 
 fn cloud_kind_str(kind: CloudProviderKind) -> &'static str {
@@ -489,6 +495,18 @@ fn cloud_kind_str(kind: CloudProviderKind) -> &'static str {
         CloudProviderKind::OpenAI => "openai",
         CloudProviderKind::Anthropic => "anthropic",
         CloudProviderKind::Gemini => "gemini",
+    }
+}
+
+/// Human protocol label for a wire kind string (issue #41) — mirrors
+/// `CompatFamily::label` without dragging the provider enum into the DTO layer.
+fn provider_kind_label(kind: &str) -> String {
+    match kind {
+        "openai" => "OpenAI Completions".to_string(),
+        "anthropic" => "Anthropic Messages".to_string(),
+        "gemini" => "Gemini Protocol".to_string(),
+        "ollama" => "Ollama Protocol".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -835,17 +853,38 @@ impl AppProbe for AppProbeImpl {
     }
 
     async fn provider_models(&self, query: ProviderModelsQuery) -> ProviderModelsResult {
-        // Reuse the add-path mapping so the query inherits env (`ONEAI_API_KEY`
-        // / `ONEAI_BASE_URL`) exactly like `provider/add` would, and the same
-        // kind resolution (incl. ollama → Local) applies.
-        let dto = ProviderEntryDto {
-            name: String::new(),
-            kind: query.kind,
-            api_key: query.api_key,
-            base_url: query.base_url,
-            model: None,
+        let mc = if let Some(name) = &query.name {
+            // Resolve a configured entry's full stored config — including its
+            // config.toml api_key (the composer's per-provider model switcher,
+            // issue #41). Env vars don't carry per-entry keys.
+            match OneaiConfig::load_or_default()
+                .to_pool_model_configs()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, mc)| mc)
+            {
+                Some(mc) => mc,
+                None => {
+                    return ProviderModelsResult {
+                        ok: false,
+                        models: Vec::new(),
+                        error: Some(format!("unknown provider: {name}")),
+                    }
+                }
+            }
+        } else {
+            // Reuse the add-path mapping so the query inherits env
+            // (`ONEAI_API_KEY` / `ONEAI_BASE_URL`) exactly like `provider/add`
+            // would, and the same kind resolution (incl. ollama → Local).
+            let dto = ProviderEntryDto {
+                name: String::new(),
+                kind: query.kind,
+                api_key: query.api_key,
+                base_url: query.base_url,
+                model: None,
+            };
+            entry_to_model_config_strict(&dto)
         };
-        let mc = entry_to_model_config_strict(&dto);
         // Cloud endpoints authenticate the listing call; fail early with an
         // actionable message instead of hitting the endpoint keyless. Local
         // (Ollama) needs no key.
@@ -875,6 +914,104 @@ impl AppProbe for AppProbeImpl {
                 models,
                 error: None,
             }
+        }
+    }
+
+    async fn provider_detect(&self, query: ProviderDetectQuery) -> ProviderDetectResult {
+        let url = query
+            .base_url
+            .clone()
+            .or_else(|| std::env::var("ONEAI_BASE_URL").ok())
+            .unwrap_or_default();
+        let url = url.trim();
+        if url.is_empty() {
+            return ProviderDetectResult::default();
+        }
+        // Resolve + normalize via the factory (the single authority for host
+        // rules + version normalization) and read back the resolved config.
+        let mc = ModelConfig {
+            provider_type: ProviderType::Cloud,
+            cloud_kind: None,
+            api_key: None,
+            base_url: Some(url.to_string()),
+            port: None,
+            model_name: None,
+            model_path: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let resolved = ProviderFactory::create(mc).config().clone();
+        let kind = provider_kind_str(&resolved).unwrap_or_else(|| "openai".to_string());
+        ProviderDetectResult {
+            label: provider_kind_label(&kind),
+            base_url: resolved.base_url.unwrap_or_default(),
+            kind,
+        }
+    }
+
+    async fn provider_update(&self, entry: ProviderEntryDto) -> ProviderOpResult {
+        let name = entry.name.clone();
+        let mut cfg = OneaiConfig::load_or_default();
+        // Cards don't echo the plaintext key; a blank key field means "keep the
+        // stored key". Unknown names are rejected (update, not upsert).
+        let existing = cfg.providers_list().into_iter().find(|e| e.name == name);
+        let Some(stored) = existing else {
+            return ProviderOpResult {
+                ok: false,
+                providers: Some(self.provider_list()),
+                error: Some(format!("unknown provider: {name}")),
+            };
+        };
+        let mut merged = entry;
+        if merged.api_key.is_none() {
+            merged.api_key = stored.api_key;
+        }
+        cfg.add_provider(dto_to_entry_config(&merged));
+        if let Err(e) = cfg.save() {
+            return ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        self.rebuild_pool_entry(&name);
+        ProviderOpResult {
+            ok: true,
+            providers: Some(self.provider_list()),
+            error: None,
+        }
+    }
+
+    async fn provider_set_model(&self, name: &str, model: &str) -> ProviderOpResult {
+        let mut cfg = OneaiConfig::load_or_default();
+        let mut updated = false;
+        if let Some(entry) = cfg.providers.iter_mut().find(|e| e.name == name) {
+            entry.model = Some(model.to_string());
+            updated = true;
+        } else if name == "default" {
+            // Legacy single-provider config — the synthetic "default" entry maps
+            // back onto `[provider].model`.
+            cfg.provider.model = model.to_string();
+            updated = true;
+        }
+        if !updated {
+            return ProviderOpResult {
+                ok: false,
+                providers: Some(self.provider_list()),
+                error: Some(format!("unknown provider: {name}")),
+            };
+        }
+        if let Err(e) = cfg.save() {
+            return ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        self.rebuild_pool_entry(name);
+        ProviderOpResult {
+            ok: true,
+            providers: Some(self.provider_list()),
+            error: None,
         }
     }
 
@@ -964,6 +1101,28 @@ impl AppProbeImpl {
             })
             .into_iter()
             .collect()
+    }
+
+    /// Rebuild a live pool entry from its (just-saved) config entry, preserving
+    /// priority + active position (`replace_entry`). Used by `provider/update`
+    /// and `provider/set_model` — the config.toml write is the durable source,
+    /// this reflects it into the running pool so it takes effect next turn.
+    fn rebuild_pool_entry(&self, name: &str) {
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        let cfg = OneaiConfig::load_or_default();
+        let Some((_, mc)) = cfg
+            .to_pool_model_configs()
+            .into_iter()
+            .find(|(n, _)| n == name)
+        else {
+            return;
+        };
+        let provider: Arc<dyn LlmProvider> = Arc::from(ProviderFactory::create(mc));
+        if !pool.replace_entry(name, provider.clone()) {
+            pool.add_entry(ProviderEntry::new(name.to_string(), provider, 0));
+        }
     }
 }
 

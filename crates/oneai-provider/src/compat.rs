@@ -49,13 +49,26 @@ pub enum CompatFamily {
 }
 
 impl CompatFamily {
-    /// Human label.
+    /// Human label — a **protocol** name, not a vendor name (issue #41). The
+    /// wire `kind` strings (`openai`/`anthropic`/`gemini`/`ollama`) are
+    /// unchanged; this is display-only.
     pub fn label(self) -> &'static str {
         match self {
-            Self::OpenAICompat => "openai-compatible",
-            Self::AnthropicCompat => "anthropic",
-            Self::GeminiCompat => "gemini",
-            Self::OllamaCompat => "ollama (local)",
+            Self::OpenAICompat => "OpenAI Completions",
+            Self::AnthropicCompat => "Anthropic Messages",
+            Self::GeminiCompat => "Gemini Protocol",
+            Self::OllamaCompat => "Ollama Protocol",
+        }
+    }
+
+    /// The canonical version path segment this family's REST base ends with
+    /// (`v1`/`v1beta`), or `None` for Ollama — whose builders append
+    /// `/v1/chat/completions` themselves, so its base carries no version.
+    fn default_version(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAICompat | Self::AnthropicCompat => Some("v1"),
+            Self::GeminiCompat => Some("v1beta"),
+            Self::OllamaCompat => None,
         }
     }
 }
@@ -220,6 +233,126 @@ impl Default for Compat {
     }
 }
 
+// ─── Base-URL normalization (issue #41) ──────────────────────────────────────
+//
+// The per-provider URL builders append a fixed suffix to `config.resolved_url()`
+// (`/chat/completions`, `/messages`, `/models`, …). That is only correct when
+// the stored `base_url` already carries the family's canonical version segment.
+// Users may type a URL that omits it (`https://api.openai.com`), duplicates it
+// (`.../v1/v1`), or includes a full endpoint (`.../v1/chat/completions`). This
+// normalizer rewrites `base_url` once (in `ProviderFactory::create`) so the
+// builders stay dumb.
+
+/// Normalize a provider `base_url` for `family` so it is safe to append a
+/// fixed endpoint suffix:
+/// 1. strips a pasted endpoint suffix (e.g. `/chat/completions`);
+/// 2. collapses duplicate version segments (`/v1/v1` → `/v1`);
+/// 3. appends the family's canonical version when absent (Ollama: strips any
+///    trailing version instead — its builder adds `/v1/...` itself).
+///
+/// Non-version path prefixes are preserved (e.g. DashScope's
+/// `compatible-mode/v1`).
+pub fn normalize_base_url(family: CompatFamily, url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    let without_endpoint = strip_endpoint_suffix(trimmed);
+    let (scheme_auth, path) = split_scheme_authority(&without_endpoint);
+
+    let mut segments: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Collapse consecutive version segments to the last one (`/v1/v1` → `/v1`,
+    // `/v1beta/v1` → `/v1`), preserving any non-version segment in between.
+    let mut deduped: Vec<&str> = Vec::with_capacity(segments.len());
+    for seg in segments.drain(..) {
+        if is_version_segment(seg) {
+            if deduped.last().is_some_and(|s| is_version_segment(s)) {
+                deduped.pop();
+            }
+            deduped.push(seg);
+        } else {
+            deduped.push(seg);
+        }
+    }
+    segments = deduped;
+
+    if matches!(family, CompatFamily::OllamaCompat) {
+        // Ollama's builders append `/v1/...`; a stored version would double it.
+        while segments.last().is_some_and(|s| is_version_segment(s)) {
+            segments.pop();
+        }
+    } else if !segments.last().is_some_and(|s| is_version_segment(s)) {
+        // Missing version segment — append the family's canonical one.
+        if let Some(v) = family.default_version() {
+            segments.push(v);
+        }
+    }
+
+    let path = segments.join("/");
+    if path.is_empty() {
+        scheme_auth
+    } else {
+        format!("{scheme_auth}/{path}")
+    }
+}
+
+/// Strip a known chat/endpoint suffix so a pasted full endpoint URL reduces to
+/// its base. Matched against the tail (segment boundary), case-insensitive.
+fn strip_endpoint_suffix(url: &str) -> String {
+    const ENDPOINT_SUFFIXES: &[&str] = &[
+        "/chat/completions",
+        "/completions",
+        "/responses",
+        "/messages",
+        "/embeddings",
+        "/models",
+        "/api/chat",
+        "/api/generate",
+        "/api/tags",
+        "/api/show",
+        ":generateContent",
+        ":streamGenerateContent",
+    ];
+    let lower = url.to_ascii_lowercase();
+    for suffix in ENDPOINT_SUFFIXES {
+        let suffix_lower = suffix.to_ascii_lowercase();
+        if lower.ends_with(&suffix_lower) {
+            return url[..url.len() - suffix.len()]
+                .trim_end_matches('/')
+                .to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Split `scheme://authority` from the path. URLs without a `://` (e.g. a bare
+/// `host:port`) are treated as authority-only.
+fn split_scheme_authority(url: &str) -> (String, String) {
+    let Some(scheme_end) = url.find("://") else {
+        return (url.to_string(), String::new());
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    match after_scheme.find('/') {
+        Some(slash) => {
+            let split = scheme_end + 3 + slash;
+            (url[..split].to_string(), url[split..].to_string())
+        }
+        None => (url.to_string(), String::new()),
+    }
+}
+
+/// Whether a path segment is a protocol version (`v1`, `v2`, `v1beta`, `v1beta1`).
+fn is_version_segment(seg: &str) -> bool {
+    seg.len() >= 2
+        && seg.starts_with('v')
+        && seg[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +453,123 @@ mod tests {
             Compat::default_for(CompatFamily::OllamaCompat).auth,
             AuthStyle::None
         );
+    }
+
+    // ── normalize_base_url (issue #41) ─────────────────────────────────────
+
+    #[test]
+    fn normalize_appends_missing_version() {
+        assert_eq!(
+            normalize_base_url(CompatFamily::OpenAICompat, "https://api.openai.com"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(CompatFamily::AnthropicCompat, "https://api.anthropic.com"),
+            "https://api.anthropic.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::GeminiCompat,
+                "https://generativelanguage.googleapis.com"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_existing_version() {
+        assert_eq!(
+            normalize_base_url(CompatFamily::OpenAICompat, "https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(CompatFamily::OpenAICompat, "https://api.deepseek.com/v1/"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::GeminiCompat,
+                "https://generativelanguage.googleapis.com/v1beta"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_non_version_path_prefix() {
+        // DashScope's compatible-mode prefix must survive (bailian).
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::OpenAICompat,
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::OpenAICompat,
+                "https://dashscope.aliyuncs.com/compatible-mode"
+            ),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_collapses_duplicate_version() {
+        assert_eq!(
+            normalize_base_url(CompatFamily::OpenAICompat, "https://api.openai.com/v1/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::OpenAICompat,
+                "https://api.openai.com/v1beta/v1"
+            ),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_pasted_endpoint() {
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::OpenAICompat,
+                "https://api.openai.com/v1/chat/completions"
+            ),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::AnthropicCompat,
+                "https://api.anthropic.com/v1/messages"
+            ),
+            "https://api.anthropic.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url(
+                CompatFamily::OllamaCompat,
+                "http://localhost:11434/api/tags"
+            ),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_strips_version() {
+        // Ollama's builder appends /v1/chat/completions itself; a stored
+        // version would double it.
+        assert_eq!(
+            normalize_base_url(CompatFamily::OllamaCompat, "http://localhost:11434"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_base_url(CompatFamily::OllamaCompat, "http://localhost:11434/v1"),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn normalize_empty_url_is_unchanged() {
+        assert_eq!(normalize_base_url(CompatFamily::OpenAICompat, ""), "");
     }
 }

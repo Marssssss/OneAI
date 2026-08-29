@@ -120,3 +120,13 @@
   font-size: 11px;
   margin-left: auto;
 }
+
+/* Header line naming the active provider whose models are listed below. */
+.head {
+  padding: 6px 8px 4px;
+  font-family: var(--oneai-font-mono);
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  border-bottom: 1px solid var(--oneai-border);
+  margin-bottom: 2px;
+}
