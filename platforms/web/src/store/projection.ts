@@ -390,6 +390,12 @@ function metricsFromEvents(events: EngineYield[]): SessionMetrics | null {
   }
 }
 
+/** Position stride between turns (issue #45). `pos = turnOrdinal * TURN_STRIDE
+ *  + iteration * 1000 + phase`; the stride keeps each turn's iteration range
+ *  (bounded by the token budget, far below 1000 iterations) from bleeding into
+ *  the next turn's range, so turns stay strictly ordered on the timeline. */
+const TURN_STRIDE = 1_000_000
+
 export class ProjectionStore {
   private rpc: OneAiRpcClient
   private state: WorkingState = {
@@ -450,6 +456,12 @@ export class ProjectionStore {
   private currentIterSeq: number | null = null
   /** The iteration number of the current iteration (drives `pos`). */
   private currentIteration = 0
+  /** Monotonic turn ordinal, bumped at each `turn_start` so `pos` stays
+   *  strictly increasing across turns. Without it, iteration numbers reset
+   *  each turn and `iteration * 1000 + phase` collides across turns — the
+   *  timeline then interleaves turns and the turn boundary markers overlap,
+   *  making rounds indistinguishable (issue #45). */
+  private turnOrdinal = 0
 
   constructor(rpc: OneAiRpcClient) {
     this.rpc = rpc
@@ -724,11 +736,14 @@ export class ProjectionStore {
     }
   }
 
-  /** Logical sort key: `iteration * 1000 + phase` keeps iterations strictly
-   *  ordered while letting context/infer/tool within an iteration order
-   *  correctly. */
+  /** Logical sort key: `turnOrdinal * TURN_STRIDE + iteration * 1000 + phase`
+   *  keeps iterations strictly ordered within a turn (context < infer < tool)
+   *  AND keeps turns strictly ordered relative to each other. The turn stride
+   *  is essential (issue #45): the engine resets its iteration counter every
+   *  turn, so without it turn N's `iteration 1` collides with turn N+1's
+   *  `iteration 1` and the timeline interleaves rounds. */
   private posFor(iteration: number, phase: number): number {
-    return iteration * 1000 + phase
+    return this.turnOrdinal * TURN_STRIDE + iteration * 1000 + phase
   }
 
   /** Push a trajectory entry (non-hot → caller flushes via emitNow). */
@@ -773,6 +788,7 @@ export class ProjectionStore {
     this.ctxCache.clear()
     this.currentIterSeq = null
     this.currentIteration = 0
+    this.turnOrdinal = 0
   }
 
   // ── Issue #40 trajectory helpers ───────────────────────────────────────────
@@ -958,6 +974,7 @@ export class ProjectionStore {
     const at = this.eventTs(y)
     switch (y.kind) {
       case 'turn_start':
+        this.turnOrdinal += 1
         this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start', {
           at,
           detail: { kind: 'turn', task: y.task },
@@ -1307,6 +1324,7 @@ export class ProjectionStore {
       case 'turn_start': {
         this.state.currentTurnId = y.turn_id
         this.state.turnActive = true
+        this.turnOrdinal += 1
         // A new turn supersedes any stale operational error (e.g. a prior
         // action's RPC failure surfaced in the header banner) — clear it so
         // the banner doesn't linger across turns (issue #34).

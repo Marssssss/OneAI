@@ -82,6 +82,36 @@ describe('buildTimeline (issue #40)', () => {
     expect(depends[0].toSeq).toBe(2)
   })
 
+  it('orders multi-turn sessions as disjoint turn spans (issue #45)', () => {
+    // The store stamps `pos = turnOrdinal * 1_000_000 + iteration * 1000 + phase`,
+    // so turn 2's iteration 1 must NOT collide with turn 1's iteration 1. Here
+    // we reproduce that shape: two turns, each with two iterations, both turns'
+    // iteration counters restarting at 1.
+    const entries: TrajectoryEntry[] = [
+      entry(1, 1000, 'turn_start', { kind: 'turn', task: 'first' }, 't1'),
+      entry(2, 1100, 'iteration_start', { kind: 'iteration', iteration: 1, paradigm: 're_act', inference: '', thinking: '' }, 't1'),
+      entry(3, 1200, 'iteration_start', { kind: 'iteration', iteration: 2, paradigm: 're_act', inference: '', thinking: '' }, 't1'),
+      entry(4, 1300, 'turn_complete', { kind: 'turn_complete' }, 't1'),
+      entry(5, 1400, 'turn_start', { kind: 'turn', task: 'second' }, 't2'),
+      entry(6, 1500, 'iteration_start', { kind: 'iteration', iteration: 1, paradigm: 're_act', inference: '', thinking: '' }, 't2'),
+      entry(7, 1600, 'iteration_start', { kind: 'iteration', iteration: 2, paradigm: 're_act', inference: '', thinking: '' }, 't2'),
+      entry(8, 1700, 'turn_complete', { kind: 'turn_complete' }, 't2'),
+    ]
+    // Stamp the store's turn-aware pos (turn 1 → ordinal 1, turn 2 → ordinal 2).
+    entries[1].pos = 1_000_000 + 1 * 1000 + 1
+    entries[2].pos = 1_000_000 + 2 * 1000 + 1
+    entries[5].pos = 2_000_000 + 1 * 1000 + 1
+    entries[6].pos = 2_000_000 + 2 * 1000 + 1
+
+    const m = buildTimeline(entries)
+    expect(m.turns).toHaveLength(2)
+    // Turn 1's span ends before turn 2's span begins — no overlap, so the
+    // turn boundary markers separate the two rounds instead of crossing.
+    expect(m.turns[0].endIndex!).toBeLessThan(m.turns[1].startIndex)
+    // Nodes are strictly turn-major: all of turn 1, then all of turn 2.
+    expect(m.nodes.map((n) => n.entry.turnId)).toEqual(['t1', 't1', 't2', 't2'])
+  })
+
   it('turns tool duration into a node span', () => {
     const entries = [
       entry(1, 1000, 'tool_calls', { kind: 'tool', callId: 'c1', name: 'shell', args: {}, durationMs: 250 }),

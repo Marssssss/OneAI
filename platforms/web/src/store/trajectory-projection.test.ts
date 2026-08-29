@@ -40,6 +40,32 @@ describe('trajectory data layer (issue #40)', () => {
     expect(it1.thinking).toBe('reasoning ')
   })
 
+  it('keeps `pos` strictly increasing across turns so rounds never interleave (issue #45)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    // Turn 1: two iterations.
+    y({ kind: 'turn_start', turn_id: 't1', task: 'first' })
+    y({ kind: 'iteration_start', turn_id: 't1', iteration: 1, paradigm: 're_act' })
+    y({ kind: 'iteration_start', turn_id: 't1', iteration: 2, paradigm: 're_act' })
+    y({ kind: 'turn_complete', turn_id: 't1', summary: null })
+    // Turn 2: iteration counter RESETS to 1 (the engine's per-turn counter).
+    y({ kind: 'turn_start', turn_id: 't2', task: 'second' })
+    y({ kind: 'iteration_start', turn_id: 't2', iteration: 1, paradigm: 're_act' })
+    y({ kind: 'iteration_start', turn_id: 't2', iteration: 2, paradigm: 're_act' })
+
+    const nodes = store
+      .getSnapshot()
+      .trajectory.filter((e) => e.kind === 'iteration_start')
+    const t1 = nodes.filter((e) => e.turnId === 't1')
+    const t2 = nodes.filter((e) => e.turnId === 't2')
+    expect(t1).toHaveLength(2)
+    expect(t2).toHaveLength(2)
+    // Every turn-2 node sorts strictly after every turn-1 node (no overlap).
+    const maxT1 = Math.max(...t1.map((e) => e.pos!))
+    const minT2 = Math.min(...t2.map((e) => e.pos!))
+    expect(minT2).toBeGreaterThan(maxT1)
+  })
+
   it('resolves context assembly sections against the cache across iterations', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)
