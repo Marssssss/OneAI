@@ -33,7 +33,7 @@ Do not wire a custom `reqwest::Client` into individual providers/tools for proxy
 
 ## Commit convention
 
-Git commit messages must end with `Co-Authored-By: glm-5.2` (the model actually driving this repo), **not** the default Claude Opus co-author line. Commit messages in this repo are frequently written in Chinese.
+Git commit messages must end with `Co-Authored-By: <model>`, where `<model>` is the model actually driving the session — read from the environment's "You are powered by the model …" line and strip any bracketed annotation like `[1m]` (e.g. `deepseek-v4-pro` / `qwen-3.8-max`). Do **not** hardcode a name, and do **not** use the default Claude Opus co-author line. Commit messages in this repo are frequently written in Chinese.
 
 ## Supply-chain discipline
 
