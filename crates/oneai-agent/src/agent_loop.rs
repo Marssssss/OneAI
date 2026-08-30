@@ -3453,10 +3453,10 @@ impl AgentLoop {
                     // Transient failures (timeout / network / rate_limit) are
                     // *re-executed* here with jittered backoff — not merely
                     // announced as a system message. Other strategies
-                    // (Escalate / ExternalFeedback) remain informational
+                    // (Rollback / ExternalFeedback) remain informational
                     // injections since they require model-level decisions.
                     //
-                    // Recovery-time system notes (escalation/retry feedback)
+                    // Recovery-time notes (retry/rollback/validation feedback)
                     // are collected here and injected AFTER `feed_tool_results`
                     // below: the tool result must immediately follow its
                     // assistant `tool_calls` message (OpenAI API contract —
@@ -3622,8 +3622,17 @@ impl AgentLoop {
                                     crate::error_recovery::RecoveryOutcome::Escalated {
                                         summary,
                                     } => {
-                                        recovery_notes
-                                            .push(format!("Error escalated: {}", summary));
+                                        // No-op in the single-agent loop: there is no
+                                        // higher-level agent to escalate to, and the
+                                        // failure is already surfaced to the model via
+                                        // the tool result (`feed_tool_results` below) as
+                                        // "Error: {error}". A redundant "Error escalated:
+                                        // …" user message would only duplicate that
+                                        // error and burn context.
+                                        tracing::debug!(
+                                            "Recovery escalate is a no-op (error already in tool result): {}",
+                                            summary
+                                        );
                                     }
                                     _ => {
                                         // Other outcomes are informational — just log
@@ -3685,11 +3694,11 @@ impl AgentLoop {
                     // Inject the deferred recovery notes AFTER the tool results
                     // (see the collection site above): the tool result must sit
                     // immediately after its assistant `tool_calls` message, so
-                    // escalation/retry feedback is appended afterwards instead.
+                    // retry/rollback/validation feedback is appended afterwards.
                     for note in recovery_notes {
                         // User role, not system: a mid-conversation system note
-                        // (e.g. "Error escalated: …") is hoisted to the front by
-                        // DeepSeek, invalidating the whole prompt-prefix cache.
+                        // is hoisted to the front by DeepSeek, invalidating the
+                        // whole prompt-prefix cache.
                         state.conversation.add_message(Message::user(note));
                     }
 
@@ -6887,9 +6896,11 @@ impl AgentLoop {
     ///
     /// Maps error patterns to appropriate RecoveryStrategy types:
     /// - Network/timeout errors → Retry (transient, may succeed on retry)
-    /// - Permission denied → Escalate (requires human intervention)
+    /// - Permission denied → Escalate (a no-op here: the denial is already
+    ///   surfaced via the tool result and the `has_denied` short-circuit)
     /// - Tool not found → ConditionalFallback (route to alternative tool)
-    /// - Execution errors → ExternalFeedback (use validator to judge)
+    /// - Anything else → Escalate (a no-op here: the error is already in the
+    ///   tool result; no higher-level agent exists to escalate to)
     ///
     /// This is a basic mapping — more sophisticated strategy selection
     /// can be added based on DomainPack recovery configurations.

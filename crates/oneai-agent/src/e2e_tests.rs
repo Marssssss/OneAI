@@ -3940,13 +3940,13 @@ async fn e2e_recovery_retry_re_executes_transient_failure() {
 }
 
 #[tokio::test]
-async fn e2e_recovery_escalate_note_follows_tool_result() {
-    // Regression for the OpenAI 400 "assistant message with tool_calls must be
-    // followed by tool messages" error: a non-transient tool failure escalates
-    // (Escalate outcome) and previously injected an "Error escalated: …"
-    // SYSTEM note *between* the assistant `tool_calls` message and its tool
-    // result. OpenAI rejects that — the tool result must immediately follow the
-    // assistant message. The note must come AFTER the tool result.
+async fn e2e_recovery_non_transient_error_no_redundant_note() {
+    // A non-transient tool failure (Escalate outcome) must NOT inject a
+    // redundant "Error escalated: …" user message — the failure is already
+    // surfaced to the model via the tool result ("Error: …"). This also guards
+    // the OpenAI 400 "assistant message with tool_calls must be followed by
+    // tool messages" contract: the tool result must immediately follow the
+    // assistant `tool_calls` message (no note interleaved).
     let shell_tool = MockTool::shell_mock_with_error("Exit code: 1");
     let _shell_log = shell_tool.call_log();
 
@@ -3964,8 +3964,8 @@ async fn e2e_recovery_escalate_note_follows_tool_result() {
         Arc::new(tokio::sync::RwLock::new(map))
     };
 
-    // Attach a RecoveryManager so the non-transient error escalates (and would
-    // otherwise inject the "Error escalated" system note mid-turn).
+    // Attach a RecoveryManager so the non-transient error goes through the
+    // recovery path (select_recovery_strategy → Escalate → no-op).
     let rm = Arc::new(RecoveryManager::new());
 
     let agent_loop = AgentLoop::new(
@@ -4013,14 +4013,11 @@ async fn e2e_recovery_escalate_note_follows_tool_result() {
         }
     }
 
-    // The escalation note itself is still present (deferred, not dropped). It is
-    // a USER message now — mid-conversation system notes are hoisted to the
-    // front by DeepSeek and would break the prompt-prefix cache.
+    // The failure is surfaced ONLY via the tool result — no redundant
+    // "Error escalated" note should be injected as an extra message.
     assert!(
-        msgs.iter().any(|m| {
-            m.role == oneai_core::Role::User && m.text_content().contains("Error escalated")
-        }),
-        "the escalation note should still be injected (after the tool result)"
+        !msgs.iter().any(|m| m.text_content().contains("Error escalated")),
+        "no redundant 'Error escalated' note should be injected — the error is already in the tool result"
     );
 }
 
