@@ -227,8 +227,9 @@ interface WorkingState {
   /** performance.now() of the first stream_chunk per turn (for first-token
    *  latency). Absent until the turn produces text. */
   firstTokenPerf: Map<string, number>
-  /** Latest per-turn usage record (TokenUsage carries no turn_id, so we
-   *  attribute it to the active currentTurnId on arrival). */
+  /** Cumulative per-turn usage (TokenUsage carries no turn_id, so we
+   *  attribute each record to the active currentTurnId on arrival and SUM the
+   *  per-iteration records). Drives the session-wide 总输入/总输出 totals. */
   turnUsage: Map<string, BusUsageRecord>
   /** The most recently received usage record overall — drives the
    *  latest-step cache-hit % metric (a rate, not a cumulative sum). Updated on
@@ -294,6 +295,18 @@ function nextNodeId(): string {
   return `n${nodeSeq}`
 }
 
+/** Sum two usage records field-wise. `token_usage` arrives PER inference
+ *  (one record per API call, not a running total), so a turn's total is the
+ *  SUM of its iterations' records — not the last one. */
+function addUsage(a: BusUsageRecord, b: BusUsageRecord): BusUsageRecord {
+  return {
+    prompt_tokens: a.prompt_tokens + b.prompt_tokens,
+    completion_tokens: a.completion_tokens + b.completion_tokens,
+    cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
+    cache_creation_tokens: a.cache_creation_tokens + b.cache_creation_tokens,
+  }
+}
+
 /** Insert-or-update a background task by `taskId` (cross-turn lifecycle). */
 function upsertBackgroundTask(
   list: BackgroundTaskNode[],
@@ -323,8 +336,10 @@ function metricsFromEvents(events: EngineYield[]): SessionMetrics | null {
   let totalCompletion = 0
   let currentTurnId: string | null = null
   const turnStartTs = new Map<string, number>()
-  // Latest `token_usage` per turn wins — mirrors the live path's `turnUsage`
-  // (the provider reports a running total, so the last record = the turn total).
+  // Per-turn usage is the SUM of that turn's `token_usage` records — the
+  // provider reports PER-iteration usage (one record per inference), NOT a
+  // running total, so taking the last record would drop every earlier
+  // iteration's spend. Mirrors the live path's `turnUsage` accumulation.
   const turnUsage = new Map<string, BusUsageRecord>()
   let latestUsage: BusUsageRecord | null = null
   let latestInference: { completionTokens: number; durationMs: number } | null = null
@@ -343,7 +358,10 @@ function metricsFromEvents(events: EngineYield[]): SessionMetrics | null {
         break
       case 'token_usage':
         latestUsage = y.usage
-        if (currentTurnId !== null) turnUsage.set(currentTurnId, y.usage)
+        if (currentTurnId !== null) {
+          const prev = turnUsage.get(currentTurnId)
+          turnUsage.set(currentTurnId, prev !== undefined ? addUsage(prev, y.usage) : { ...y.usage })
+        }
         break
       case 'inference':
         latestInference = {
@@ -1952,10 +1970,18 @@ export class ProjectionStore {
       case 'token_usage': {
         this.state.usage = { ...this.state.usage, usage: y.usage }
         // Attribute the usage record to the active turn (TokenUsage carries no
-        // turn_id). The latest record per turn wins; metrics aggregate the
-        // per-turn latest at emit time.
+        // turn_id). The provider reports PER-iteration usage — one record per
+        // inference, NOT a running total — so ACCUMULATE within the turn: the
+        // last record alone is only the final iteration's spend, which is why
+        // 总输入/总输出 previously showed the last round instead of the
+        // session total. Summing at emit time over these per-turn totals yields
+        // the true session-wide cumulative.
         if (this.state.currentTurnId !== null) {
-          this.state.turnUsage.set(this.state.currentTurnId, y.usage)
+          const prev = this.state.turnUsage.get(this.state.currentTurnId)
+          this.state.turnUsage.set(
+            this.state.currentTurnId,
+            prev !== undefined ? addUsage(prev, y.usage) : { ...y.usage },
+          )
         }
         // Track the most recent usage record overall — the cache-hit % metric
         // reads the latest inference step's rate, not a cumulative average.

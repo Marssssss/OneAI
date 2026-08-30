@@ -441,6 +441,28 @@ describe('ProjectionStore session metrics (#35)', () => {
     expect(m.totalCompletion).toBe(50)
   })
 
+  it('accumulates per-iteration usage into the session totals (last-round-only bug)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+    y({ kind: 'session_created', id: 'A' })
+    y({ kind: 'turn_start', turn_id: 't1', task: 'go' })
+    // Two iterations, each emitting its own per-inference usage record — the
+    // provider reports per-iteration (NOT a running total), so the session
+    // total is the SUM, not the last record alone.
+    y({
+      kind: 'token_usage',
+      usage: { prompt_tokens: 1200, completion_tokens: 50, cache_read_tokens: 600, cache_creation_tokens: 0 },
+    })
+    y({
+      kind: 'token_usage',
+      usage: { prompt_tokens: 1500, completion_tokens: 80, cache_read_tokens: 800, cache_creation_tokens: 0 },
+    })
+    y({ kind: 'turn_complete', turn_id: 't1', summary: null })
+    const m = store.getSnapshot().metrics
+    expect(m.totalPrompt).toBe(2700) // 1200 + 1500, not the last 1500
+    expect(m.totalCompletion).toBe(130) // 50 + 80, not the last 80
+  })
+
   it('restores cached metrics when switching away and back (issue #35)', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)
@@ -573,6 +595,38 @@ describe('ProjectionStore session metrics (#35)', () => {
     expect(m.totalDurationMs).toBe(1000) // turn_complete 2000 - turn_start 1000
     expect(m.cacheHitPct).toBeCloseTo(50, 5) // 600 / 1200
     expect(m.latestTokPerS).toBeCloseTo(50, 5) // 300 / (6000 / 1000)
+  })
+
+  it('accumulates per-iteration usage when reconstructing historical metrics', async () => {
+    // A turn with two iterations, each persisting its own token_usage record —
+    // the reconstruction must SUM them, not keep only the last.
+    const events = [
+      JSON.stringify({ kind: 'turn_start', turn_id: 't1', task: 'go', ts: 1000 }),
+      JSON.stringify({ kind: 'iteration_start', turn_id: 't1', iteration: 1, paradigm: 're_act', ts: 1100 }),
+      JSON.stringify({
+        kind: 'token_usage',
+        usage: { prompt_tokens: 1200, completion_tokens: 50, cache_read_tokens: 600, cache_creation_tokens: 0 },
+        ts: 1500,
+      }),
+      JSON.stringify({ kind: 'iteration_start', turn_id: 't1', iteration: 2, paradigm: 're_act', ts: 1600 }),
+      JSON.stringify({
+        kind: 'token_usage',
+        usage: { prompt_tokens: 1500, completion_tokens: 80, cache_read_tokens: 800, cache_creation_tokens: 0 },
+        ts: 1700,
+      }),
+      JSON.stringify({ kind: 'turn_complete', turn_id: 't1', ts: 2000 }),
+    ]
+    const rpc = fakeRpc({ call: () => Promise.resolve({ ok: true, events } as never) })
+    const store = new ProjectionStore(rpc)
+    store.consume({ kind: 'session_loaded', id: 'A', messages: [] })
+    await vi.runAllTimersAsync()
+    await Promise.resolve()
+
+    const m = store.getSnapshot().metrics
+    expect(m.turns).toBe(1)
+    expect(m.steps).toBe(2)
+    expect(m.totalPrompt).toBe(2700) // 1200 + 1500, not the last 1500
+    expect(m.totalCompletion).toBe(130) // 50 + 80, not the last 80
   })
 })
 
