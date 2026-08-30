@@ -495,13 +495,13 @@ function SpeakerHeader({
   )
 }
 
-// ThinkingBlock — deepseek-harness style: a single-line, collapsed-by-default
-// reasoning affordance. The collapsed line shows the first sentence (head,
-// ellipsized) both while streaming and once done — the engine's thinking
-// payload is itself a long/abbreviated blob, so following the live tail by
-// horizontally scrolling the line leftward left nothing readable (the visible
-// window sat on a sliver of the tail). The `💭 thinking…` label + chevron
-// still signal streaming; expanding shows the full text.
+// ThinkingBlock — a single-line, collapsed-by-default reasoning affordance.
+// The collapsed line shows the TAIL (latest sentence, ellipsized from the
+// head) so it streams the newest reasoning as it's produced — a typewriter
+// effect. Showing the head (first sentence) instead froze on the opening line
+// for the whole thinking window and read as "thinking already done" (issue #44).
+// The `💭 thinking…` label + chevron still signal streaming; expanding shows
+// the full text.
 const ThinkingBlock = memo(function ThinkingBlock({
   node,
   label,
@@ -511,7 +511,7 @@ const ThinkingBlock = memo(function ThinkingBlock({
 }): ReactNode {
   const [expanded, setExpanded] = useState(false)
   const streaming = node.state === 'streaming'
-  const collapsedLine = firstSentence(node.text)
+  const collapsedLine = tailChunk(node.text)
 
   return (
     <div className={`${styles.thinking} ${expanded ? styles.thinkingOpen : ''}`}>
@@ -537,14 +537,25 @@ const ThinkingBlock = memo(function ThinkingBlock({
   )
 })
 
-/** First sentence of a thinking fragment — split on terminal punctuation or
- * newline, trimmed + truncated to one line. Returns '' for empty input. */
-function firstSentence(text: string): string {
+/** Tail of a thinking fragment — the last sentence/line, truncated from the
+ * head to one line so the collapsed row streams the newest reasoning (issue
+ * #44). Split on terminal punctuation/newline; a trailing run longer than 120
+ * chars is windowed to its last 120 chars with a leading ellipsis. Returns ''
+ * for empty input. */
+function tailChunk(text: string): string {
   const t = text.trim()
   if (t.length === 0) return ''
-  const m = t.split(/[。.!?\n]/)[0] ?? ''
-  const s = m.trim().replace(/\s+/g, ' ')
-  return s.length > 120 ? s.slice(0, 119) + '…' : s
+  const segments = t.split(/[。.!?\n]/)
+  let last = ''
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i].trim()
+    if (seg.length > 0) {
+      last = seg
+      break
+    }
+  }
+  const s = last.replace(/\s+/g, ' ')
+  return s.length > 120 ? '…' + s.slice(s.length - 119) : s
 }
 
 /** Wall-clock generation time (locale-aware). Same-day → "HH:MM"; otherwise

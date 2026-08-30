@@ -61,6 +61,7 @@ export type EngineYieldKind =
   | 'stream_chunk'
   | 'thinking'
   | 'direct_answer'
+  | 'tool_intent'
   | 'tool_calls'
   | 'tool_result'
   | 'delegate'
@@ -115,6 +116,13 @@ export interface YieldDirectAnswer {
   kind: 'direct_answer'
   turn_id: string
   text: string
+  speaker: string | null
+}
+export interface YieldToolIntent {
+  kind: 'tool_intent'
+  turn_id: string
+  call_id: string
+  tool_name: string
   speaker: string | null
 }
 export interface YieldToolCalls {
@@ -265,6 +273,7 @@ export type EngineYield =
   | YieldStreamChunk
   | YieldThinking
   | YieldDirectAnswer
+  | YieldToolIntent
   | YieldToolCalls
   | YieldToolResult
   | YieldSpeakerTurn

@@ -302,6 +302,14 @@ mod tests {
             text: "x".into(),
             speaker: None,
         }));
+        // Tool intent is a live streaming hint (like stream_chunk/thinking),
+        // not a trajectory entry — the assembled call is persisted as ToolCalls.
+        assert!(!is_trajectory_kind(&EngineYield::ToolIntent {
+            turn_id: "t".into(),
+            call_id: "c".into(),
+            tool_name: "n".into(),
+            speaker: None,
+        }));
         assert!(!is_trajectory_kind(&EngineYield::DirectAnswer {
             turn_id: "t".into(),
             text: "x".into(),

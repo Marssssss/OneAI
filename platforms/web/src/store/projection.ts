@@ -68,7 +68,7 @@ export type NodeKind =
   | 'note'
 export type NodeState = 'streaming' | 'done' | 'error'
 
-export type ToolState = 'pending' | 'done' | 'error'
+export type ToolState = 'assembling' | 'executing' | 'done' | 'error'
 
 export interface ChatNode {
   /** Stable per-node key — React list reconciliation uses this. */
@@ -1437,6 +1437,36 @@ export class ProjectionStore {
         this.emitNow()
         break
       }
+      case 'tool_intent': {
+        // Tool name detected mid-stream, args still assembling (issue #44).
+        // Seed a tool card in "assembling" state; `tool_calls` upgrades it to
+        // "executing" once the args are fully received, then `tool_result`
+        // flips it to done/error. Dedupe by call id so a re-emitted intent
+        // (or a provider that echoes the name) doesn't spawn a second card.
+        const existingIdx = this.state.nodes.findIndex(
+          (n) => n.kind === 'tool' && n.callId === y.call_id && n.turnId === y.turn_id,
+        )
+        if (existingIdx < 0) {
+          this.state.nodes = [
+            ...this.state.nodes,
+            {
+              id: nextNodeId(),
+              role: 'assistant',
+              kind: 'tool',
+              text: '',
+              speaker: y.speaker,
+              turnId: y.turn_id,
+              state: 'done',
+              callId: y.call_id,
+              toolName: y.tool_name,
+              toolArgs: undefined,
+              toolState: 'assembling',
+            },
+          ]
+        }
+        this.emitNow()
+        break
+      }
       case 'tool_calls': {
         // Finalize any streaming text + thinking node for this turn so tool
         // cards interleave between finalized blocks (the next stream_chunk /
@@ -1449,8 +1479,8 @@ export class ProjectionStore {
           // (`on_tool_calls` per `ToolCallComplete`) and the decision path
           // (`AgentDecision::ToolCalls`) can both fire for the same call id in
           // one iteration. Without this guard each emission spawned a fresh
-          // pending card, leaving duplicate "tool" blocks (one stuck pending
-          // because tool_result only matches the first). Refresh args in place.
+          // card, leaving duplicate "tool" blocks (one stuck pending because
+          // tool_result only matches the first). Refresh args in place.
           const existingIdx = this.state.nodes.findIndex(
             (n) => n.kind === 'tool' && n.callId === c.id && n.turnId === y.turn_id,
           )
@@ -1459,7 +1489,11 @@ export class ProjectionStore {
             this.replaceNode(n.id, {
               toolName: n.toolName ?? c.name,
               toolArgs: c.args,
-              toolState: n.toolState ?? 'pending',
+              // Args are complete — upgrade an "assembling" card (seeded by
+              // `tool_intent`) to "executing". A terminal done/error state is
+              // preserved so a re-emitted tool_calls can never downgrade a
+              // card that already produced a result.
+              toolState: n.toolState === 'assembling' ? 'executing' : (n.toolState ?? 'executing'),
             })
             continue
           }
@@ -1476,7 +1510,7 @@ export class ProjectionStore {
               callId: c.id,
               toolName: c.name,
               toolArgs: c.args,
-              toolState: 'pending',
+              toolState: 'executing',
             },
           ]
           this.pushTrajectory(y.turn_id, 'tool_calls', `tool: ${c.name}`, {

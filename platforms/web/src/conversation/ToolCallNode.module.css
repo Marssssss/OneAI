@@ -47,7 +47,11 @@
   flex-shrink: 0;
   background: var(--oneai-text-tertiary);
 }
-.dot_pending {
+.dot_assembling {
+  background: var(--oneai-amber);
+  animation: oneai-pulse 1.2s infinite ease-in-out;
+}
+.dot_executing {
   background: var(--oneai-amber);
   animation: oneai-pulse 1.2s infinite ease-in-out;
 }

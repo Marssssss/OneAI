@@ -113,7 +113,11 @@
   border: 1px solid var(--oneai-border);
   color: var(--oneai-text-tertiary);
 }
-.badge_pending {
+.badge_assembling {
+  color: var(--oneai-amber);
+  border-color: var(--oneai-amber);
+}
+.badge_executing {
   color: var(--oneai-amber);
   border-color: var(--oneai-amber);
 }

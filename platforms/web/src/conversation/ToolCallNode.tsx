@@ -27,9 +27,15 @@ export const ToolCallNode = memo(function ToolCallNode({
 }: ToolCallNodeProps): ReactNode {
   const { t } = useLocale()
   const [open, setOpen] = useState(false)
-  const state = node.toolState ?? 'pending'
+  const state = node.toolState ?? 'executing'
   const statusLabel =
-    state === 'pending' ? t('tool.pending') : state === 'error' ? t('tool.error') : t('tool.done')
+    state === 'assembling'
+      ? t('tool.assembling')
+      : state === 'executing'
+        ? t('tool.executing')
+        : state === 'error'
+          ? t('tool.error')
+          : t('tool.done')
   const output = node.toolOutput
   const summary = summarizeCall(node.toolName, node.toolArgs)
   const [copied, setCopied] = useState<string | null>(null)

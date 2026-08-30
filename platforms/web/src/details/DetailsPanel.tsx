@@ -40,13 +40,22 @@ function ToolDetails({ node }: { node: ChatNode | null }): ReactNode {
   }
 
   const output = node.toolOutput
+  const state = node.toolState ?? 'executing'
+  const statusLabel =
+    state === 'assembling'
+      ? t('tool.assembling')
+      : state === 'executing'
+        ? t('tool.executing')
+        : state === 'error'
+          ? t('tool.error')
+          : t('tool.done')
   return (
     <>
       <section className={styles.section}>
         <div className={styles.sectionLabel}>{t('details.tool')}</div>
         <code className={styles.toolName}>{node.toolName ?? 'tool'}</code>
-        <span className={`${styles.badge} ${styles[`badge_${node.toolState ?? 'pending'}`]}`}>
-          {node.toolState ?? 'pending'}
+        <span className={`${styles.badge} ${styles[`badge_${state}`]}`}>
+          {statusLabel}
         </span>
       </section>
 

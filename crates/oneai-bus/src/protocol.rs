@@ -778,6 +778,16 @@ pub enum EngineYield {
         text: String,
         speaker: Option<String>,
     },
+    /// The model has begun emitting a tool call — its name is known but its
+    /// arguments are still streaming. ← `on_tool_intent`. Lets a frontend show
+    /// a tool card in an "assembling" state before the fully-assembled
+    /// [`EngineYield::ToolCalls`] arrives moments later (issue #44).
+    ToolIntent {
+        turn_id: String,
+        call_id: String,
+        tool_name: String,
+        speaker: Option<String>,
+    },
     /// Model wants to call tools. ← `on_tool_calls`.
     ToolCalls {
         turn_id: String,
@@ -1020,6 +1030,12 @@ mod tests {
             EngineYield::DirectAnswer {
                 turn_id: "t".into(),
                 text: "".into(),
+                speaker: None,
+            },
+            EngineYield::ToolIntent {
+                turn_id: "t".into(),
+                call_id: "c".into(),
+                tool_name: "n".into(),
                 speaker: None,
             },
             EngineYield::ToolCalls {

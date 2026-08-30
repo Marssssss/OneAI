@@ -121,6 +121,13 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Each call contains a fragment of the thinking text (streaming).
     fn on_thinking(&self, _text: &str) {}
 
+    /// Called as soon as a tool call's **name** is detected mid-stream, before
+    /// its arguments finish streaming (issue #44). Lets a frontend show a tool
+    /// card in an "assembling" state; the fully-assembled call follows via
+    /// [`AgentLoopObserver::on_tool_calls`]. Default empty so existing
+    /// observers keep compiling.
+    fn on_tool_intent(&self, _call_id: &str, _tool_name: &str) {}
+
     /// Called after each inference with token usage stats.
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {}
 
@@ -6036,17 +6043,16 @@ impl AgentLoop {
                     crate::streaming::StreamEvent::ThinkingFragment { text } => {
                         observer.on_thinking(&text);
                     }
-                    crate::streaming::StreamEvent::ToolIntentDetected { .. } => {
-                        // Tool intent detected mid-stream. We do NOT surface
-                        // this to the observer: emitting it as a stream chunk
-                        // ("▸ preparing {tool}…") polluted the assistant's
-                        // answer text on clients that fold stream chunks into
-                        // the bubble (the macOS app rendered "preparing 工具"
-                        // as body text). The fully-assembled call arrives
-                        // moments later via `ToolCallComplete` → `on_tool_calls`,
-                        // which is what the UI's tool card renders. The intent
-                        // hint was a TUI-only nicety; dropping it keeps the
-                        // answer text clean on every port.
+                    crate::streaming::StreamEvent::ToolIntentDetected { call_id, tool_name } => {
+                        // Tool intent detected mid-stream — surface it as a
+                        // DEDICATED observer callback (`on_tool_intent`, issue
+                        // #44), NOT as a stream chunk (the old "▸ preparing
+                        // {tool}…" polluted the assistant's answer text on
+                        // clients that fold stream chunks into the bubble). A
+                        // frontend renders a tool card in an "assembling" state
+                        // here; the fully-assembled call arrives moments later
+                        // via `ToolCallComplete` → `on_tool_calls`.
+                        observer.on_tool_intent(&call_id, &tool_name);
                     }
                     crate::streaming::StreamEvent::ToolCallComplete {
                         call_id,

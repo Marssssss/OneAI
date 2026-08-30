@@ -276,6 +276,15 @@ impl AgentLoopObserver for BusObserver {
         });
     }
 
+    fn on_tool_intent(&self, call_id: &str, tool_name: &str) {
+        self.emit(EngineYield::ToolIntent {
+            turn_id: self.turn_id.clone(),
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            speaker: None,
+        });
+    }
+
     fn on_token_usage_full(
         &self,
         prompt_tokens: u32,

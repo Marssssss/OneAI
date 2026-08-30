@@ -81,7 +81,7 @@ describe('ProjectionStore.consume', () => {
     expect(snap.nodes[0].text).toBe('Hello')
   })
 
-  it('creates a pending tool node on tool_calls, fills it on tool_result', () => {
+  it('creates an executing tool node on tool_calls, fills it on tool_result', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)
 
@@ -95,7 +95,7 @@ describe('ProjectionStore.consume', () => {
     let snap = store.getSnapshot()
     const toolNode = snap.nodes.find((n) => n.kind === 'tool')!
     expect(toolNode).toBeDefined()
-    expect(toolNode.toolState).toBe('pending')
+    expect(toolNode.toolState).toBe('executing')
     expect(toolNode.toolName).toBe('write_file')
 
     y({
@@ -115,6 +115,47 @@ describe('ProjectionStore.consume', () => {
     expect(done.toolState).toBe('done')
     expect(done.toolOutput?.success).toBe(true)
     expect(done.toolOutput?.artifacts).toHaveLength(1)
+  })
+
+  it('advances a tool card assembling → executing → done across tool_intent/tool_calls/tool_result', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+
+    y({ kind: 'turn_start', turn_id: 't2', task: '' })
+    // Tool name detected mid-stream, args still streaming.
+    y({ kind: 'tool_intent', turn_id: 't2', call_id: 'call_a', tool_name: 'write_file', speaker: null })
+    let snap = store.getSnapshot()
+    let card = snap.nodes.find((n) => n.kind === 'tool')!
+    expect(card).toBeDefined()
+    expect(card.toolState).toBe('assembling')
+    expect(card.toolArgs).toBeUndefined()
+
+    // Args fully assembled → upgrade to executing (and refresh args).
+    y({
+      kind: 'tool_calls',
+      turn_id: 't2',
+      calls: [{ id: 'call_a', name: 'write_file', args: { path: '/x.txt' } }],
+      speaker: null,
+    })
+    snap = store.getSnapshot()
+    card = snap.nodes.find((n) => n.kind === 'tool')!
+    expect(card.toolState).toBe('executing')
+    expect(card.toolArgs).toEqual({ path: '/x.txt' })
+
+    // Execution done → terminal done state.
+    y({
+      kind: 'tool_result',
+      turn_id: 't2',
+      call_id: 'call_a',
+      tool_name: 'write_file',
+      speaker: null,
+      output: { success: true, content: 'wrote 10 bytes' },
+    })
+    snap = store.getSnapshot()
+    card = snap.nodes.find((n) => n.kind === 'tool')!
+    expect(card.toolState).toBe('done')
+    // One card throughout — no duplicates across the three events.
+    expect(snap.nodes.filter((n) => n.kind === 'tool')).toHaveLength(1)
   })
 
   it('dedupes tool_calls re-emitted with the same call id (streaming + decision paths both fire)', () => {
