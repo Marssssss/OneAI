@@ -4,28 +4,62 @@
  * light/dark redefinition on a body attribute) but with OneAI's own brand
  * color and naming. Components MUST style only through these tokens — never
  * hardcode colors — so theme switching is a single attribute flip.
+ *
+ * Visual direction: "terminal-native teal" (frontend-design pass). OneAI is a
+ * Rust agent framework with a terminal/TUI lineage — tool calls, trajectories,
+ * sandboxes, StateGraph — so the accent is a signal teal/cyan (the agent's
+ * "cursor" color), the type leans monospace, and surfaces are cool engineering
+ * neutrals rather than generic SaaS indigo. The two self-hosted variable fonts
+ * below (Space Grotesk display + JetBrains Mono) cover the Latin range only;
+ * CJK falls back to the system stack in `--oneai-font-body`.
  */
 
+/* ── Self-hosted fonts (latin subsets; CJK falls back per-glyph) ────────── */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url('/fonts/space-grotesk-latin.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191,
+    U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191,
+    U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
-  /* Brand + semantics (light). */
-  --oneai-brand-500: #4f46e5; /* indigo */
-  --oneai-brand-400: #6366f1;
-  --oneai-brand-600: #4338ca;
+  /* Brand + semantics (light). Signal teal — the agent's "cursor" color. */
+  --oneai-brand-500: #0e7490; /* cyan-700 */
+  --oneai-brand-400: #0891b2; /* cyan-600 */
+  --oneai-brand-600: #155e75; /* cyan-800 */
 
-  --oneai-bg: #ffffff;
-  --oneai-bg-subtle: #f7f7f8;
+  --oneai-bg: #fafbfc;
+  --oneai-bg-subtle: #f1f4f6;
+  --oneai-bg-hover: #edf1f5;
   --oneai-bg-elevated: #ffffff;
-  --oneai-bg-overlay: rgba(0, 0, 0, 0.45);
+  --oneai-bg-overlay: rgba(11, 15, 20, 0.45);
 
-  --oneai-border: #e5e5e7;
-  --oneai-border-strong: #d1d1d6;
+  --oneai-border: #e4e9ee;
+  --oneai-border-strong: #cbd4db;
 
-  --oneai-text: #1c1c1e;
-  --oneai-text-secondary: #6b6b70;
-  --oneai-text-tertiary: #9a9aa1;
+  --oneai-text: #17202a;
+  --oneai-text-secondary: #4a5866;
+  --oneai-text-tertiary: #8893a0;
 
   --oneai-accent: var(--oneai-brand-500);
   --oneai-accent-fg: #ffffff;
+  /* Tint for hover/selected surfaces + the soft focus/active glow. */
+  --oneai-accent-muted: rgba(14, 116, 144, 0.12);
+  --oneai-ring: 0 0 0 3px rgba(14, 116, 144, 0.32);
 
   --oneai-amber: #b45309;
   --oneai-amber-bg: #fef3c7;
@@ -34,13 +68,20 @@
   --oneai-red: #b91c1c;
   --oneai-red-bg: #fee2e2;
 
+  /* Elevation — cool-tinted shadows replace the flat border-only look. */
+  --oneai-shadow-sm: 0 1px 2px rgba(23, 32, 42, 0.06);
+  --oneai-shadow-md: 0 4px 14px rgba(23, 32, 42, 0.10);
+  --oneai-shadow-lg: 0 12px 32px rgba(11, 15, 20, 0.16);
+
   /* Trajectory timeline node colors (issue #40) — one hue per node kind so the
-   * timeline's legend + markers stay distinguishable in both themes. */
-  --oneai-traj-iteration: #4f46e5;
-  --oneai-traj-tool: #0891b2;
+   * timeline's legend + markers stay distinguishable in both themes. The
+   * tool/context nodes were nudged off the teal/cyan accent so no node kind
+   * reads as "the brand color". */
+  --oneai-traj-iteration: #2563eb;
+  --oneai-traj-tool: #0284c7;
   --oneai-traj-delegate: #d97706;
   --oneai-traj-plan: #7c3aed;
-  --oneai-traj-context: #0d9488;
+  --oneai-traj-context: #0f766e;
   --oneai-traj-working: #ca8a04;
   --oneai-traj-usage: #64748b;
   --oneai-traj-paradigm: #db2777;
@@ -82,13 +123,26 @@
   --oneai-mobile-breakpoint: 900px;
   --oneai-touch-target: 44px;
 
-  --oneai-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+  /* Type. The display face (Space Grotesk) is used with restraint — wordmark,
+   * section labels, headings, big numbers — and the mono face (JetBrains Mono)
+   * carries code/trajectory/timestamps/chip states. CJK always falls back to
+   * the system body stack (the latin subsets above cover only ASCII). */
+  --oneai-font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', sans-serif;
+  --oneai-font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI',
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC',
     sans-serif;
   /* Code font deliberately drops the bare `monospace` tail so Windows CJK
    * doesn't fall back to SimSun (mirrors dsh's choice). */
   --oneai-font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas,
     'Courier New', monospace;
+  /* Legacy alias — pre-existing components still reference `--oneai-font-family`
+   * for the body face. Resolves to the same stack as `--oneai-font-body`. */
+  --oneai-font-family: var(--oneai-font-body);
+
+  /* Letter-spacing for uppercase mono labels (section headers, group headers). */
+  --oneai-tracking: 0.04em;
 
   --oneai-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --oneai-dur-fast: 0.1s;
@@ -97,21 +151,28 @@
 }
 
 body[data-oneai-theme='dark'] {
-  --oneai-brand-500: #818cf8;
-  --oneai-brand-400: #a5b4fc;
-  --oneai-brand-600: #6366f1;
+  --oneai-brand-500: #22d3ee; /* cyan-400 */
+  --oneai-brand-400: #67e8f9; /* cyan-300 */
+  --oneai-brand-600: #06b6d4; /* cyan-500 */
 
-  --oneai-bg: #1a1a1c;
-  --oneai-bg-subtle: #212123;
-  --oneai-bg-elevated: #2a2a2e;
+  --oneai-bg: #0b0f14;
+  --oneai-bg-subtle: #11161c;
+  --oneai-bg-hover: #1b232c;
+  --oneai-bg-elevated: #161c24;
   --oneai-bg-overlay: rgba(0, 0, 0, 0.6);
 
-  --oneai-border: #343438;
-  --oneai-border-strong: #44444a;
+  --oneai-border: #232b34;
+  --oneai-border-strong: #2e3a45;
 
-  --oneai-text: #e8e8ea;
-  --oneai-text-secondary: #a0a0a6;
-  --oneai-text-tertiary: #6b6b70;
+  --oneai-text: #e6edf3;
+  --oneai-text-secondary: #9aa7b4;
+  --oneai-text-tertiary: #64707d;
+
+  /* Bright cyan accent needs a dark foreground for contrast (white-on-cyan
+   * would be illegible in dark mode). */
+  --oneai-accent-fg: #062a35;
+  --oneai-accent-muted: rgba(34, 211, 238, 0.14);
+  --oneai-ring: 0 0 0 3px rgba(34, 211, 238, 0.32);
 
   --oneai-amber: #fbbf24;
   --oneai-amber-bg: #422006;
@@ -120,12 +181,16 @@ body[data-oneai-theme='dark'] {
   --oneai-red: #f87171;
   --oneai-red-bg: #450a0a;
 
+  --oneai-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --oneai-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --oneai-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+
   /* Trajectory timeline node colors — brighter for dark surfaces. */
-  --oneai-traj-iteration: #a5b4fc;
-  --oneai-traj-tool: #67e8f9;
+  --oneai-traj-iteration: #93c5fd;
+  --oneai-traj-tool: #7dd3fc;
   --oneai-traj-delegate: #fbbf24;
   --oneai-traj-plan: #c4b5fd;
-  --oneai-traj-context: #5eead4;
+  --oneai-traj-context: #2dd4bf;
   --oneai-traj-working: #facc15;
   --oneai-traj-usage: #94a3b8;
   --oneai-traj-paradigm: #f9a8d4;
@@ -152,7 +217,7 @@ body,
 body {
   background: var(--oneai-bg);
   color: var(--oneai-text);
-  font-family: var(--oneai-font-family);
+  font-family: var(--oneai-font-body);
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
@@ -161,6 +226,14 @@ body {
 
 * {
   box-sizing: border-box;
+}
+
+/* Visible keyboard focus — an accent ring on any focusable element, so the
+ * whole app is keyboard-navigable (frontend-design requirement). Mouse clicks
+ * don't get the ring (matches native :focus-visible behavior). */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--oneai-ring);
 }
 
 /* Scrollbar — hide by default, linger on hover (mirrors dsh sidebar). */
@@ -176,4 +249,16 @@ body {
 *:hover > ::-webkit-scrollbar-thumb,
 :hover::-webkit-scrollbar-thumb {
   background: var(--oneai-border-strong);
+}
+
+/* Reduced motion — kill the blinking cursor / typing dots / pulse for users
+ * who asked for it. The signatures stay, the animation stops. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

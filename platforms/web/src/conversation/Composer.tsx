@@ -382,6 +382,7 @@ export function Composer({
             <div className={styles.slashHint}>{t('slash.keys')}</div>
           </div>
         )}
+        <span className={styles.prompt} aria-hidden="true">❯</span>
         <textarea
           ref={taRef}
           className={styles.input}

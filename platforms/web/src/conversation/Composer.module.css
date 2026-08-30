@@ -84,6 +84,20 @@
   position: relative;
 }
 
+/* Terminal prompt — a monospace `❯` in the accent color, left of the input.
+ * Pure decoration (aria-hidden); it anchors the "terminal-native" identity. */
+.prompt {
+  flex-shrink: 0;
+  align-self: center;
+  font-family: var(--oneai-font-mono);
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--oneai-accent);
+  user-select: none;
+  pointer-events: none;
+}
+
 .input {
   flex: 1;
   resize: none;
@@ -160,7 +174,7 @@
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border-strong);
   border-radius: var(--oneai-radius);
-  box-shadow: 0 4px 16px var(--oneai-bg-overlay);
+  box-shadow: var(--oneai-shadow-md);
   display: flex;
   flex-direction: column;
   min-width: 340px;

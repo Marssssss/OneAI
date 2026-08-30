@@ -22,6 +22,7 @@
 }
 
 .value {
+  font-family: var(--oneai-font-mono);
   font-weight: 600;
   color: var(--oneai-text-secondary);
   font-variant-numeric: tabular-nums;

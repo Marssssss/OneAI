@@ -32,11 +32,28 @@
   pointer-events: none;
 }
 
-.brandAlpha {
-  height: 22px;
-  width: auto;
+.brandWordmark {
+  font-family: var(--oneai-font-mono);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--oneai-text);
   user-select: none;
-  pointer-events: none;
+}
+
+/* The terminal "signature" — a blinking block cursor after the wordmark.
+ * Killed by the global prefers-reduced-motion rule. */
+.brandCursor {
+  color: var(--oneai-accent);
+  font-weight: 400;
+  margin-left: 2px;
+  animation: brand-blink 1.1s steps(2, start) infinite;
+}
+@keyframes brand-blink {
+  to {
+    opacity: 0;
+  }
 }
 
 .newBtn {
@@ -69,11 +86,14 @@
 }
 
 .sectionLabel {
-  /* Section header — same size as the rows below (13px) but bold + secondary
-   * so it reads as a heading, not a faint 11px tertiary caption that's smaller
-   * and lighter than its own children. */
-  font-size: 14px;
+  /* Section header — monospace uppercase, terminal-label treatment. Mono
+   * renders optically larger than sans at the same px, so 12px reads like the
+   * previous 14px sans without out-shouting its rows. */
+  font-size: 12px;
   font-weight: 600;
+  font-family: var(--oneai-font-mono);
+  letter-spacing: var(--oneai-tracking);
+  text-transform: uppercase;
   color: var(--oneai-text-secondary);
   padding: 0 6px;
   margin-top: var(--oneai-gap);

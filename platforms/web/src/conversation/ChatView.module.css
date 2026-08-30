@@ -54,6 +54,7 @@
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border);
   border-bottom-left-radius: 4px;
+  box-shadow: var(--oneai-shadow-sm);
   width: 100%;
 }
 
@@ -262,6 +263,7 @@
 /* Generation time — muted, tabular so the clock digits don't jitter. */
 .time {
   font-size: 11px;
+  font-family: var(--oneai-font-mono);
   color: var(--oneai-text-tertiary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -299,7 +301,7 @@
 }
 .copyBtn:hover {
   background: var(--oneai-bg-subtle);
-  color: var(--oneai-text-primary);
+  color: var(--oneai-text);
 }
 .copyBtn:active {
   transform: translateY(1px);
