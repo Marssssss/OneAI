@@ -141,7 +141,7 @@ pub struct InProcessBus {
 | `run_turn_via_bus` | `crates/oneai-app/src/session.rs:1477` |
 | `spawn_directive_pump` + `DirectiveRuntime` trait | `crates/oneai-app/src/directive_pump.rs:165` |
 | `AppBuilder::engine_bus()` | `crates/oneai-app/src/builder.rs:488` |
-| c_facade 3-symbol pump + `CFacadeRuntime` | `crates/oneai-uniffi/src/c_facade.rs:1,261` |
+| c_facade 3-symbol pump + `CFacadeRuntime` | `crates/oneai-uniffi/src/c_facade.rs:1,284` |
 | `oneai serve` sidecar | `examples/cli/src/cmd_serve.rs:1` |
 
 ## 8. Comparison with industry

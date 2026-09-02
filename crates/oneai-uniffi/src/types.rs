@@ -543,6 +543,14 @@ pub enum OneAIErrorView {
     Other { message: String },
 }
 
+/// Error view for a panic caught at the FFI boundary (issue #4) — the panic
+/// was already extracted via `oneai_app::panic_message` by the caller.
+pub(crate) fn panic_error_view(message: String) -> OneAIErrorView {
+    OneAIErrorView::Agent {
+        message: format!("internal panic: {message}"),
+    }
+}
+
 impl From<oneai_core::OneAIError> for OneAIErrorView {
     fn from(err: oneai_core::OneAIError) -> Self {
         match err {

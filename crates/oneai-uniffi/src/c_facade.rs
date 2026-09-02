@@ -73,6 +73,64 @@ fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p).to_str().ok() }
 }
 
+// ─── Panic guard (issue #4) ─────────────────────────────────────────
+//
+// A panic unwinding across an `extern "C"` boundary is UB → the runtime
+// aborts the whole process. Every entry point below routes through
+// `guard_i32` / `guard_ptr` so any panic (an unwrap/expect, an out-of-bounds
+// slice, a debug-mode overflow — anywhere in engine build or bus submit) is
+// caught at the boundary, logged, surfaced as an `EngineYield::Error` when an
+// engine exists, and turned into a plain error return.
+
+/// Run an entry-point body, catching panics at the FFI boundary. On panic:
+/// log it, surface it to polling frontends (if an engine is up), and return
+/// `panic_code` — never unwind across `extern "C"`.
+fn guard_i32(panic_code: i32, f: impl FnOnce() -> i32) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(code) => code,
+        Err(payload) => {
+            let msg = oneai_app::panic_message(payload);
+            tracing::error!("oneai c_facade: caught panic at FFI boundary: {msg}");
+            emit_panic_error(&msg);
+            panic_code
+        }
+    }
+}
+
+/// Pointer-returning variant of [`guard_i32`] — on panic returns null.
+fn guard_ptr<T>(f: impl FnOnce() -> *const T) -> *const T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(p) => p,
+        Err(payload) => {
+            let msg = oneai_app::panic_message(payload);
+            tracing::error!("oneai c_facade: caught panic at FFI boundary: {msg}");
+            emit_panic_error(&msg);
+            std::ptr::null()
+        }
+    }
+}
+
+/// Surface a caught panic to the foreign side as an `EngineYield::Error` (the
+/// same channel turn errors ride), when an engine is built. Best-effort: a
+/// panic during `Init` has no bus yet — the error return code is the only
+/// signal then.
+fn emit_panic_error(msg: &str) {
+    let guard = lock_or_recover(engine());
+    if let Some(state) = guard.as_ref() {
+        let _ = state.bus.emit(EngineYield::Error {
+            recoverable: false,
+            message: format!("Error: internal panic — {msg}"),
+        });
+    }
+}
+
+/// Lock a std mutex, recovering from poisoning. A panic caught at the FFI
+/// boundary may have poisoned the mutex mid-hold; the facade must keep
+/// serving (and draining) instead of panicking again on `.unwrap()`.
+fn lock_or_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ─── Engine state ──────────────────────────────────────────────────────
 
 /// The built engine + bus + pump, held in a global `OnceLock` after a
@@ -302,7 +360,7 @@ impl DirectiveRuntime for CFacadeRuntime {
         let nid = new.session_id().to_string();
         self.session = Some(new);
         self.group = None;
-        *self.group_slot.lock().unwrap() = None;
+        *lock_or_recover(&self.group_slot) = None;
         nid
     }
 
@@ -321,7 +379,7 @@ impl DirectiveRuntime for CFacadeRuntime {
         let msgs = new.conversation().messages.clone();
         self.session = Some(new);
         self.group = None;
-        *self.group_slot.lock().unwrap() = None;
+        *lock_or_recover(&self.group_slot) = None;
         (resolved, msgs)
     }
 
@@ -330,7 +388,7 @@ impl DirectiveRuntime for CFacadeRuntime {
         let nid = new.session_id().to_string();
         self.session = Some(new);
         self.group = None;
-        *self.group_slot.lock().unwrap() = None;
+        *lock_or_recover(&self.group_slot) = None;
         nid
     }
 
@@ -355,7 +413,7 @@ impl DirectiveRuntime for CFacadeRuntime {
             .map_err(|e| OneAIError::Config(format!("{e:?}")))?;
         let inner = gs.inner_session();
         self.group = Some(inner.clone());
-        *self.group_slot.lock().unwrap() = Some(inner);
+        *lock_or_recover(&self.group_slot) = Some(inner);
         // A group round displaces the single-agent session.
         self.session = None;
         Ok(())
@@ -431,10 +489,22 @@ fn group_round_summary() -> BusTurnSummary {
 /// success, non-zero on error (the error detail is emitted as an
 /// `EngineYield::Error` the caller drains via `oneai_poll_yield`).
 ///
+/// Codes: 0 ok · 1 null/invalid input · 2 bad JSON · 3 engine already built
+/// · 4 engine build failed · 5 engine not initialized · 6 bus submit failed
+/// · 7 internal panic caught at the FFI boundary (issue #4 — detail rides an
+/// `EngineYield::Error` when an engine exists).
+///
 /// A `Directive::Init { config }` on an unbuilt engine constructs it (engine +
 /// bus + pump); any other directive on an unbuilt engine is an error.
+///
+/// Never aborts: the body runs inside `guard_i32`, which catches any panic
+/// (issue #4 — an unwind across `extern "C"` is UB → process abort).
 #[no_mangle]
 pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
+    guard_i32(7, || submit_directive_inner(json))
+}
+
+fn submit_directive_inner(json: *const c_char) -> i32 {
     let json = match cstr(json) {
         Some(s) => s,
         None => return 1,
@@ -447,7 +517,7 @@ pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
     // `Directive::Init` builds the engine (intercepted before the bus — the
     // pump + bus must exist before any other directive can be submitted).
     if let Directive::Init { config } = &directive {
-        let mut guard = engine().lock().unwrap();
+        let mut guard = lock_or_recover(engine());
         if guard.is_some() {
             return 3; // already built — submit Shutdown first
         }
@@ -460,7 +530,7 @@ pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
         };
     }
 
-    let guard = engine().lock().unwrap();
+    let guard = lock_or_recover(engine());
     let Some(state) = guard.as_ref() else {
         return 5; // not initialized — submit Init first
     };
@@ -468,7 +538,7 @@ pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
     // Interrupt for an active group round is intercepted here (a group round
     // doesn't register a bus cancel token, unlike single-agent run_turn).
     if matches!(directive, Directive::Interrupt { .. }) {
-        if let Some(group) = state.group_slot.lock().unwrap().clone() {
+        if let Some(group) = lock_or_recover(&state.group_slot).clone() {
             group.interrupt();
             return 0;
         }
@@ -485,25 +555,25 @@ pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
 /// Poll the next `EngineYield` as one JSON line (NUL-terminated), or null if
 /// none is pending. The returned pointer aliases a thread-local buffer — valid
 /// until the next `oneai_poll_yield` on the same thread; the caller MUST NOT
-/// free it.
+/// free it. Never aborts (issue #4): panics are caught and yield null.
 #[no_mangle]
 pub extern "C" fn oneai_poll_yield() -> *const c_char {
     // Lock the engine, take one yield off the broadcast receiver (non-blocking),
     // then release — serialize into the thread-local buffer. The std Mutex on
     // `yield_rx` is held only across `try_recv` (no await), so a foreign thread
     // polling never blocks a runtime worker.
-    poll_yield_inner()
+    guard_ptr(poll_yield_inner)
 }
 
 fn poll_yield_inner() -> *const c_char {
     // Lock the engine, take one yield off the broadcast receiver (non-blocking),
     // then release. Serialize into the thread-local buffer.
     let line = {
-        let guard = engine().lock().unwrap();
+        let guard = lock_or_recover(engine());
         let Some(state) = guard.as_ref() else {
             return std::ptr::null();
         };
-        let mut rx = state.yield_rx.lock().unwrap();
+        let mut rx = lock_or_recover(&state.yield_rx);
         match rx.try_recv() {
             Ok(y) => serialize_yield(&y).unwrap_or_default(),
             Err(_) => return std::ptr::null(),
@@ -517,16 +587,21 @@ fn poll_yield_inner() -> *const c_char {
 }
 
 /// Shut the engine down — submit `Directive::Shutdown`, abort the pump, drop
-/// the engine state. Returns 0 on success, non-zero if no engine is built.
+/// the engine state. Returns 0 on success, 1 if no engine is built, 2 if an
+/// internal panic was caught at the FFI boundary (issue #4). Never aborts.
 #[no_mangle]
 pub extern "C" fn oneai_shutdown() -> i32 {
-    let mut guard = engine().lock().unwrap();
+    guard_i32(2, shutdown_inner)
+}
+
+fn shutdown_inner() -> i32 {
+    let mut guard = lock_or_recover(engine());
     let Some(state) = guard.as_mut() else {
         return 1;
     };
     let bus = state.bus.clone();
     let _ = runtime().block_on(async move { bus.submit(Directive::Shutdown).await });
-    if let Some(handle) = state.pump_handle.lock().unwrap().take() {
+    if let Some(handle) = lock_or_recover(&state.pump_handle).take() {
         handle.abort();
     }
     *guard = None;
@@ -637,6 +712,40 @@ mod tests {
         let order = r#"{"kind":"group_set_scripted_order","order":["editor"]}"#;
         assert_eq!(submit(order), 0);
         assert_eq!(shutdown(), 0);
+    }
+
+    // ── Issue #4: the FFI panic guard ─────────────────────────────────
+
+    #[test]
+    fn guard_i32_catches_panic_returns_code() {
+        // The panic hook prints the message to test stderr — expected noise.
+        // The point: the process does NOT abort and the panic code comes back.
+        let code = guard_i32(7, || panic!("boom at the boundary"));
+        assert_eq!(code, 7);
+        // Non-panicking bodies pass through unchanged.
+        assert_eq!(guard_i32(7, || 0), 0);
+        assert_eq!(guard_i32(7, || 42), 42);
+    }
+
+    #[test]
+    fn guard_ptr_catches_panic_returns_null() {
+        let p = guard_ptr(|| -> *const c_char { panic!("boom at poll") });
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn lock_or_recover_serves_poisoned_mutex() {
+        let m = Mutex::new(1u32);
+        // Poison it the way a caught mid-hold panic would.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = m.lock().unwrap();
+            panic!("poison it");
+        }));
+        assert!(poisoned.is_err());
+        assert!(m.is_poisoned());
+        // The facade must keep serving — recover instead of panicking again.
+        *lock_or_recover(&m) = 2;
+        assert_eq!(*lock_or_recover(&m), 2);
     }
 
     #[test]

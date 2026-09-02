@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use futures::FutureExt; // `catch_unwind` for the long-running FFI entries
 use oneai_agent::group_chat::{
     ChatLocale, GroupChatConfig, GroupChatMemberSpec, GroupChatObserver, GroupChatPersistence,
     GroupChatResources, GroupChatSession, TurnPolicy,
@@ -322,10 +323,17 @@ impl OneAiGroupChatSession {
         callback: Arc<dyn ChatEventCallback>,
     ) -> std::result::Result<(), OneAIErrorView> {
         let observer = GroupChatCallbackObserver::new(callback);
-        self.inner
-            .start(&observer)
+        // Issue #4: never let a panic unwind through the UniFFI extern
+        // boundary (UB → abort) — catch it and return it as an error view.
+        match std::panic::AssertUnwindSafe(self.inner.start(&observer))
+            .catch_unwind()
             .await
-            .map_err(OneAIErrorView::from)
+        {
+            Ok(res) => res.map_err(OneAIErrorView::from),
+            Err(payload) => Err(crate::types::panic_error_view(oneai_app::panic_message(
+                payload,
+            ))),
+        }
     }
 
     /// Append the user's message and run the round's speakers per the turn
@@ -338,10 +346,16 @@ impl OneAiGroupChatSession {
         callback: Arc<dyn ChatEventCallback>,
     ) -> std::result::Result<(), OneAIErrorView> {
         let observer = GroupChatCallbackObserver::new(callback);
-        self.inner
-            .run_task(&user_input, &observer)
+        // Issue #4: catch panics at the FFI boundary (see `start`).
+        match std::panic::AssertUnwindSafe(self.inner.run_task(&user_input, &observer))
+            .catch_unwind()
             .await
-            .map_err(OneAIErrorView::from)
+        {
+            Ok(res) => res.map_err(OneAIErrorView::from),
+            Err(payload) => Err(crate::types::panic_error_view(oneai_app::panic_message(
+                payload,
+            ))),
+        }
     }
 
     /// Request the running member to interrupt at the next iteration boundary.

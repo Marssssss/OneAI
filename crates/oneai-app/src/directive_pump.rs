@@ -13,9 +13,11 @@
 //!
 //! `Approve` / `Interrupt` never reach this pump — the bus resolves them itself.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::FutureExt; // `catch_unwind` for async dispatch
 use oneai_agent::{AgentLoop, ParadigmKind, SubAgentKind, SubAgentSummary, ToolCallRequest};
 use oneai_bus::{
     BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary, Directive,
@@ -171,131 +173,167 @@ pub fn spawn_directive_pump<R: DirectiveRuntime + 'static>(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(directive) = directive_rx.recv().await {
-            match directive {
-                Directive::UserMessage { content } => {
-                    let task = extract_task(&content);
-                    let result = {
-                        let mut rt = rt.lock().await;
-                        rt.run_turn(&task, interrupt_slot.clone()).await
-                    };
-                    if let Err(e) = result {
-                        let err = e.to_string();
-                        let _ = bus.emit(EngineYield::Error {
-                            recoverable: false,
-                            message: format!("Error: {err}"),
-                        });
-                        if err.contains("API error") {
-                            let _ = bus.emit(EngineYield::Error {
-                                recoverable: false,
-                                message: "Hint: check your ONEAI_API_KEY and ONEAI_BASE_URL."
-                                    .to_string(),
-                            });
-                        }
-                    }
-                    // Ok(summary) → BusObserver::on_complete already emitted
-                    // TurnComplete; the !completed diagnostic is handled in
-                    // the frontend's Complete arm.
-                }
-                Directive::SwitchParadigm { to } => {
-                    // Frontend-forced paradigm switch. Persist it on the
-                    // session (sticky across turns); the next run_turn
-                    // materializes it at turn start. Emit ParadigmSwitch so the
-                    // frontend reflects immediately.
-                    let (turn_id, from, to_bus) = {
-                        let mut rt = rt.lock().await;
-                        let target = paradigm_from_bus(to);
-                        let prev = rt.set_paradigm(target).await;
-                        let from = BusParadigmKind::from(prev.unwrap_or(ParadigmKind::ReAct));
-                        let to_bus = BusParadigmKind::from(target);
-                        let turn_id = rt.session_id().await;
-                        (turn_id, from, to_bus)
-                    };
-                    let _ = bus.emit(EngineYield::ParadigmSwitch {
-                        turn_id,
-                        from,
-                        to: to_bus,
-                    });
-                    tracing::info!(
-                        ?to_bus,
-                        "Directive::SwitchParadigm applied — next turn starts under it"
+            // Issue #4: a panic anywhere in directive dispatch (agent loop,
+            // tool execution, 3-layer parser, context assembly, …) must NOT
+            // silently kill the pump task — every frontend would then freeze
+            // with neither a TurnComplete nor an Error yield. Catch the unwind
+            // per directive, surface it as an `EngineYield::Error`, and keep
+            // draining.
+            let outcome = AssertUnwindSafe(dispatch_directive(
+                directive,
+                rt.clone(),
+                interrupt_slot.clone(),
+                bus.clone(),
+            ))
+            .catch_unwind()
+            .await;
+            match outcome {
+                Ok(true) => {}      // directive handled — keep draining
+                Ok(false) => break, // Shutdown — stop the pump
+                Err(payload) => {
+                    let msg = panic_message(payload);
+                    tracing::error!(
+                        "directive pump caught a panic — surfacing as Error yield: {msg}"
                     );
+                    let _ = bus.emit(EngineYield::Error {
+                        recoverable: false,
+                        message: format!("Error: internal panic — {msg}"),
+                    });
                 }
-                Directive::UpdateConfig {
-                    plan_mode: Some(on),
-                } => {
-                    // Hot-sync session config. Currently just plan_mode (Plan
-                    // blocks tool execution); provider/model/memory overrides
-                    // are future fields. FIFO-ordered before any UserMessage,
-                    // so the next turn sees the new config. `plan_mode: None`
-                    // (leave unchanged) matches the catch-all below.
-                    rt.lock().await.set_plan_mode(on).await;
+            }
+        }
+    })
+}
+
+/// Dispatch a single directive against the runtime; returns `false` when the
+/// pump should stop (`Directive::Shutdown`), `true` otherwise.
+///
+/// The former body of the pump loop, extracted so `spawn_directive_pump` can
+/// wrap every directive in `catch_unwind` (issue #4 — a panicking directive
+/// must surface as an error yield, not a silently dead pump).
+async fn dispatch_directive<R: DirectiveRuntime>(
+    directive: Directive,
+    rt: Arc<Mutex<R>>,
+    interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
+    bus: Arc<InProcessBus>,
+) -> bool {
+    match directive {
+        Directive::UserMessage { content } => {
+            let task = extract_task(&content);
+            let result = {
+                let mut rt = rt.lock().await;
+                rt.run_turn(&task, interrupt_slot.clone()).await
+            };
+            if let Err(e) = result {
+                let err = e.to_string();
+                let _ = bus.emit(EngineYield::Error {
+                    recoverable: false,
+                    message: format!("Error: {err}"),
+                });
+                if err.contains("API error") {
+                    let _ = bus.emit(EngineYield::Error {
+                        recoverable: false,
+                        message: "Hint: check your ONEAI_API_KEY and ONEAI_BASE_URL.".to_string(),
+                    });
                 }
-                Directive::Compact { keep_recent_turns } => {
-                    // /compact: LLM-summarize the backend conversation in place.
-                    // Holds the session lock for the call (a concurrent
-                    // UserMessage blocks — same as the old direct path).
-                    let outcome = { rt.lock().await.compact(keep_recent_turns).await };
-                    let _ = match &outcome {
-                        Ok(o) if o.summary.is_empty() => bus.emit(EngineYield::CompactResult {
-                            summary: String::new(),
-                            removed_count: 0,
-                            retained: Vec::new(),
-                        }),
-                        Ok(o) => bus.emit(EngineYield::CompactResult {
-                            summary: o.summary.clone(),
-                            removed_count: o.removed_count,
-                            retained: o
-                                .retained
-                                .iter()
-                                .map(|(r, t)| (r.clone(), t.clone()))
-                                .collect(),
-                        }),
-                        Err(e) => bus.emit(EngineYield::Error {
-                            recoverable: false,
-                            message: format!("Error: {e}"),
-                        }),
-                    };
+            }
+            // Ok(summary) → BusObserver::on_complete already emitted
+            // TurnComplete; the !completed diagnostic is handled in
+            // the frontend's Complete arm.
+        }
+        Directive::SwitchParadigm { to } => {
+            // Frontend-forced paradigm switch. Persist it on the
+            // session (sticky across turns); the next run_turn
+            // materializes it at turn start. Emit ParadigmSwitch so the
+            // frontend reflects immediately.
+            let (turn_id, from, to_bus) = {
+                let mut rt = rt.lock().await;
+                let target = paradigm_from_bus(to);
+                let prev = rt.set_paradigm(target).await;
+                let from = BusParadigmKind::from(prev.unwrap_or(ParadigmKind::ReAct));
+                let to_bus = BusParadigmKind::from(target);
+                let turn_id = rt.session_id().await;
+                (turn_id, from, to_bus)
+            };
+            let _ = bus.emit(EngineYield::ParadigmSwitch {
+                turn_id,
+                from,
+                to: to_bus,
+            });
+            tracing::info!(
+                ?to_bus,
+                "Directive::SwitchParadigm applied — next turn starts under it"
+            );
+        }
+        Directive::UpdateConfig {
+            plan_mode: Some(on),
+        } => {
+            // Hot-sync session config. Currently just plan_mode (Plan
+            // blocks tool execution); provider/model/memory overrides
+            // are future fields. FIFO-ordered before any UserMessage,
+            // so the next turn sees the new config. `plan_mode: None`
+            // (leave unchanged) matches the catch-all below.
+            rt.lock().await.set_plan_mode(on).await;
+        }
+        Directive::Compact { keep_recent_turns } => {
+            // /compact: LLM-summarize the backend conversation in place.
+            // Holds the session lock for the call (a concurrent
+            // UserMessage blocks — same as the old direct path).
+            let outcome = { rt.lock().await.compact(keep_recent_turns).await };
+            let _ = match &outcome {
+                Ok(o) if o.summary.is_empty() => bus.emit(EngineYield::CompactResult {
+                    summary: String::new(),
+                    removed_count: 0,
+                    retained: Vec::new(),
+                }),
+                Ok(o) => bus.emit(EngineYield::CompactResult {
+                    summary: o.summary.clone(),
+                    removed_count: o.removed_count,
+                    retained: o
+                        .retained
+                        .iter()
+                        .map(|(r, t)| (r.clone(), t.clone()))
+                        .collect(),
+                }),
+                Err(e) => bus.emit(EngineYield::Error {
+                    recoverable: false,
+                    message: format!("Error: {e}"),
+                }),
+            };
+        }
+        Directive::InitProject {
+            format,
+            force,
+            no_llm,
+        } => {
+            // /init: generate a project-instruction file. Runs the
+            // probe/LLM synthesis WITHOUT the session lock (only the
+            // provider is borrowed under a short lock).
+            let fmt = format
+                .as_deref()
+                .and_then(|s| oneai_domain::project_info::ProjectInfoFormat::from_name(s).ok())
+                .unwrap_or_default();
+            let opts = oneai_domain::project_info::ProjectInfoOptions {
+                format: fmt,
+                force,
+                ..Default::default()
+            };
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let dir = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+            let provider: Option<Arc<dyn LlmProvider>> = if no_llm {
+                None
+            } else {
+                rt.lock().await.provider()
+            };
+            let result = match &provider {
+                Some(p) => {
+                    oneai_domain::project_info::generate_project_info_with_llm(&dir, &opts, &**p)
+                        .await
                 }
-                Directive::InitProject {
-                    format,
-                    force,
-                    no_llm,
-                } => {
-                    // /init: generate a project-instruction file. Runs the
-                    // probe/LLM synthesis WITHOUT the session lock (only the
-                    // provider is borrowed under a short lock).
-                    let fmt = format
-                        .as_deref()
-                        .and_then(|s| {
-                            oneai_domain::project_info::ProjectInfoFormat::from_name(s).ok()
-                        })
-                        .unwrap_or_default();
-                    let opts = oneai_domain::project_info::ProjectInfoOptions {
-                        format: fmt,
-                        force,
-                        ..Default::default()
-                    };
-                    let cwd =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let dir = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-                    let provider: Option<Arc<dyn LlmProvider>> = if no_llm {
-                        None
-                    } else {
-                        rt.lock().await.provider()
-                    };
-                    let result = match &provider {
-                        Some(p) => {
-                            oneai_domain::project_info::generate_project_info_with_llm(
-                                &dir, &opts, &**p,
-                            )
-                            .await
-                        }
-                        None => {
-                            oneai_domain::project_info::generate_project_info(&dir, &opts).await
-                        }
-                    };
-                    let format_label = opts.format.label().to_string();
-                    let msg = match &result {
+                None => oneai_domain::project_info::generate_project_info(&dir, &opts).await,
+            };
+            let format_label = opts.format.label().to_string();
+            let msg = match &result {
                         Ok(r) if r.skipped => format!(
                             "⊘ {} already exists — left untouched.\nRe-run `/init --force` to overwrite, or edit it directly.",
                             r.path.display()
@@ -321,98 +359,112 @@ pub fn spawn_directive_pump<R: DirectiveRuntime + 'static>(
                         }
                         Err(e) => format!("✗ /init failed: {}", e),
                     };
-                    let _ = bus.emit(EngineYield::InitResult { message: msg });
-                }
-                Directive::CreateSession { id, workspace } => {
-                    // Start a fresh session. `id` None ⇒ engine assigns; Some ⇒ bind.
-                    let new_id = { rt.lock().await.create_session(id, workspace).await };
-                    let _ = bus.emit(EngineYield::SessionCreated { id: new_id });
-                }
-                Directive::LoadSession { id } => {
-                    // Load a saved session by full id or unique short prefix
-                    // (issue #23: a bare short id resolved to an empty
-                    // conversation left the model amnesiac — resolve here, and
-                    // emit the message history so the frontend rebuilds).
-                    let (resolved, msgs) = { rt.lock().await.load_session(id.clone()).await };
-                    tracing::info!(
-                        "[LoadSession] requested={} resolved={} loaded_msgs={} (0 => not found / empty)",
-                        id,
-                        resolved,
-                        msgs.len()
-                    );
-                    let _ = bus.emit(EngineYield::SessionLoaded {
-                        id: resolved,
-                        messages: msgs,
-                    });
-                }
-                Directive::ClearSession => {
-                    // Clear the live conversation — fresh backend, new id.
-                    let new_id = { rt.lock().await.reset_session().await };
-                    let _ = bus.emit(EngineYield::SessionCleared { id: new_id });
-                }
-                Directive::DeleteSession { id } => {
-                    let result = { rt.lock().await.delete_session(id.clone()).await };
-                    let _ = match result {
-                        Ok(()) => bus.emit(EngineYield::SessionDeleted { id }),
-                        Err(e) => bus.emit(EngineYield::Error {
-                            recoverable: false,
-                            message: format!("Error: {e}"),
-                        }),
-                    };
-                }
-                Directive::Shutdown => {
-                    tracing::info!("Directive::Shutdown received — stopping directive pump");
-                    break;
-                }
-                // ── Group-chat directives (P4) ────────────────────────────
-                // Drive a GroupChatSession through `GroupChatBusObserver`,
-                // emitting speaker-tagged yields. `Init` never reaches the
-                // pump (the in-process c_facade intercepts it to build the
-                // engine+bus+pump); a stray `Init` from a sidecar is ignored.
-                Directive::Init { .. } => {
-                    tracing::warn!(
-                        "Directive::Init reached the pump — it should be intercepted by the \
+            let _ = bus.emit(EngineYield::InitResult { message: msg });
+        }
+        Directive::CreateSession { id, workspace } => {
+            // Start a fresh session. `id` None ⇒ engine assigns; Some ⇒ bind.
+            let new_id = { rt.lock().await.create_session(id, workspace).await };
+            let _ = bus.emit(EngineYield::SessionCreated { id: new_id });
+        }
+        Directive::LoadSession { id } => {
+            // Load a saved session by full id or unique short prefix
+            // (issue #23: a bare short id resolved to an empty
+            // conversation left the model amnesiac — resolve here, and
+            // emit the message history so the frontend rebuilds).
+            let (resolved, msgs) = { rt.lock().await.load_session(id.clone()).await };
+            tracing::info!(
+                "[LoadSession] requested={} resolved={} loaded_msgs={} (0 => not found / empty)",
+                id,
+                resolved,
+                msgs.len()
+            );
+            let _ = bus.emit(EngineYield::SessionLoaded {
+                id: resolved,
+                messages: msgs,
+            });
+        }
+        Directive::ClearSession => {
+            // Clear the live conversation — fresh backend, new id.
+            let new_id = { rt.lock().await.reset_session().await };
+            let _ = bus.emit(EngineYield::SessionCleared { id: new_id });
+        }
+        Directive::DeleteSession { id } => {
+            let result = { rt.lock().await.delete_session(id.clone()).await };
+            let _ = match result {
+                Ok(()) => bus.emit(EngineYield::SessionDeleted { id }),
+                Err(e) => bus.emit(EngineYield::Error {
+                    recoverable: false,
+                    message: format!("Error: {e}"),
+                }),
+            };
+        }
+        Directive::Shutdown => {
+            tracing::info!("Directive::Shutdown received — stopping directive pump");
+            return false;
+        }
+        // ── Group-chat directives (P4) ────────────────────────────
+        // Drive a GroupChatSession through `GroupChatBusObserver`,
+        // emitting speaker-tagged yields. `Init` never reaches the
+        // pump (the in-process c_facade intercepts it to build the
+        // engine+bus+pump); a stray `Init` from a sidecar is ignored.
+        Directive::Init { .. } => {
+            tracing::warn!(
+                "Directive::Init reached the pump — it should be intercepted by the \
                          in-process c_facade; ignoring"
-                    );
-                }
-                Directive::StartGroupChat { scenario } => {
-                    let result = rt.lock().await.start_group(scenario).await;
-                    if let Err(e) = result {
-                        let _ = bus.emit(EngineYield::Error {
-                            recoverable: true,
-                            message: format!("group chat start failed: {e}"),
-                        });
-                    }
-                }
-                Directive::GroupStart => {
-                    let result = rt.lock().await.group_start().await;
-                    if let Err(e) = result {
-                        let _ = bus.emit(EngineYield::Error {
-                            recoverable: true,
-                            message: format!("group start failed: {e}"),
-                        });
-                    }
-                }
-                Directive::GroupUserMessage { user_input } => {
-                    let result = rt.lock().await.group_run_task(&user_input).await;
-                    if let Err(e) = result {
-                        let _ = bus.emit(EngineYield::Error {
-                            recoverable: true,
-                            message: format!("group run_task failed: {e}"),
-                        });
-                    }
-                }
-                Directive::GroupSetScriptedOrder { order } => {
-                    rt.lock().await.group_set_scripted_order(order).await;
-                }
-                // Approve / Interrupt are handled by the bus itself and never
-                // reach the directive stream. A future variant the pump doesn't
-                // act on yet is ignored (newer bus crate than this binary).
-                Directive::Approve { .. } | Directive::Interrupt { .. } => {}
-                _ => {}
+            );
+        }
+        Directive::StartGroupChat { scenario } => {
+            let result = rt.lock().await.start_group(scenario).await;
+            if let Err(e) = result {
+                let _ = bus.emit(EngineYield::Error {
+                    recoverable: true,
+                    message: format!("group chat start failed: {e}"),
+                });
             }
         }
-    })
+        Directive::GroupStart => {
+            let result = rt.lock().await.group_start().await;
+            if let Err(e) = result {
+                let _ = bus.emit(EngineYield::Error {
+                    recoverable: true,
+                    message: format!("group start failed: {e}"),
+                });
+            }
+        }
+        Directive::GroupUserMessage { user_input } => {
+            let result = rt.lock().await.group_run_task(&user_input).await;
+            if let Err(e) = result {
+                let _ = bus.emit(EngineYield::Error {
+                    recoverable: true,
+                    message: format!("group run_task failed: {e}"),
+                });
+            }
+        }
+        Directive::GroupSetScriptedOrder { order } => {
+            rt.lock().await.group_set_scripted_order(order).await;
+        }
+        // Approve / Interrupt are handled by the bus itself and never
+        // reach the directive stream. A future variant the pump doesn't
+        // act on yet is ignored (newer bus crate than this binary).
+        Directive::Approve { .. } | Directive::Interrupt { .. } => {}
+        _ => {}
+    }
+    true
+}
+
+/// Extract a human-readable message from a caught panic payload.
+///
+/// `panic!("literal")` payloads are `&str`, `panic!("{}", x)` /
+/// `format!`-style payloads are `String`; anything else gets a placeholder
+/// (the panic was already caught — never panic again on a weird payload).
+pub fn panic_message(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// Extract the task string from a `UserMessage`'s content blocks. Joins all
@@ -434,6 +486,105 @@ pub fn extract_task(content: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `DirectiveRuntime` whose `run_turn` always panics — simulates the
+    /// issue #4 crash class (unwrap/out-of-bounds/debug-overflow deep in the
+    /// agent loop mid-turn).
+    struct PanickingRuntime;
+
+    #[async_trait]
+    impl DirectiveRuntime for PanickingRuntime {
+        async fn run_turn(
+            &mut self,
+            _task: &str,
+            _interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
+        ) -> Result<BusTurnSummary> {
+            panic!("simulated mid-turn panic");
+        }
+        async fn set_paradigm(&mut self, _to: ParadigmKind) -> Option<ParadigmKind> {
+            None
+        }
+        async fn set_plan_mode(&mut self, _on: bool) {}
+        async fn compact(&mut self, _keep_recent_turns: usize) -> Result<CompactOutcome> {
+            Err(oneai_core::error::OneAIError::Agent("unused".into()))
+        }
+        fn provider(&self) -> Option<Arc<dyn LlmProvider>> {
+            None
+        }
+        async fn create_session(
+            &mut self,
+            _id: Option<String>,
+            _workspace: Option<String>,
+        ) -> String {
+            "post-panic-session".to_string()
+        }
+        async fn load_session(&mut self, id: String) -> (String, Vec<Message>) {
+            (id, Vec::new())
+        }
+        async fn reset_session(&mut self) -> String {
+            "reset".to_string()
+        }
+        async fn delete_session(&mut self, _id: String) -> Result<()> {
+            Ok(())
+        }
+        async fn session_id(&mut self) -> String {
+            "panicking".to_string()
+        }
+    }
+
+    /// Issue #4 regression: a panic in directive dispatch must surface as an
+    /// `EngineYield::Error` AND leave the pump alive for the next directive
+    /// (the old behavior: the spawned task died silently, frontends froze).
+    #[tokio::test]
+    async fn pump_survives_panicking_directive_and_surfaces_error() {
+        let (bus, directive_rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let rt = Arc::new(Mutex::new(PanickingRuntime));
+        let slot = Arc::new(Mutex::new(None));
+        let mut yields = bus.subscribe_yields();
+        let _handle = spawn_directive_pump(directive_rx, rt, slot, bus.clone());
+
+        // A UserMessage whose turn panics → Error yield, not a dead pump.
+        bus.submit(Directive::UserMessage {
+            content: vec![ContentBlock::Text {
+                text: "trigger panic".into(),
+            }],
+        })
+        .await
+        .unwrap();
+        match yields.recv().await.expect("yield after panicking turn") {
+            EngineYield::Error { message, .. } => {
+                assert!(
+                    message.contains("panic") && message.contains("simulated mid-turn"),
+                    "Error yield must carry the panic detail, got: {message}"
+                );
+            }
+            other => panic!("expected EngineYield::Error, got {other:?}"),
+        }
+
+        // The pump must still be draining — the next directive works.
+        bus.submit(Directive::CreateSession {
+            id: None,
+            workspace: None,
+        })
+        .await
+        .unwrap();
+        match yields.recv().await.expect("yield after recovery") {
+            EngineYield::SessionCreated { id } => assert_eq!(id, "post-panic-session"),
+            other => panic!("expected SessionCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads() {
+        let str_payload = std::panic::catch_unwind(|| panic!("plain literal")).unwrap_err();
+        assert_eq!(panic_message(str_payload), "plain literal");
+        let string_payload =
+            std::panic::catch_unwind(|| panic!("{}", format!("formatted {}", 42))).unwrap_err();
+        assert_eq!(panic_message(string_payload), "formatted 42");
+        let other_payload = std::panic::catch_unwind(|| std::panic::panic_any(7u32)).unwrap_err();
+        assert_eq!(panic_message(other_payload), "unknown panic payload");
+    }
 
     #[test]
     fn extract_task_joins_text_blocks() {

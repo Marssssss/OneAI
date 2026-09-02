@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use futures::FutureExt; // `catch_unwind` for the long-running FFI entries
+
 use oneai_agent::AgentLoop;
 use oneai_core::traits::Tool;
 
@@ -230,20 +232,45 @@ impl OneAISession {
             task.len()
         );
         let observer = CallbackObserver::new(callback);
-        let mut inner = self.inner.lock().await;
-        match inner
-            .run_agent(&task, &observer, self.interrupt_slot.clone())
+        // Issue #4: `run_agent` drives the full agent loop (tools,
+        // sub-agents, 3-layer parser, context assembly) — any panic in there
+        // must NOT unwind through the UniFFI extern boundary (UB → process
+        // abort). Catch it and surface it as a normal error result + event.
+        let outcome = {
+            let mut inner = self.inner.lock().await;
+            std::panic::AssertUnwindSafe(inner.run_agent(
+                &task,
+                &observer,
+                self.interrupt_slot.clone(),
+            ))
+            .catch_unwind()
             .await
-        {
-            Ok(_result) => {
+        };
+        match outcome {
+            Ok(Ok(_result)) => {
                 tracing::info!("run_task end ok id={}", self.session_id);
                 Ok(())
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("run_task end err id={} err={:?}", self.session_id, e);
                 // Surface the error both as a return value and as an event,
                 // so a foreign UI that only listens to events still sees it.
                 let view = OneAIErrorView::from(e);
+                observer.emit(crate::types::ChatEventView::Error {
+                    message: format!("{:?}", view),
+                    speaker: None,
+                });
+                Err(view)
+            }
+            Err(payload) => {
+                let msg = oneai_app::panic_message(payload);
+                tracing::error!(
+                    "run_task caught a panic id={} panic={}",
+                    self.session_id,
+                    msg
+                );
+                // Same dual surfacing as the Err arm above.
+                let view = crate::types::panic_error_view(msg);
                 observer.emit(crate::types::ChatEventView::Error {
                     message: format!("{:?}", view),
                     speaker: None,
@@ -490,6 +517,97 @@ mod tests {
             "expected a Complete event containing 'Hello', got: {:?}",
             events
         );
+    }
+
+    // ─── Issue #4: a panic deep in run_task must surface as an error,
+    //     not abort the process at the FFI boundary ────────────────────
+
+    /// A provider that panics on every inference — simulates the issue #4
+    /// crash class (an unwrap / out-of-bounds panic deep inside a long turn).
+    struct PanickingProvider {
+        config: oneai_core::ModelConfig,
+    }
+
+    #[async_trait::async_trait]
+    impl oneai_core::traits::LlmProvider for PanickingProvider {
+        async fn infer(
+            &self,
+            _req: oneai_core::InferenceRequest,
+        ) -> std::result::Result<oneai_core::InferenceResponse, oneai_core::OneAIError> {
+            panic!("simulated deep engine panic");
+        }
+        async fn infer_stream(
+            &self,
+            _req: oneai_core::InferenceRequest,
+        ) -> std::result::Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+            oneai_core::OneAIError,
+        > {
+            panic!("simulated deep engine panic");
+        }
+        fn capabilities(&self) -> oneai_core::ModelCapability {
+            oneai_core::ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: true,
+                supports_tools: true,
+                context_window_size: 128_000,
+                max_output_tokens: 4096,
+            }
+        }
+        fn config(&self) -> &oneai_core::ModelConfig {
+            &self.config
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_task_catches_panic_returns_error_view() {
+        let provider = Arc::new(PanickingProvider {
+            config: oneai_core::ModelConfig::openai_compatible(
+                "sk-test".into(),
+                "https://api.test".into(),
+                "panic-model".into(),
+            ),
+        });
+        let app_inner = oneai_app::AppBuilder::new()
+            .provider(provider)
+            .noop_interaction_gate()
+            .default_parser()
+            .build()
+            .await
+            .expect("build");
+        let app = OneAIApp {
+            inner: Arc::new(app_inner),
+        };
+        let session = app.create_session();
+        let cb = Arc::new(CollectingCallback {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+
+        // The panic must surface as Err(...) — not abort the process.
+        let err = session
+            .run_task("trigger the panic".to_string(), cb.clone())
+            .await
+            .expect_err("panicking provider must yield an error view, not abort");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("internal panic") && msg.contains("simulated deep engine panic"),
+            "error view must carry the panic detail: {msg}"
+        );
+
+        // An Error event must also ride the callback for event-only UIs.
+        let events = cb.events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::types::ChatEventView::Error { message, .. }
+                    if message.contains("panic")
+            )),
+            "expected an Error chat event, got: {:?}",
+            events
+        );
+
+        // The session stays usable afterwards (mutex released cleanly).
+        assert!(!session.session_id().is_empty());
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ OneAI 的跨平台不是 WebView 套壳，而是让同一份 Rust 引擎逻辑�
 
 **UniFFI 绑定（Kotlin/Swift）。** View 类型（`RiskLevelView`/`ApprovalRequestView`/`ChatEventView` 等）用 UniFFI derive 宏；trait 是 Rust-only（外语用具体实现）；工厂方法造预配置实例；`AppBuilderWrapper`/`OneAIApp` 提供地道外语 API。
 
-**手写 extern C bus pump（3 符号）。** 旧的 29 符号全 `OneAIApp` C facade（`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…）已在 P4 塌成 3 符号 bus pump：`oneai_submit_directive(json)`（提交 `Directive` JSON，首次 `Directive::Init{config}` 建引擎+bus+pump）/`oneai_poll_yield()`（取下一条 `EngineYield` JSON，thread-local 缓冲、勿 free）/`oneai_shutdown()`。in-process 端只说 bus 协议，与 sidecar 同协议、不同传输（C ABI 直连 vs JSON-RPC over wire）。> `bindings/c/oneai_c.h` 仍记旧 29 符号、**待清理对齐**到 3 符号；Windows C# 当前 P/Invoke 仍是旧符号（stale，见 §5）。
+**手写 extern C bus pump（3 符号）。** 旧的 29 符号全 `OneAIApp` C facade（`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…）已在 P4 塌成 3 符号 bus pump：`oneai_submit_directive(json)`（提交 `Directive` JSON，首次 `Directive::Init{config}` 建引擎+bus+pump）/`oneai_poll_yield()`（取下一条 `EngineYield` JSON，thread-local 缓冲、勿 free）/`oneai_shutdown()`。in-process 端只说 bus 协议，与 sidecar 同协议、不同传输（C ABI 直连 vs JSON-RPC over wire）。三入口均包 `catch_unwind` 恐慌护栏（issue #4）——panic 不再跨 FFI 边界 abort 进程，而是转成错误返回码（submit=7/poll=null/shutdown=2）+ 引擎已建时经 `EngineYield::Error` 浮现给前端。> `bindings/c/oneai_c.h` 仍记旧 29 符号、**待清理对齐**到 3 符号；Windows C# 当前 P/Invoke 仍是旧符号（stale，见 §5）。
 
 **原生 InteractionGate。** `PlatformInteractionGate` 各端实现：macOS `MacOSInteractionGate`（NSAlert）、Windows `WindowsInteractionGate`（MessageBox/AlertDialog）、Linux `LinuxCliInteractionGate`（stdin/stdout）、Android `AndroidInteractionGate`（AlertDialog，JNI 桥）、iOS `IOSInteractionGate`（UIController，callback bridge）、HarmonyOS `HarmonyInteractionGate`（CommonDialog，callback bridge）。
 
@@ -164,7 +164,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 | `OneAIApp` + `AppSession` wrapper | `crates/oneai-uniffi/src/app.rs` |
 | GroupChat FFI | `crates/oneai-uniffi/src/group_chat.rs` |
 | `ChatEventCallback` + `ChatEventView` | `crates/oneai-uniffi/src/callback.rs:46` |
-| 3 符号 C-ABI bus pump（`oneai_submit_directive`/`oneai_poll_yield`/`oneai_shutdown`）| `crates/oneai-uniffi/src/c_facade.rs`（`:437`/`:490`/`:522`）|
+| 3 符号 C-ABI bus pump（`oneai_submit_directive`/`oneai_poll_yield`/`oneai_shutdown`）| `crates/oneai-uniffi/src/c_facade.rs`（`:503`/`:560`/`:593`）|
 | C 头文件（旧 29 符号，待对齐到 3 符号）| `bindings/c/oneai_c.h` |
 | View 类型 | `crates/oneai-uniffi/src/types.rs` |
 | 桌面 Gate（macOS NSAlert / Windows MessageBox / Linux CLI）| `crates/oneai-platform-desktop/src/{macos,windows,linux,bridge_common}.rs` |

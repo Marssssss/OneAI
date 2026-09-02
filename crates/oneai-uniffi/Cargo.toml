@@ -20,6 +20,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 uniffi = { workspace = true, features = ["tokio", "cli"] }
 async-trait = { workspace = true }
+futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

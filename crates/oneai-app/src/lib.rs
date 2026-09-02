@@ -25,7 +25,7 @@ pub mod session;
 pub mod session_event_log;
 
 pub use builder::*;
-pub use directive_pump::{spawn_directive_pump, DirectiveRuntime};
+pub use directive_pump::{panic_message, spawn_directive_pump, DirectiveRuntime};
 pub use reloader::*;
 pub use session::*;
 
