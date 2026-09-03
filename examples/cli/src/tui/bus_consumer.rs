@@ -36,9 +36,12 @@ impl DirectiveRuntime for SessionState {
     async fn run_turn(
         &mut self,
         task: &str,
+        content: Vec<oneai_core::ContentBlock>,
         interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
     ) -> Result<oneai_bus::BusTurnSummary> {
-        self.session.run_turn_via_bus(task, interrupt_slot).await
+        self.session
+            .run_turn_via_bus(task, content, interrupt_slot)
+            .await
     }
 
     async fn set_paradigm(&mut self, to: ParadigmKind) -> Option<ParadigmKind> {

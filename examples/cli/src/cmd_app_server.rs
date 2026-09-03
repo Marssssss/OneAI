@@ -110,9 +110,10 @@ impl DirectiveRuntime for AppServerRuntime {
     async fn run_turn(
         &mut self,
         task: &str,
+        content: Vec<oneai_core::ContentBlock>,
         slot: Arc<Mutex<Option<AgentLoop>>>,
     ) -> Result<oneai_bus::BusTurnSummary> {
-        self.session.run_turn_via_bus(task, slot).await
+        self.session.run_turn_via_bus(task, content, slot).await
     }
 
     async fn set_paradigm(

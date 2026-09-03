@@ -102,9 +102,46 @@ impl OllamaProvider {
                 Role::Tool => "tool",
                 _ => "user", // #[non_exhaustive] catch-all
             };
+            // Multimodal (vision) messages: Ollama's OpenAI-compatible
+            // endpoint accepts the same multipart content array as OpenAI.
+            // Only emit it when the message actually carries images — the
+            // plain string shape stays byte-stable for text-only turns.
+            let has_images = msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }));
+            let content = if msg.role != Role::Tool && has_images {
+                let parts: Vec<Value> = msg
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        })),
+                        ContentBlock::Image { mime_type, data } => {
+                            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                            Some(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!(
+                                        "data:{};base64,{}",
+                                        mime_type,
+                                        BASE64.encode(data)
+                                    ),
+                                },
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                serde_json::json!(parts)
+            } else {
+                serde_json::json!(text)
+            };
             messages.push(serde_json::json!({
                 "role": role,
-                "content": text,
+                "content": content,
             }));
         }
 
@@ -662,5 +699,68 @@ mod constrained_tests {
     fn to_ollama_request_omits_format_when_unset() {
         let body = provider().to_ollama_request(&request(None));
         assert!(body.get("format").is_none());
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use oneai_core::{Conversation, InferenceRequest, Role};
+    use serde_json::json;
+
+    fn provider() -> OllamaProvider {
+        OllamaProvider::new(ModelConfig::ollama("llama3".to_string()))
+    }
+
+    fn request(conv: Conversation) -> InferenceRequest {
+        InferenceRequest {
+            conversation: conv,
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// A user message carrying an image block serializes as the OpenAI-style
+    /// multipart content array on Ollama's OpenAI-compatible endpoint too.
+    #[test]
+    fn to_ollama_request_emits_multipart_for_image_messages() {
+        let mut conv = Conversation::new();
+        conv.add_message(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/jpeg".to_string(),
+                    data: vec![9, 8, 7],
+                },
+            ],
+            metadata: std::collections::HashMap::new(),
+        });
+        let body = provider().to_ollama_request(&request(conv));
+        let parts = body["messages"][0]["content"]
+            .as_array()
+            .expect("multipart content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], json!({"type": "text", "text": "describe this"}));
+        assert_eq!(parts[1]["type"], "image_url");
+        // base64([9,8,7]) == "CQgH"
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,CQgH");
+    }
+
+    /// Text-only turns keep the plain string content shape.
+    #[test]
+    fn to_ollama_request_keeps_string_for_text_only() {
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("plain text turn"));
+        let body = provider().to_ollama_request(&request(conv));
+        assert_eq!(body["messages"][0]["content"], json!("plain text turn"));
     }
 }

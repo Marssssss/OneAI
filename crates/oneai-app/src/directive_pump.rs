@@ -103,9 +103,15 @@ pub fn session_info_to_bus(s: oneai_core::SessionInfo) -> BusSessionInfo {
 pub trait DirectiveRuntime: Send {
     /// Run one agent turn driven by the bus. Emits the intermediate yields
     /// via the `BusObserver` wired inside; returns the projected summary.
+    ///
+    /// `task` is the text extracted from the directive's content blocks
+    /// ([`extract_task`]); `content` is the full block payload (multimodal —
+    /// text + attached images), from which the loop builds the turn's user
+    /// message. Text-only runtimes may ignore `content` and use `task`.
     async fn run_turn(
         &mut self,
         task: &str,
+        content: Vec<ContentBlock>,
         interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
     ) -> Result<BusTurnSummary>;
 
@@ -248,7 +254,11 @@ async fn dispatch_directive<R: DirectiveRuntime>(
             let task = extract_task(&content);
             let result = {
                 let mut rt = rt.lock().await;
-                rt.run_turn(&task, interrupt_slot.clone()).await
+                // Forward the full block payload (multimodal: text + attached
+                // images) — `extract_task` only feeds the string-typed APIs
+                // (recall, task anchor, working state); the images ride along
+                // in `content` to the loop's user message.
+                rt.run_turn(&task, content, interrupt_slot.clone()).await
             };
             if let Err(e) = result {
                 let err = e.to_string();
@@ -531,6 +541,7 @@ mod tests {
         async fn run_turn(
             &mut self,
             _task: &str,
+            _content: Vec<ContentBlock>,
             _interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
         ) -> Result<BusTurnSummary> {
             panic!("simulated mid-turn panic");
@@ -637,6 +648,7 @@ mod tests {
             async fn run_turn(
                 &mut self,
                 _task: &str,
+                _content: Vec<ContentBlock>,
                 _interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
             ) -> Result<BusTurnSummary> {
                 Err(oneai_core::error::OneAIError::Agent("unused".into()))
@@ -726,6 +738,111 @@ mod tests {
             },
         ];
         assert_eq!(extract_task(&blocks), "hello\nworld");
+    }
+
+    /// `Directive::UserMessage` forwards the FULL content-block payload
+    /// (multimodal text + image) to the runtime — `extract_task` feeds only
+    /// the string-typed APIs (recall / task anchor / working state), so the
+    /// image blocks must ride along in `content`. Regression guard for the
+    /// webUI attachment path (model "never received" the attached image).
+    #[tokio::test]
+    async fn user_message_forwards_image_blocks_to_runtime() {
+        struct CapturingRuntime {
+            captured: Arc<Mutex<Vec<ContentBlock>>>,
+        }
+        #[async_trait]
+        impl DirectiveRuntime for CapturingRuntime {
+            async fn run_turn(
+                &mut self,
+                _task: &str,
+                content: Vec<ContentBlock>,
+                _interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
+            ) -> Result<BusTurnSummary> {
+                *self.captured.lock().await = content;
+                Ok(BusTurnSummary {
+                    final_answer: String::new(),
+                    iterations: 1,
+                    completed: true,
+                    active_paradigm: BusParadigmKind::ReAct,
+                })
+            }
+            async fn set_paradigm(&mut self, _to: ParadigmKind) -> Option<ParadigmKind> {
+                None
+            }
+            async fn set_plan_mode(&mut self, _on: bool) {}
+            async fn compact(&mut self, _keep: usize) -> Result<CompactOutcome> {
+                Err(oneai_core::error::OneAIError::Agent("unused".into()))
+            }
+            fn provider(&self) -> Option<Arc<dyn LlmProvider>> {
+                None
+            }
+            async fn create_session(
+                &mut self,
+                _id: Option<String>,
+                _workspace: Option<String>,
+            ) -> String {
+                String::new()
+            }
+            async fn load_session(&mut self, id: String) -> (String, Vec<Message>) {
+                (id, Vec::new())
+            }
+            async fn reset_session(&mut self) -> String {
+                String::new()
+            }
+            async fn delete_session(&mut self, _id: String) -> Result<()> {
+                Ok(())
+            }
+            async fn session_id(&mut self) -> String {
+                String::new()
+            }
+        }
+
+        let (bus, directive_rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let rt = Arc::new(Mutex::new(CapturingRuntime {
+            captured: captured.clone(),
+        }));
+        let slot = Arc::new(Mutex::new(None));
+        let _handle = spawn_directive_pump(directive_rx, rt, slot, bus.clone());
+
+        bus.submit(Directive::UserMessage {
+            content: vec![
+                ContentBlock::Text {
+                    text: "描述下这张图片".into(),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/png".into(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+        // The pump processes directives on its own task — poll until the
+        // capture lands (bounded so a regression fails fast, not hangs).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            if !captured.lock().await.is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pump did not deliver the UserMessage to the runtime in time"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 2, "both blocks must survive the pump");
+        match &captured[1] {
+            ContentBlock::Image { mime_type, data } => {
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(data, &vec![1u8, 2, 3]);
+            }
+            other => panic!("expected the image block intact, got {other:?}"),
+        }
     }
 
     #[test]

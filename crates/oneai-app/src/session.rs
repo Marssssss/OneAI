@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::fmt::Write as _;
 
 use oneai_core::error::Result;
-use oneai_core::{ContextManager, Conversation, MemoryEntry, Message};
+use oneai_core::{ContentBlock, ContextManager, Conversation, MemoryEntry, Message};
 
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
@@ -1009,6 +1009,22 @@ impl AppSession {
         observer: &dyn AgentLoopObserver,
         interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     ) -> Result<AgentLoopResult> {
+        self.run_agent_with_content(task, Vec::new(), observer, interrupt_slot)
+            .await
+    }
+
+    /// Like [`AppSession::run_agent`], but the turn's user message carries the
+    /// caller's full content blocks (multimodal — text + images from a
+    /// frontend attachment) instead of just the `task` string. An empty
+    /// `content` falls back to a plain text message built from `task`, so
+    /// text-only callers are unaffected.
+    pub async fn run_agent_with_content(
+        &mut self,
+        task: &str,
+        content: Vec<ContentBlock>,
+        observer: &dyn AgentLoopObserver,
+        interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    ) -> Result<AgentLoopResult> {
         // Bind the session's workspace as the active cwd for this turn — the
         // shell tool's working_dir, the Seatbelt write-allowlist, file-ops
         // roots, and the "Working Directory:" context all resolve off it.
@@ -1611,7 +1627,7 @@ impl AppSession {
             .map(|f| f.importance)
             .sum::<f32>();
         let result = agent_loop
-            .run_with_conversation(conversation, task, observer)
+            .run_with_conversation_with_content(conversation, task, content, observer)
             .await;
 
         // Clear the interrupt slot now that the run is over.
@@ -1781,9 +1797,15 @@ impl AppSession {
     /// `TurnComplete` after; the `BusObserver` emits the intermediate yields
     /// (`IterationStart` / `StreamChunk` / `ToolCalls` / `ToolResult` / etc.)
     /// during the turn. Returns the projected `BusTurnSummary`.
+    ///
+    /// `content` is the turn's full content-block payload from the frontend
+    /// (multimodal — text + attached images); the loop builds the turn's user
+    /// message from it. An empty `content` falls back to a text-only message
+    /// built from `task`.
     pub async fn run_turn_via_bus(
         &mut self,
         task: &str,
+        content: Vec<ContentBlock>,
         interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     ) -> Result<oneai_bus::BusTurnSummary> {
         use oneai_agent::BusObserver;
@@ -1815,7 +1837,9 @@ impl AppSession {
         // their completion sink needs the *delegating* turn's id). Cleared
         // after the turn so a stale value never leaks into a later turn.
         self.current_turn_id = Some(turn_id.clone());
-        let result = self.run_agent(task, &observer, interrupt_slot).await;
+        let result = self
+            .run_agent_with_content(task, content, &observer, interrupt_slot)
+            .await;
         self.current_turn_id = None;
         let result = result?;
 

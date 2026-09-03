@@ -209,10 +209,50 @@ impl OpenAIProvider {
                 }
             };
 
+            // Multimodal (vision) messages — a user message carrying Image
+            // blocks must serialize as OpenAI's multipart content array, or
+            // the model never sees the image (the old text-only join silently
+            // dropped them). Emitted ONLY when the message actually carries
+            // images: text-only messages keep the plain string shape, which is
+            // byte-stable (prompt-prefix caching) and required by strict
+            // providers (智谱GLM, 阿里百炼).
+            let has_images = msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }));
+            if msg.role != Role::Tool && has_images {
+                let parts: Vec<Value> = msg
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        })),
+                        ContentBlock::Image { mime_type, data } => {
+                            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                            Some(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!(
+                                        "data:{};base64,{}",
+                                        mime_type,
+                                        BASE64.encode(data)
+                                    ),
+                                },
+                            }))
+                        }
+                        // ToolCall / ToolResult / Thinking / File don't ride
+                        // along in a multipart user message.
+                        _ => None,
+                    })
+                    .collect();
+                openai_msg["content"] = Value::Array(parts);
+            }
             // Set content field — MUST be present for all message types.
             // For assistant messages with tool_calls but no text: content = null.
             // For other messages: content = text string.
-            if msg.role == Role::Assistant && has_tool_calls && text_content.is_none() {
+            else if msg.role == Role::Assistant && has_tool_calls && text_content.is_none() {
                 // Assistant message has tool calls but no text content.
                 // OpenAI format requires content: null (not absent or empty string "").
                 // Some providers (智谱GLM, 阿里百炼) reject requests where content
@@ -1719,6 +1759,74 @@ mod tests {
         }
 
         assert!(body.get("stream_options").is_some());
+    }
+
+    /// A user message carrying an image block must serialize as OpenAI's
+    /// multipart content array (`text` + `image_url` with a base64 data URI)
+    /// — the text-only join used to drop the image, so the model never saw
+    /// webUI attachments.
+    #[test]
+    fn test_user_message_with_image_emits_multipart_content() {
+        let provider = make_provider();
+        let mut conv = Conversation::new();
+        conv.add_message(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "描述下这张图片".to_string(),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/png".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+            metadata: std::collections::HashMap::new(),
+        });
+        let req = InferenceRequest {
+            conversation: conv,
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: HashMap::new(),
+        };
+
+        let body = provider.to_openai_request(&req);
+        let content = &body["messages"][0]["content"];
+        let parts = content.as_array().expect("multipart content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "描述下这张图片");
+        assert_eq!(parts[1]["type"], "image_url");
+        // base64([1,2,3]) == "AQID"
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AQID");
+    }
+
+    /// Text-only messages keep the plain string content shape — byte-stable
+    /// for prompt-prefix caching and required by strict providers.
+    #[test]
+    fn test_user_message_text_only_keeps_string_content() {
+        let provider = make_provider();
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("plain text turn"));
+        let req = InferenceRequest {
+            conversation: conv,
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: HashMap::new(),
+        };
+
+        let body = provider.to_openai_request(&req);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content, &Value::String("plain text turn".to_string()));
     }
 }
 

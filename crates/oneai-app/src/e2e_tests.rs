@@ -481,6 +481,7 @@ async fn e2e_bus_driven_turn_emits_yields() {
     let summary = session
         .run_turn_via_bus(
             "What is the answer?",
+            Vec::new(),
             Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
@@ -540,7 +541,11 @@ async fn e2e_bus_forced_paradigm_activates_next_turn() {
 
     let mut sub = bus.subscribe_yields();
     let summary = session
-        .run_turn_via_bus("decompose this", Arc::new(tokio::sync::Mutex::new(None)))
+        .run_turn_via_bus(
+            "decompose this",
+            Vec::new(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
         .await
         .unwrap();
     assert!(summary.completed);

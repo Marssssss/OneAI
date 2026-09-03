@@ -820,6 +820,18 @@ impl LoopState {
     /// This preserves prior conversation history (multi-turn context)
     /// while appending the new user input as the latest message.
     pub fn from_conversation(conversation: Conversation, task: &str) -> Self {
+        Self::from_conversation_with_content(conversation, task, Vec::new())
+    }
+
+    /// Like [`LoopState::from_conversation`], but the new user message carries
+    /// the caller's full content blocks (multimodal — text + images). An empty
+    /// `content` falls back to a plain text message built from `task`, so
+    /// text-only callers are unaffected.
+    pub fn from_conversation_with_content(
+        conversation: Conversation,
+        task: &str,
+        content: Vec<ContentBlock>,
+    ) -> Self {
         let mut conv = conversation;
         // The task anchor must stay pinned to the session's FIRST user request,
         // not the current turn's message — a changing anchor sits ahead of the
@@ -842,7 +854,18 @@ impl LoopState {
             m.metadata
                 .remove(crate::context_assembler::CURRENT_TURN_KEY);
         }
-        let mut user_msg = Message::user(task.to_string());
+        // Multimodal user message: use the caller's content blocks verbatim
+        // (text + images) when provided; fall back to the task string for
+        // text-only callers.
+        let mut user_msg = if content.is_empty() {
+            Message::user(task.to_string())
+        } else {
+            Message {
+                role: Role::User,
+                content,
+                metadata: std::collections::HashMap::new(),
+            }
+        };
         user_msg.metadata.insert(
             crate::context_assembler::CURRENT_TURN_KEY.to_string(),
             "1".to_string(),
@@ -1837,7 +1860,22 @@ impl AgentLoop {
         task: &str,
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
-        let mut state = LoopState::from_conversation(conversation, task);
+        self.run_with_conversation_with_content(conversation, task, Vec::new(), observer)
+            .await
+    }
+
+    /// Like [`AgentLoop::run_with_conversation`], but the turn's user message
+    /// carries the caller's full content blocks (multimodal — text + images)
+    /// instead of just the `task` string. An empty `content` falls back to a
+    /// plain text message built from `task` (the text-only behavior).
+    pub async fn run_with_conversation_with_content(
+        &self,
+        conversation: Conversation,
+        task: &str,
+        content: Vec<ContentBlock>,
+        observer: &dyn AgentLoopObserver,
+    ) -> Result<AgentLoopResult> {
+        let mut state = LoopState::from_conversation_with_content(conversation, task, content);
         self.hydrate_working_state(&mut state).await;
 
         // Materialize a frontend-forced paradigm (Directive::SwitchParadigm →
@@ -6918,12 +6956,16 @@ impl AgentLoop {
         // cross-session cache of the base prompt + skill menu + tools. As a user
         // message in its own segment it keeps the system prefix byte-stable.
         let task_anchor = if let Some(ws) = &state.working_state {
-            crate::context_assembler::task_anchor_block_from_working_state(ws)
+            Some(crate::context_assembler::task_anchor_block_from_working_state(ws))
+        } else if state.original_task.trim().is_empty() {
+            // Image-only turn (no text): nothing to anchor — skip the block
+            // instead of injecting an empty "原始任务: " stub.
+            None
         } else {
-            crate::context_assembler::task_anchor_block(
+            Some(crate::context_assembler::task_anchor_block(
                 &state.original_task,
                 &state.conversation.metadata,
-            )
+            ))
         };
 
         // ── Tail: per-turn / mutable ────────────────────────────────────
@@ -7067,7 +7109,9 @@ impl AgentLoop {
             conv.messages.insert(system_end, Message::system(menu));
             anchor_idx += 1;
         }
-        conv.messages.insert(anchor_idx, Message::user(task_anchor));
+        if let Some(anchor) = task_anchor {
+            conv.messages.insert(anchor_idx, Message::user(anchor));
+        }
         for msg in tail {
             conv.add_message(msg);
         }
@@ -9306,5 +9350,63 @@ mod permission_audit_tests {
             l.record(&probe);
         }
         assert_eq!(audit.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod loop_state_multimodal_tests {
+    use super::*;
+
+    /// A multimodal turn builds the user message from the caller's content
+    /// blocks verbatim (text + image) — the webUI attachment regression.
+    #[test]
+    fn from_conversation_with_content_preserves_image_blocks() {
+        let conv = Conversation::new();
+        let state = LoopState::from_conversation_with_content(
+            conv,
+            "描述下这张图片",
+            vec![
+                ContentBlock::Text {
+                    text: "描述下这张图片".into(),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/png".into(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+        );
+        let last = state.conversation.messages.last().expect("user message");
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.content.len(), 2, "image block must survive");
+        assert!(matches!(
+            &last.content[1],
+            ContentBlock::Image { mime_type, data }
+                if mime_type == "image/png" && data == &vec![1u8, 2, 3]
+        ));
+        // The task anchor still seeds from the text task.
+        assert_eq!(
+            state
+                .conversation
+                .metadata
+                .get("task_anchor")
+                .map(String::as_str),
+            Some("描述下这张图片")
+        );
+    }
+
+    /// Empty content falls back to the plain text user message (text-only
+    /// callers unchanged).
+    #[test]
+    fn from_conversation_with_empty_content_falls_back_to_task() {
+        let conv = Conversation::new();
+        let state = LoopState::from_conversation_with_content(conv, "plain task", Vec::new());
+        let last = state.conversation.messages.last().expect("user message");
+        assert_eq!(last.role, Role::User);
+        assert_eq!(
+            last.content,
+            vec![ContentBlock::Text {
+                text: "plain task".into()
+            }]
+        );
     }
 }

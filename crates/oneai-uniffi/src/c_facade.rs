@@ -320,10 +320,13 @@ impl DirectiveRuntime for CFacadeRuntime {
     async fn run_turn(
         &mut self,
         task: &str,
+        content: Vec<oneai_core::ContentBlock>,
         interrupt_slot: Arc<TokioMutex<Option<AgentLoop>>>,
     ) -> Result<oneai_bus::BusTurnSummary> {
         let session = self.require_session()?;
-        session.run_turn_via_bus(task, interrupt_slot).await
+        session
+            .run_turn_via_bus(task, content, interrupt_slot)
+            .await
     }
 
     async fn set_paradigm(
