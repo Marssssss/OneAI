@@ -168,8 +168,19 @@ impl ContextCompressor {
     /// Compress a conversation by summarizing older turns.
     ///
     /// Returns a new conversation where:
+    /// - Leading system messages (the base prompt) are pinned verbatim FIRST
+    /// - A single summary message follows the base prompt
+    /// - The first user message (original task) is pinned verbatim
     /// - Recent turns (last `keep_recent_turns`) are kept intact
-    /// - Older turns are replaced by a single summary message
+    ///
+    /// Idempotence (2026-09 webUI verify-session incident): messages that are
+    /// NOT removable — the base prompt and any previous summary — never count
+    /// as "older turns". When nothing else sits before the recent tail, the
+    /// conversation is returned unchanged and NO LLM call is made. Previously
+    /// the previous summary itself was the only "older" message and got
+    /// re-summarized every iteration: zero net shrinkage, lossy churn, and
+    /// non-deterministic wording that pinned the provider's prompt-prefix
+    /// cache at ~2.5% hit rate.
     pub async fn compress(&self, conversation: &Conversation) -> Result<CompressedResult> {
         let total_messages = conversation.messages.len();
         if total_messages <= self.keep_recent_turns {
@@ -222,21 +233,56 @@ impl ContextCompressor {
         // `older` = the summarizable segment = messages before the recent tail,
         // excluding the pinned first user message (if any). Owned because the
         // discarded segment is handed to the fact extractor + discarded sink.
-        let older_indices: Vec<usize> = (0..recent_start)
-            .filter(|&i| !(pin_first_user && Some(i) == first_user_idx))
-            .collect();
-        let older_messages: Vec<Message> = older_indices
-            .iter()
-            .map(|&i| conversation.messages[i].clone())
-            .collect();
+        // Leading system messages before the first user message = the base
+        // prompt (+ any session-level system context). Pinned verbatim, never
+        // summarized — the incident's FIRST compression discarded exactly the
+        // base prompt, losing the foundational instructions (2026-09 webUI
+        // verify-session).
+        let leading_system_end = first_user_idx.unwrap_or(total_messages);
+        // NOTE: a summary message is NEVER "protected" even when it sits in
+        // the leading region (after a compression it lives between the base
+        // prompt and the pinned first user) — it takes the carryover path.
+        let is_protected_system = |i: usize| {
+            i < leading_system_end
+                && conversation.messages[i].role == Role::System
+                && !oneai_core::context_manager::is_summary_message(&conversation.messages[i])
+        };
+
+        // `older` = the summarizable segment = messages before the recent
+        // tail, excluding: (a) the pinned first user message, (b) protected
+        // leading system messages, (c) any previous summary message — a
+        // summary is the compressed form of everything summarized before;
+        // re-summarizing it alone is lossy churn. The LATEST previous
+        // summary's text is folded into the NEW summary's input instead, so
+        // the conversation keeps exactly one summary. Owned because the
+        // discarded segment is handed to the fact extractor + discarded sink.
+        let mut carryover_summary: Option<String> = None;
+        let mut older_messages: Vec<Message> = Vec::new();
+        for i in 0..recent_start {
+            if is_protected_system(i) || (pin_first_user && Some(i) == first_user_idx) {
+                continue;
+            }
+            let msg = &conversation.messages[i];
+            if oneai_core::context_manager::is_summary_message(msg) {
+                carryover_summary = Some(
+                    msg.text_content()
+                        [oneai_core::context_manager::PREV_CONVERSATION_SUMMARY_PREFIX.len()..]
+                        .to_string(),
+                );
+            } else {
+                older_messages.push(msg.clone());
+            }
+        }
         let recent_messages = &conversation.messages[recent_start..];
 
-        // Nothing left to summarize — the whole conversation is the first user
-        // message plus the recent tail (e.g. a single long agentic turn whose
-        // latest user instruction forced `recent_start` back to 0). The
-        //无损截断 tier (budget.rs Step 2) already capped tool results before
-        // us; summarization can't help further, so return as-is rather than
-        // asking the LLM to summarize an empty older segment.
+        // Idempotent short-circuit — nothing removable before the recent tail
+        // (only the base prompt and/or a previous summary; or a single long
+        // agentic turn whose latest user instruction forced `recent_start`
+        // back to 0). The 无损截断 tier (budget.rs Step 2) already capped
+        // tool results before us; summarization can't help further. Return
+        // as-is with NO LLM call — this kills the incident's
+        // re-summarize-the-previous-summary-every-iteration loop (zero net
+        // shrinkage + cache-destroying wording churn).
         if older_messages.is_empty() {
             return Ok(CompressedResult {
                 compressed_conversation: conversation.clone(),
@@ -277,6 +323,13 @@ impl ContextCompressor {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // Fold the previous summary (if any) into the new one — the output
+        // keeps exactly ONE summary covering everything summarized so far.
+        let older_text = if let Some(prev) = carryover_summary {
+            format!("[Previous summary]: {}\n{}", prev, older_text)
+        } else {
+            older_text
+        };
 
         // Determine summarization prompt — use domain template if present
         let task_desc = conversation
@@ -323,9 +376,20 @@ impl ContextCompressor {
         let mut compressed = Conversation::with_id(conversation.id.clone());
         compressed.metadata = conversation.metadata.clone();
 
-        // Add the summary as a system context message
+        // Base prompt FIRST — it must keep anchoring the provider's
+        // prompt-prefix cache, and the model must keep seeing its foundational
+        // instructions (the incident's first compression replaced the base
+        // prompt with the summary and the instructions were lost).
+        for (idx, msg) in conversation.messages.iter().enumerate() {
+            if is_protected_system(idx) {
+                compressed.add_message(msg.clone());
+            }
+        }
+
+        // Add the summary AFTER the base prompt as a system context message
         compressed.add_message(Message::system(
-            "[Previous conversation summary]: ".to_string() + &summary_text,
+            oneai_core::context_manager::PREV_CONVERSATION_SUMMARY_PREFIX.to_string()
+                + &summary_text,
         ));
 
         // Pin the original task (first user message) verbatim — Q2/Q3 hard
@@ -721,6 +785,213 @@ mod closure_tests {
         fn dimension(&self) -> usize {
             4
         }
+    }
+
+    /// Provider that counts `infer` calls and captures every system prompt —
+    /// for the idempotence + carryover regressions below.
+    #[derive(Default)]
+    struct CountingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn infer(&self, req: InferenceRequest) -> Result<InferenceResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Capture ALL messages — the summarized conversation rides in a
+            // user message, the summarization instructions in a system one.
+            let full = req
+                .conversation
+                .messages
+                .iter()
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.prompts.lock().unwrap().push(full);
+            Ok(InferenceResponse {
+                message: Message::assistant("fresh summary".to_string()),
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    ..Default::default()
+                },
+                model: "counting-mock".to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+        async fn infer_stream(
+            &self,
+            _req: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+        > {
+            Err(oneai_core::error::OneAIError::Provider("no stream".into()))
+        }
+        fn capabilities(&self) -> ModelCapability {
+            ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: false,
+                supports_tools: false,
+                context_window_size: 4096,
+                max_output_tokens: 512,
+            }
+        }
+        fn config(&self) -> &ModelConfig {
+            static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
+            CONFIG.get_or_init(|| ModelConfig {
+                provider_type: ProviderType::Local,
+                cloud_kind: None,
+                api_key: None,
+                base_url: None,
+                port: None,
+                model_name: Some("counting-mock".into()),
+                model_path: None,
+                ..Default::default()
+            })
+        }
+    }
+
+    /// base prompt + first user task + many alternating filler turns (enough
+    /// to overflow keep_recent_turns = 6 with genuinely removable older
+    /// content; the LAST user message sits inside the default recent tail, so
+    /// the latest-user extension does not pull the tail back to index 1).
+    fn base_plus_long_multi_turn() -> Conversation {
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("BASE PROMPT — foundational rules"));
+        conv.add_message(Message::user("the original task"));
+        for i in 0..12 {
+            conv.add_message(Message::assistant(format!("ack {}", i)));
+            conv.add_message(Message::user(format!("turn {}", i)));
+        }
+        conv
+    }
+
+    #[tokio::test]
+    async fn compression_pins_base_prompt_and_puts_summary_after_it() {
+        // Incident (2026-09 verify-session): the FIRST compression summarized
+        // the base prompt away — the foundational instructions vanished and
+        // the summary replaced the conversation's system head. Now the base
+        // prompt is pinned verbatim at index 0, the summary sits AFTER it.
+        let provider = Arc::new(CountingProvider::default());
+        let compressor = ContextCompressor::new(1, 6, provider.clone());
+        let result = compressor
+            .compress(&base_plus_long_multi_turn())
+            .await
+            .unwrap();
+
+        assert!(result.summary.is_some(), "real compression expected");
+        let msgs = &result.compressed_conversation.messages;
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(
+            msgs[0].text_content().contains("BASE PROMPT"),
+            "base prompt must be pinned verbatim first, got: {}",
+            msgs[0].text_content()
+        );
+        assert!(
+            msgs[1]
+                .text_content()
+                .starts_with(oneai_core::context_manager::PREV_CONVERSATION_SUMMARY_PREFIX),
+            "summary must follow the base prompt, got: {}",
+            msgs[1].text_content()
+        );
+        // The base prompt is NOT part of the discarded segment.
+        assert!(
+            !result
+                .discarded_messages
+                .iter()
+                .any(|m| m.text_content().contains("BASE PROMPT")),
+            "base prompt must never be discarded/fact-extracted"
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_is_idempotent_when_only_base_and_summary_precede_tail() {
+        // The incident's steady state: [base prompt, previous summary, user,
+        // recent tail]. Nothing before the tail is removable, yet the old
+        // code re-summarized the previous summary EVERY iteration — zero net
+        // shrinkage, lossy churn, cache-destroying wording drift. Now: no LLM
+        // call, conversation returned unchanged.
+        let provider = Arc::new(CountingProvider::default());
+        let compressor = ContextCompressor::new(1, 6, provider.clone());
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("BASE PROMPT — foundational rules"));
+        conv.add_message(Message::system(
+            "[Previous conversation summary]: earlier work distilled",
+        ));
+        conv.add_message(Message::user("the original task"));
+        for i in 0..20 {
+            conv.add_message(Message::assistant(format!("work step {}", i)));
+        }
+        // total = 23 > keep 6 → compression is "needed", but nothing is removable.
+        let result = compressor.compress(&conv).await.unwrap();
+        assert!(
+            result.summary.is_none(),
+            "no new summary when nothing removable precedes the tail"
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "idempotent short-circuit must not call the LLM"
+        );
+        assert_eq!(
+            result.compressed_conversation.messages.len(),
+            conv.messages.len(),
+            "conversation preserved verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_folds_previous_summary_into_new_one() {
+        // When genuine older turns ARE removable and a previous summary
+        // exists, the previous summary's text is folded into the NEW
+        // summary's input (one summary total) and it is not re-summarized
+        // alone or discarded.
+        let provider = Arc::new(CountingProvider::default());
+        let compressor = ContextCompressor::new(1, 6, provider.clone());
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("BASE PROMPT"));
+        conv.add_message(Message::system(
+            "[Previous conversation summary]: OLD SUMMARY CONTENT",
+        ));
+        conv.add_message(Message::user("original task"));
+        for i in 0..8 {
+            conv.add_message(Message::assistant(format!("early step {}", i)));
+        }
+        conv.add_message(Message::user("steer now"));
+        for i in 0..14 {
+            conv.add_message(Message::assistant(format!("late step {}", i)));
+        }
+        // total = 26, keep = 6 → recent_start_default = 20; last_user = 11 < 20
+        // → recent_start = 11; older = [base(protected), summary(carryover),
+        // original user(pinned), early steps ×8] → 8 removable messages.
+        let result = compressor.compress(&conv).await.unwrap();
+        assert!(result.summary.is_some());
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let prompt = provider.prompts.lock().unwrap()[0].clone();
+        assert!(
+            prompt.contains("OLD SUMMARY CONTENT"),
+            "previous summary must be folded into the new summarization input"
+        );
+        // Output carries exactly ONE summary and the pinned base prompt.
+        let msgs = &result.compressed_conversation.messages;
+        let summary_count = msgs
+            .iter()
+            .filter(|m| {
+                oneai_core::context_manager::is_summary_message(m)
+                    && m.text_content().contains("fresh summary")
+            })
+            .count();
+        assert_eq!(summary_count, 1);
+        assert!(msgs[0].text_content().contains("BASE PROMPT"));
+        // Neither the base prompt nor the old summary is in the discarded set.
+        assert!(!result
+            .discarded_messages
+            .iter()
+            .any(|m| m.text_content().contains("OLD SUMMARY CONTENT")));
+        // The genuinely removed turns ARE discarded (fact extraction input):
+        // the 8 early steps — base/summary/pinned-first-user all excluded.
+        assert_eq!(result.discarded_messages.len(), 8);
     }
 
     #[tokio::test]

@@ -34,6 +34,27 @@ use crate::Conversation;
 use crate::Message;
 use crate::Role;
 
+/// Marker prefix of the system message that carries a compression summary.
+///
+/// Shared by every path that emits or recognizes a summary message
+/// (`ContextManager::trim_smart_summary` here, `oneai_memory::ContextCompressor`
+/// for the live compression path). A message whose text starts with this
+/// prefix is the compressed form of everything summarized before it — it must
+/// be carried forward, NEVER re-summarized: re-summarizing the summary each
+/// iteration is lossy churn whose non-deterministic wording also destroys the
+/// provider's prompt-prefix cache (2026-09 webUI verify-session incident:
+/// cache hit pinned at ~2.5%).
+pub const PREV_CONVERSATION_SUMMARY_PREFIX: &str = "[Previous conversation summary]: ";
+
+/// Whether this message is a compression summary (see
+/// [`PREV_CONVERSATION_SUMMARY_PREFIX`]).
+pub fn is_summary_message(msg: &Message) -> bool {
+    msg.role == Role::System
+        && msg
+            .text_content()
+            .starts_with(PREV_CONVERSATION_SUMMARY_PREFIX)
+}
+
 // ─── ContextTrimmingStrategy ────────────────────────────────────────────
 
 /// Strategy for trimming conversation context to fit within a model's context window.
@@ -908,13 +929,24 @@ impl ContextManager {
     }
 
     /// SmartSummary trimming — generate a real structured handoff via one LLM
-    /// call, then rebuild as [handoff summary] + [first user verbatim] + [recent
-    /// N turns]. This is the Q3 "summarize into a handoff + reseed" path. The
-    /// handoff prompt is a generic structured template (Goal / Progress / Key
-    /// Decisions / Critical Files / Next Steps) — the domain-specific
-    /// `CompressionTemplate` lives in `oneai-domain` which this crate cannot
-    /// depend on (layering); the live path (`oneai_memory::ContextCompressor`)
-    /// uses the domain template directly.
+    /// call, then rebuild as [leading system verbatim] + [handoff summary] +
+    /// [first user verbatim] + [recent N turns]. This is the Q3 "summarize
+    /// into a handoff + reseed" path. The handoff prompt is a generic
+    /// structured template (Goal / Progress / Key Decisions / Critical Files /
+    /// Next Steps) — the domain-specific `CompressionTemplate` lives in
+    /// `oneai-domain` which this crate cannot depend on (layering); the live
+    /// path (`oneai_memory::ContextCompressor`) uses the domain template
+    /// directly.
+    ///
+    /// Two hard guards (2026-09 webUI verify-session incident):
+    /// - Leading system messages (the base prompt) are pinned verbatim —
+    ///   summarizing them away loses the foundational instructions and moves
+    ///   the request's byte 0, destroying the prompt-prefix cache.
+    /// - A previous summary message is carried into the NEW summary's input,
+    ///   never re-summarized alone. When nothing else is removable, the
+    ///   conversation is returned unchanged WITHOUT an LLM call — re-running
+    ///   the summarizer on its own output each iteration churns the wording
+    ///   (LLM non-determinism) and pins the cache hit at ~2.5%.
     async fn trim_smart_summary(
         &self,
         conversation: &Conversation,
@@ -937,15 +969,52 @@ impl ContextManager {
             .map(|idx| idx < recent_start)
             .unwrap_or(false);
 
-        // Older segment to summarize (exclude the pinned first user message).
-        let older_text = (0..recent_start)
-            .filter(|&i| !(pin_first_user && Some(i) == first_user_idx))
-            .map(|i| {
-                let msg = &conversation.messages[i];
-                format!("[{}]: {}", role_name(&msg.role), msg.text_content())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Leading system messages before the first user message = the base
+        // prompt (+ any session-level system context). Pinned verbatim.
+        // NOTE: a summary message is NEVER "protected" even when it sits in
+        // the leading region (after a compression it lives between the base
+        // prompt and the pinned first user) — it takes the carryover path.
+        let leading_system_end = first_user_idx.unwrap_or(total_messages);
+        let is_protected = |i: usize| {
+            i < leading_system_end
+                && conversation.messages[i].role == Role::System
+                && !is_summary_message(&conversation.messages[i])
+        };
+
+        // Split the older segment: previous summary (carried forward into the
+        // new summary's input) vs genuinely removable messages.
+        let mut carryover_summary: Option<String> = None;
+        let mut older_parts: Vec<String> = Vec::new();
+        for i in 0..recent_start {
+            if is_protected(i) || (pin_first_user && Some(i) == first_user_idx) {
+                continue;
+            }
+            let msg = &conversation.messages[i];
+            if is_summary_message(msg) {
+                // Keep only the LATEST summary; an earlier one would already
+                // have been folded into it.
+                carryover_summary =
+                    Some(msg.text_content()[PREV_CONVERSATION_SUMMARY_PREFIX.len()..].to_string());
+            } else {
+                older_parts.push(format!(
+                    "[{}]: {}",
+                    role_name(&msg.role),
+                    msg.text_content()
+                ));
+            }
+        }
+
+        // Idempotent short-circuit: nothing removable (only the base prompt
+        // and/or a previous summary sit before the recent tail) → keep the
+        // conversation as-is and make NO LLM call.
+        if older_parts.is_empty() {
+            return Ok(conversation.clone());
+        }
+        let mut older_text = older_parts.join("\n");
+        if let Some(prev) = carryover_summary {
+            // Fold the previous summary into the new one — one summary total.
+            older_text = format!("[Previous summary]: {}\n{}", prev, older_text);
+        }
 
         let task_desc = first_user_idx
             .map(|i| conversation.messages[i].text_content())
@@ -987,8 +1056,16 @@ impl ContextManager {
 
         let mut compressed = Conversation::with_id(conversation.id.clone());
         compressed.metadata = conversation.metadata.clone();
+        // Base prompt FIRST — it must keep anchoring the prompt-prefix cache
+        // (and the model must keep seeing its foundational instructions).
+        for (idx, msg) in conversation.messages.iter().enumerate() {
+            if is_protected(idx) {
+                compressed.add_message(msg.clone());
+            }
+        }
+        // The summary sits AFTER the base prompt, never replacing it.
         compressed.add_message(Message::system(
-            "[Previous conversation summary]: ".to_string() + &summary_text,
+            PREV_CONVERSATION_SUMMARY_PREFIX.to_string() + &summary_text,
         ));
         if pin_first_user {
             if let Some(idx) = first_user_idx {
@@ -1541,6 +1618,147 @@ mod tests {
         assert!(
             text.contains("refactor auth"),
             "handoff must carry the original goal: {text}"
+        );
+    }
+
+    /// Handoff mock that counts `infer` calls (idempotence regression).
+    struct CountingHandoffMock {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl crate::traits::LlmProvider for CountingHandoffMock {
+        async fn infer(
+            &self,
+            _req: crate::InferenceRequest,
+        ) -> std::result::Result<crate::InferenceResponse, crate::error::OneAIError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::InferenceResponse {
+                message: Message::assistant("fresh handoff summary".to_string()),
+                usage: crate::TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    ..Default::default()
+                },
+                model: "mock".to_string(),
+                metadata: std::collections::HashMap::new(),
+            })
+        }
+        async fn infer_stream(
+            &self,
+            _req: crate::InferenceRequest,
+        ) -> std::result::Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = crate::InferenceStreamChunk> + Send>>,
+            crate::error::OneAIError,
+        > {
+            Err(crate::error::OneAIError::Provider("no stream".into()))
+        }
+        fn capabilities(&self) -> crate::ModelCapability {
+            crate::ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: false,
+                supports_tools: false,
+                context_window_size: 4096,
+                max_output_tokens: 512,
+            }
+        }
+        fn config(&self) -> &crate::ModelConfig {
+            static CONFIG: std::sync::OnceLock<crate::ModelConfig> = std::sync::OnceLock::new();
+            CONFIG.get_or_init(|| crate::ModelConfig {
+                provider_type: crate::ProviderType::Local,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn smart_summary_pins_base_prompt_and_places_summary_after_it() {
+        // 2026-09 verify-session incident: the summary REPLACED the leading
+        // system prompt — the foundational instructions were lost and the
+        // request's byte 0 moved, destroying the prompt-prefix cache.
+        let counter = Arc::new(HeuristicTokenCounter::new());
+        let manager = ContextManager::new(counter, ContextTrimmingStrategy::smart_summary())
+            .with_summarizer(Arc::new(CountingHandoffMock {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }));
+
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("BASE PROMPT — foundational rules"));
+        conv.add_message(Message::user("the task"));
+        for i in 0..10 {
+            conv.add_message(Message::assistant(format!("step {}", i)));
+            conv.add_message(Message::user(format!("go {}", i)));
+        }
+
+        let fit = manager.fits_context_window(&conv, "qwen2.5:7b");
+        let trimmed = manager
+            .trim_with_strategy(
+                &conv,
+                "qwen2.5:7b",
+                &ContextTrimmingStrategy::smart_summary(),
+                &fit,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(trimmed.messages[0].role, Role::System);
+        assert!(
+            trimmed.messages[0].text_content().contains("BASE PROMPT"),
+            "base prompt must stay pinned verbatim first"
+        );
+        assert!(
+            trimmed.messages[1]
+                .text_content()
+                .starts_with(PREV_CONVERSATION_SUMMARY_PREFIX),
+            "summary must sit AFTER the base prompt, got: {}",
+            trimmed.messages[1].text_content()
+        );
+    }
+
+    #[tokio::test]
+    async fn smart_summary_no_llm_call_when_only_base_and_summary_precede_tail() {
+        // Idempotent short-circuit: with only the base prompt and a previous
+        // summary before the recent tail there is nothing removable — the
+        // conversation is returned unchanged WITHOUT an LLM call (the
+        // incident re-summarized the previous summary every iteration).
+        let counter = Arc::new(HeuristicTokenCounter::new());
+        let summarizer = Arc::new(CountingHandoffMock {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let manager = ContextManager::new(counter, ContextTrimmingStrategy::smart_summary())
+            .with_summarizer(summarizer.clone());
+
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("BASE PROMPT"));
+        conv.add_message(Message::system(
+            PREV_CONVERSATION_SUMMARY_PREFIX.to_string() + "earlier work distilled",
+        ));
+        conv.add_message(Message::user("the task"));
+        for i in 0..5 {
+            conv.add_message(Message::assistant(format!("step {}", i)));
+        }
+        // total = 8 > keep(6)+1 → trimming proceeds, but nothing is removable.
+
+        let fit = manager.fits_context_window(&conv, "qwen2.5:7b");
+        let trimmed = manager
+            .trim_with_strategy(
+                &conv,
+                "qwen2.5:7b",
+                &ContextTrimmingStrategy::smart_summary(),
+                &fit,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            trimmed.messages.len(),
+            conv.messages.len(),
+            "conversation preserved verbatim"
+        );
+        assert_eq!(
+            summarizer.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "short-circuit must not call the summarizer"
         );
     }
 

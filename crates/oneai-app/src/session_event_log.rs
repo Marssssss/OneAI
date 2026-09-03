@@ -11,8 +11,13 @@
 //! - **Whitelist, not mirror** — high-volume content events (`stream_chunk` /
 //!   `thinking` / `direct_answer`) stay out: their content already lives in the
 //!   persisted conversation, and replaying them would double-render chat nodes.
-//! - **Size cap** — a single oversized line (a huge tool result) is skipped
-//!   with a warning rather than ballooning the log.
+//! - **Size cap with head+tail salvage** — an oversized line (a huge tool
+//!   result or inference snapshot) has its large string fields truncated to
+//!   head + marker + tail so the event SURVIVES in the trajectory instead of
+//!   being dropped wholesale (2026-09 incident: four >200KB inference
+//!   snapshots were skipped and the trajectory lost iterations 5-7 entirely).
+//!   Only if the line still exceeds the cap after aggressive truncation is it
+//!   skipped as a last resort.
 //! - **Lag tolerance** — a lagged broadcast receiver logs and continues; the
 //!   log is best-effort, never a turn-critical path.
 
@@ -21,8 +26,77 @@ use std::sync::Arc;
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::traits::SessionEventStore;
 
-/// Maximum serialized size of one persisted event line (larger ones skipped).
+/// Maximum serialized size of one persisted event line (larger ones get
+/// their string fields truncated to head+tail; skipped only as a last resort).
 pub const MAX_EVENT_LINE_BYTES: usize = 200 * 1024;
+
+/// Per-string-field cap applied when salvaging an oversized event line.
+/// Each oversized string keeps `cap/2` head bytes + `cap/2` tail bytes with
+/// a truncation marker in between (char-boundary safe — CJK-safe).
+pub const MAX_STRING_FIELD_BYTES: usize = 64 * 1024;
+
+/// Truncate every string field larger than `max_bytes` inside `value` to
+/// head + marker + tail. The value stays valid JSON and the event remains
+/// replayable — both ends of a giant payload (an inference snapshot's request
+/// head, its response tail) survive.
+fn truncate_large_strings(value: &mut serde_json::Value, max_bytes: usize) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.len() > max_bytes {
+                let head = head_up_to_bytes(s, max_bytes / 2);
+                let tail = tail_up_to_bytes(s, max_bytes / 2);
+                let dropped = s.len() - head.len() - tail.len();
+                *s = format!(
+                    "{}\n...[truncated {} bytes — head+tail kept]...\n{}",
+                    head, dropped, tail
+                );
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                truncate_large_strings(item, max_bytes);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                truncate_large_strings(v, max_bytes);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Longest prefix of `s` that fits in `max` bytes, on a char boundary.
+fn head_up_to_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if i + c.len_utf8() > max {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &s[..end]
+}
+
+/// Longest suffix of `s` that fits in `max` bytes, on a char boundary.
+fn tail_up_to_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut start = s.len();
+    let mut used = 0;
+    for (i, c) in s.char_indices().rev() {
+        if used + c.len_utf8() > max {
+            break;
+        }
+        used += c.len_utf8();
+        start = i;
+    }
+    &s[start..]
+}
 
 /// Whether this yield kind is persisted to the session event log.
 ///
@@ -117,14 +191,37 @@ pub fn spawn_session_event_tap(
                             serde_json::json!(chrono::Utc::now().timestamp_millis()),
                         );
                     }
-                    let line = serde_json::to_string(&value).unwrap_or_default();
+                    let mut line = serde_json::to_string(&value).unwrap_or_default();
+                    // Oversized line → salvage via head+tail truncation of its
+                    // large string fields rather than dropping the event (the
+                    // trajectory needs the event's boundaries/metadata even if
+                    // the giant payload is capped). Two passes with a tighter
+                    // cap if one pass isn't enough; skip only as a last resort.
                     if line.len() > MAX_EVENT_LINE_BYTES {
-                        tracing::warn!(
-                            session = %session_id,
-                            bytes = line.len(),
-                            "skipping oversized session event (> {MAX_EVENT_LINE_BYTES} bytes)"
-                        );
-                    } else if let Err(e) = store.append(&session_id, &line).await {
+                        let original = line.len();
+                        let mut cap = MAX_STRING_FIELD_BYTES;
+                        while line.len() > MAX_EVENT_LINE_BYTES && cap >= 8 * 1024 {
+                            truncate_large_strings(&mut value, cap);
+                            line = serde_json::to_string(&value).unwrap_or_default();
+                            cap /= 8;
+                        }
+                        if line.len() <= MAX_EVENT_LINE_BYTES {
+                            tracing::warn!(
+                                session = %session_id,
+                                original_bytes = original,
+                                salvaged_bytes = line.len(),
+                                "oversized session event truncated to head+tail (was > {MAX_EVENT_LINE_BYTES} bytes)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                session = %session_id,
+                                bytes = line.len(),
+                                "skipping session event — still oversized after head+tail truncation"
+                            );
+                            continue;
+                        }
+                    }
+                    if let Err(e) = store.append(&session_id, &line).await {
                         tracing::warn!(session = %session_id, "session event append failed: {e}");
                     }
                 }
@@ -274,6 +371,82 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(store.load("s2").await.unwrap().len(), 1);
         assert_eq!(store.load("s1").await.unwrap().len(), 5);
+
+        bus.emit(EngineYield::SessionEnded).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[test]
+    fn head_tail_truncation_is_char_boundary_safe() {
+        // CJK chars are 3 bytes each — the cut must land on a char boundary.
+        let s = "文档".repeat(100); // 600 bytes
+        assert_eq!(head_up_to_bytes(&s, 7), "文档"); // only 6 bytes fit
+        assert_eq!(tail_up_to_bytes(&s, 7), "文档");
+        // A small string passes through whole.
+        assert_eq!(head_up_to_bytes("abc", 10), "abc");
+        assert_eq!(tail_up_to_bytes("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_large_strings_keeps_head_tail_and_marker() {
+        let big = format!("HEAD_{}MIDDLE{}_TAIL", "A".repeat(1000), "Z".repeat(1000));
+        let mut value = serde_json::json!({
+            "snapshot": big.clone(),
+            "small": "untouched",
+            "nested": [{ "deep": big.clone() }],
+            "number": 42,
+        });
+        truncate_large_strings(&mut value, 200);
+
+        let snapshot = value["snapshot"].as_str().unwrap();
+        assert!(snapshot.starts_with("HEAD_"));
+        assert!(snapshot.ends_with("_TAIL"));
+        assert!(snapshot.contains("truncated"));
+        assert!(snapshot.len() <= 200 + 60, "marker overhead is bounded");
+        // Nested fields truncated too; small fields untouched.
+        assert!(value["nested"][0]["deep"]
+            .as_str()
+            .unwrap()
+            .contains("truncated"));
+        assert_eq!(value["small"], "untouched");
+        assert_eq!(value["number"], 42);
+    }
+
+    #[tokio::test]
+    async fn oversized_event_is_salvaged_with_head_tail_truncation() {
+        // Regression (2026-09 verify-session): four >200KB inference events
+        // were skipped wholesale and the trajectory lost iterations 5-7. Now
+        // the event survives with its payload's head + tail kept.
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let store = Arc::new(MemoryEventStore::default());
+        let handle = spawn_session_event_tap(bus.clone(), store.clone());
+
+        bus.emit(EngineYield::SessionCreated { id: "s1".into() })
+            .unwrap();
+        let summary = format!(
+            "HEADMARKER_{}{}_TAILMARKER",
+            "x".repeat(150 * 1024),
+            "y".repeat(150 * 1024)
+        );
+        bus.emit(EngineYield::Reflection {
+            turn_id: "t1".into(),
+            summary,
+        })
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let lines = store.load("s1").await.unwrap();
+        assert_eq!(
+            lines.len(),
+            1,
+            "oversized event must be salvaged, not dropped"
+        );
+        assert!(lines[0].len() <= MAX_EVENT_LINE_BYTES);
+        assert!(lines[0].contains("HEADMARKER_"), "head must survive");
+        assert!(lines[0].contains("_TAILMARKER"), "tail must survive");
+        assert!(lines[0].contains("truncated"), "marker must be present");
+        assert!(lines[0].contains("\"kind\":\"reflection\""));
 
         bus.emit(EngineYield::SessionEnded).unwrap();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
