@@ -23,7 +23,7 @@ One key FFI discipline: passing a String over extern C must use `CString::new().
 
 **UniFFI bindings (Kotlin/Swift).** View types (`RiskLevelView`/`ApprovalRequestView`/`ChatEventView`, etc.) use UniFFI derive macros; traits are Rust-only (foreign code uses concrete impls); factory methods build pre-configured instances; `AppBuilderWrapper`/`OneAIApp` provide idiomatic foreign-language APIs.
 
-**Hand-written extern C bus pump (3 symbols).** The legacy 29-symbol full `OneAIApp` C facade (`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…) was collapsed in P4 to a 3-symbol bus pump: `oneai_submit_directive(json)` (submit a `Directive` JSON; the first `Directive::Init{config}` builds the engine+bus+pump) / `oneai_poll_yield()` (pull the next `EngineYield` as JSON, thread-local buffer, do not free) / `oneai_shutdown()`. The in-process side speaks only the bus protocol — same protocol as the sidecar, different transport (direct C ABI vs JSON-RPC over the wire). All three entries are wrapped in a `catch_unwind` panic guard (issue #4) — a panic no longer unwinds across the FFI boundary and aborts the process; it becomes an error return code (submit=7/poll=null/shutdown=2) and, when an engine is built, surfaces to the frontend as an `EngineYield::Error`. > `bindings/c/oneai_c.h` still documents the legacy 29 symbols and **needs to be re-aligned** to the 3-symbol pump; the Windows C# app still P/Invokes the legacy symbols (stale, see §5).
+**Hand-written extern C bus pump (3 symbols).** The legacy 29-symbol full `OneAIApp` C facade (`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…) was collapsed in P4 to a 3-symbol bus pump: `oneai_submit_directive(json)` (submit a `Directive` JSON; the first `Directive::Init{config}` builds the engine+bus+pump) / `oneai_poll_yield()` (pull the next `EngineYield` as JSON, thread-local buffer, do not free) / `oneai_shutdown()`. The in-process side speaks only the bus protocol — same protocol as the sidecar, different transport (direct C ABI vs JSON-RPC over the wire). All three entries are wrapped in a `catch_unwind` panic guard (issue #4) — a panic no longer unwinds across the FFI boundary and aborts the process; it becomes an error return code (submit=7/poll=null/shutdown=2) and, when an engine is built, surfaces to the frontend as an `EngineYield::Error`. > `bindings/c/oneai_c.h` is aligned to the 3-symbol pump; the Windows C# app has migrated to it too (`platforms/windows/OneAI/Native/OneAiNative.cs` + `BusPump.cs`, see §5).
 
 **Native InteractionGate.** `PlatformInteractionGate` per-target impl: macOS `MacOSInteractionGate` (NSAlert), Windows `WindowsInteractionGate` (MessageBox/AlertDialog), Linux `LinuxCliInteractionGate` (stdin/stdout), Android `AndroidInteractionGate` (AlertDialog, JNI bridge), iOS `IOSInteractionGate` (UIController, callback bridge), HarmonyOS `HarmonyInteractionGate` (CommonDialog, callback bridge).
 
@@ -110,7 +110,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* native UI dialogs */ }
 **Build packaging:**
 
 1. `./scripts/build_apple.sh` produces macOS `.dylib` + iOS xcframework (links `liboneai.a` staticlib).
-2. `./scripts/build_windows.ps1` produces `oneai.dll` (the 3-symbol C-ABI pump; the C# app's P/Invoke declarations are still the legacy symbols and need migration — see the table below).
+2. `./scripts/build_windows.ps1` produces `oneai.dll` (the 3-symbol C-ABI pump; the C# app P/Invokes these 3 symbols via `Native/OneAiNative.cs` + `Native/BusPump.cs` — see the table below).
 3. `./scripts/build_android.sh` cross-compiles 4 ABIs + `generate_bindings.sh` emits Kotlin bindings.
 4. `./scripts/build_harmony.sh` produces a NAPI module (C++ wrapping the facade).
 5. The staticlib is built explicitly only when packaging (`cargo build -p oneai-staticlib`), not in daily builds.
@@ -125,7 +125,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* native UI dialogs */ }
 | VS Code extension | sidecar (stdio) | ✅ fully on it |
 | Browser extension | sidecar (native-messaging) | ✅ macOS/Linux |
 | macOS app | in-process FFI (full UniFFI, default) + sidecar (opt-in) | ✅ FFI default works; sidecar migration path live (opt-in) |
-| Windows app | in-process FFI (c_facade P/Invoke) + sidecar skeleton | ⚠️ FFI P/Invoke is still the legacy 29-symbol surface (c_facade collapsed to 3 symbols → the current `oneai.dll` no longer exports those symbols, **needs migration**); sidecar is only a spawn+client skeleton, not wired into WinUI; no MSVC locally, not build-verified |
+| Windows app | in-process FFI (c_facade 3-symbol pump P/Invoke) + sidecar skeleton | ✅ FFI migrated to the 3-symbol pump (`OneAiNative.cs` + `BusPump.cs`; a new `list_sessions` capability backs the sidebar); sidecar is only a spawn+client skeleton, not wired into WinUI; no MSVC locally, not build-verified |
 | Android | in-process (full UniFFI) | ✅ retained (on-device, no spawn) |
 | iOS / HarmonyOS | in-process (target: 3-symbol pump / full UniFFI) | 🚧 in progress |
 
@@ -165,7 +165,7 @@ The full JSON-RPC method table, `event` yield variants, four-frontend access sta
 | GroupChat FFI | `crates/oneai-uniffi/src/group_chat.rs` |
 | `ChatEventCallback` + `ChatEventView` | `crates/oneai-uniffi/src/callback.rs:46` |
 | 3-symbol C-ABI bus pump (`oneai_submit_directive`/`oneai_poll_yield`/`oneai_shutdown`) | `crates/oneai-uniffi/src/c_facade.rs` (`:503`/`:560`/`:593`) |
-| C header (legacy 29 symbols, pending re-align to 3 symbols) | `bindings/c/oneai_c.h` |
+| C header (3-symbol pump contract) | `bindings/c/oneai_c.h` |
 | View types | `crates/oneai-uniffi/src/types.rs` |
 | Desktop gates (macOS NSAlert / Windows MessageBox / Linux CLI) | `crates/oneai-platform-desktop/src/{macos,windows,linux,bridge_common}.rs` |
 | Android JNI bridge + gate | `crates/oneai-platform-android/src/{jni_bridge,gate}.rs` |

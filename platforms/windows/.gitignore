@@ -1,5 +1,8 @@
-# Native oneai_native.dll is staged by scripts/build_windows.ps1 (run on Windows).
+# Native oneai_native.dll is staged by scripts/build_windows.ps1 (run on Windows)
+# into platforms/windows/native/. Anchored with a leading slash so it does NOT
+# match the C# source dir OneAI/Native/ (git matches case-insensitively here —
+# an unanchored "native/" silently ignored the interop .cs files).
 # Dotnet build output. A fresh checkout runs build_windows.ps1 to populate.
-native/
+/native/
 OneAI/bin/
 OneAI/obj/

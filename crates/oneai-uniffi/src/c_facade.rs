@@ -396,6 +396,12 @@ impl DirectiveRuntime for CFacadeRuntime {
         self.app.delete_conversation(&id).await
     }
 
+    async fn list_sessions(&mut self) -> Vec<oneai_core::SessionInfo> {
+        // Sidebar rows for the foreign UI — the durable store is shared
+        // (~/.oneai/oneai.db), so sessions created by the TUI / web show here.
+        self.app.list_conversations().await
+    }
+
     async fn session_id(&mut self) -> String {
         match self.session.as_ref() {
             Some(s) => s.session_id().to_string(),
@@ -695,6 +701,59 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(oneai_submit_directive(c.as_ptr()), 4);
+    }
+
+    /// Seed one conversation into the SAME db file the engine will open, so
+    /// `list_sessions` has a real row to project (a fresh db lists empty).
+    fn seed_conversation(db: &str, id: &str) {
+        use oneai_core::traits::MemoryPersistence;
+        let store = oneai_persistence::SqliteSessionStore::new(db);
+        let mut conv = oneai_core::Conversation::with_id(id.to_string());
+        conv.messages
+            .push(oneai_core::Message::text(oneai_core::Role::User, "你好"));
+        runtime()
+            .block_on(store.save_conversation(id, &conv))
+            .expect("seed conversation saved");
+    }
+
+    /// Drain yields until one whose JSON contains `kind_frag` arrives (or
+    /// timeout). Returns the matching line. Skips unrelated yields.
+    fn poll_until(kind_frag: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let p = oneai_poll_yield();
+            if !p.is_null() {
+                let line = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+                if line.contains(kind_frag) {
+                    return line;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {kind_frag} yield"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn list_sessions_round_trips_over_the_wire() {
+        let _g = lock_and_reset();
+        let db = tmp_db("listsess");
+        seed_conversation(&db, "seeded-1");
+        assert_eq!(submit(&init_json(&db)), 0);
+        // The raw-bus sidebar query — what the Windows C# pump submits.
+        assert_eq!(submit(r#"{"kind":"list_sessions"}"#), 0);
+        let line = poll_until(r#""kind":"session_list""#);
+        assert!(
+            line.contains(r#""id":"seeded-1""#),
+            "SessionList must carry the seeded row: {line}"
+        );
+        assert!(
+            line.contains(r#""updated_at_ms":"#),
+            "rows ride the millis shape: {line}"
+        );
+        assert_eq!(shutdown(), 0);
     }
 
     #[test]

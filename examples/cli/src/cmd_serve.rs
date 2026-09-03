@@ -119,6 +119,10 @@ impl DirectiveRuntime for SidecarRuntime {
         self.app.delete_conversation(&id).await
     }
 
+    async fn list_sessions(&mut self) -> Vec<oneai_core::SessionInfo> {
+        self.app.list_conversations().await
+    }
+
     async fn session_id(&mut self) -> String {
         self.session.session_id().to_string()
     }

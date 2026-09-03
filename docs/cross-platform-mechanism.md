@@ -23,7 +23,7 @@ OneAI 的跨平台不是 WebView 套壳，而是让同一份 Rust 引擎逻辑�
 
 **UniFFI 绑定（Kotlin/Swift）。** View 类型（`RiskLevelView`/`ApprovalRequestView`/`ChatEventView` 等）用 UniFFI derive 宏；trait 是 Rust-only（外语用具体实现）；工厂方法造预配置实例；`AppBuilderWrapper`/`OneAIApp` 提供地道外语 API。
 
-**手写 extern C bus pump（3 符号）。** 旧的 29 符号全 `OneAIApp` C facade（`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…）已在 P4 塌成 3 符号 bus pump：`oneai_submit_directive(json)`（提交 `Directive` JSON，首次 `Directive::Init{config}` 建引擎+bus+pump）/`oneai_poll_yield()`（取下一条 `EngineYield` JSON，thread-local 缓冲、勿 free）/`oneai_shutdown()`。in-process 端只说 bus 协议，与 sidecar 同协议、不同传输（C ABI 直连 vs JSON-RPC over wire）。三入口均包 `catch_unwind` 恐慌护栏（issue #4）——panic 不再跨 FFI 边界 abort 进程，而是转成错误返回码（submit=7/poll=null/shutdown=2）+ 引擎已建时经 `EngineYield::Error` 浮现给前端。> `bindings/c/oneai_c.h` 仍记旧 29 符号、**待清理对齐**到 3 符号；Windows C# 当前 P/Invoke 仍是旧符号（stale，见 §5）。
+**手写 extern C bus pump（3 符号）。** 旧的 29 符号全 `OneAIApp` C facade（`oneai_create_app`/`oneai_session_run_task`/`oneai_list_conversations`/…）已在 P4 塌成 3 符号 bus pump：`oneai_submit_directive(json)`（提交 `Directive` JSON，首次 `Directive::Init{config}` 建引擎+bus+pump）/`oneai_poll_yield()`（取下一条 `EngineYield` JSON，thread-local 缓冲、勿 free）/`oneai_shutdown()`。in-process 端只说 bus 协议，与 sidecar 同协议、不同传输（C ABI 直连 vs JSON-RPC over wire）。三入口均包 `catch_unwind` 恐慌护栏（issue #4）——panic 不再跨 FFI 边界 abort 进程，而是转成错误返回码（submit=7/poll=null/shutdown=2）+ 引擎已建时经 `EngineYield::Error` 浮现给前端。> `bindings/c/oneai_c.h` 已对齐到 3 符号 pump；Windows C# 也已迁到 3 符号泵（`platforms/windows/OneAI/Native/OneAiNative.cs` + `BusPump.cs`，见 §5）。
 
 **原生 InteractionGate。** `PlatformInteractionGate` 各端实现：macOS `MacOSInteractionGate`（NSAlert）、Windows `WindowsInteractionGate`（MessageBox/AlertDialog）、Linux `LinuxCliInteractionGate`（stdin/stdout）、Android `AndroidInteractionGate`（AlertDialog，JNI 桥）、iOS `IOSInteractionGate`（UIController，callback bridge）、HarmonyOS `HarmonyInteractionGate`（CommonDialog，callback bridge）。
 
@@ -110,7 +110,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 **构建打包：**
 
 1. `./scripts/build_apple.sh` 产 macOS `.dylib` + iOS xcframework（链 `liboneai.a` staticlib）。
-2. `./scripts/build_windows.ps1` 产 `oneai.dll`（3 符号 C-ABI pump；C# 端 P/Invoke 仍是旧符号，待迁移——见下表）。
+2. `./scripts/build_windows.ps1` 产 `oneai.dll`（3 符号 C-ABI pump；C# 端经 `Native/OneAiNative.cs` + `Native/BusPump.cs` P/Invoke 这 3 个符号——见下表）。
 3. `./scripts/build_android.sh` 跨 4 ABI 编译 + `generate_bindings.sh` 出 Kotlin binding。
 4. `./scripts/build_harmony.sh` 产 NAPI 模块（C++ 包裹 facade）。
 5. staticlib 仅在打包时显式构建（`cargo build -p oneai-staticlib`），不在日常 build。
@@ -125,7 +125,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 | VS Code 扩展 | sidecar（stdio）| ✅ 全量 |
 | 浏览器扩展 | sidecar（native-messaging）| ✅ macOS/Linux |
 | macOS App | in-process FFI（全 UniFFI，默认）+ sidecar（opt-in）| ✅ FFI 默认可用；sidecar 迁移路径已通（opt-in） |
-| Windows App | in-process FFI（c_facade P/Invoke）+ sidecar skeleton | ⚠️ FFI P/Invoke 仍是旧 29 符号（c_facade 已塌成 3 符号 → 当前 `oneai.dll` 不再导出那些符号，**待迁移**）；sidecar 仅有 spawn+客户端 skeleton，未接 WinUI；本机无 MSVC 不可编译验证 |
+| Windows App | in-process FFI（c_facade 3 符号泵 P/Invoke）+ sidecar skeleton | ✅ FFI 已迁到 3 符号泵（`OneAiNative.cs` + `BusPump.cs`，新增 `list_sessions` 支撑侧栏）；sidecar 仅有 spawn+客户端 skeleton，未接 WinUI；本机无 MSVC 不可编译验证 |
 | Android | in-process（全 UniFFI）| ✅ 保留（on-device 无 spawn） |
 | iOS / HarmonyOS | in-process（目标 3 符号 pump / 全 UniFFI）| 🚧 在建 |
 
@@ -165,7 +165,7 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 | GroupChat FFI | `crates/oneai-uniffi/src/group_chat.rs` |
 | `ChatEventCallback` + `ChatEventView` | `crates/oneai-uniffi/src/callback.rs:46` |
 | 3 符号 C-ABI bus pump（`oneai_submit_directive`/`oneai_poll_yield`/`oneai_shutdown`）| `crates/oneai-uniffi/src/c_facade.rs`（`:503`/`:560`/`:593`）|
-| C 头文件（旧 29 符号，待对齐到 3 符号）| `bindings/c/oneai_c.h` |
+| C 头文件（3 符号 pump 契约）| `bindings/c/oneai_c.h` |
 | View 类型 | `crates/oneai-uniffi/src/types.rs` |
 | 桌面 Gate（macOS NSAlert / Windows MessageBox / Linux CLI）| `crates/oneai-platform-desktop/src/{macos,windows,linux,bridge_common}.rs` |
 | Android JNI 桥 + Gate | `crates/oneai-platform-android/src/{jni_bridge,gate}.rs` |

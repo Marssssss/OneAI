@@ -175,6 +175,13 @@ impl DirectiveRuntime for AppServerRuntime {
         self.app.delete_conversation(&id).await
     }
 
+    async fn list_sessions(&mut self) -> Vec<oneai_core::SessionInfo> {
+        // The JSON-RPC `session/list` method answers synchronously off the
+        // store and stays the primary path; this override just keeps the bus
+        // directive honest if a raw-bus consumer ever submits it here.
+        self.app.list_conversations().await
+    }
+
     async fn session_id(&mut self) -> String {
         self.session.session_id().to_string()
     }

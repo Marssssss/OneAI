@@ -167,6 +167,31 @@ fn default_true() -> bool {
     true
 }
 
+/// A saved-conversation summary row — the payload items of
+/// [`EngineYield::SessionList`]. Same millis shape the app-server
+/// `session/list` RPC returns (`id` / `created_at_ms` / `updated_at_ms` /
+/// `message_count` / `title` / `archived` / `workspace?`), so a foreign UI
+/// renders one sidebar shape regardless of transport.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BusSessionInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub message_count: usize,
+    /// Unix epoch millis (first message / creation).
+    #[serde(default)]
+    pub created_at_ms: i64,
+    /// Unix epoch millis (last message).
+    #[serde(default)]
+    pub updated_at_ms: i64,
+    /// Sidebar archive flag (`metadata["archived"]`); defaults false.
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
 /// A single group-chat member spec — mirrors `oneai_uniffi::AgentSpecView`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusAgentSpec {
@@ -713,6 +738,13 @@ pub enum Directive {
     /// [`EngineYield::SessionDeleted`] (or [`EngineYield::Error`] if the id is
     /// unknown / the store is not configured).
     DeleteSession { id: String },
+    /// List saved conversations (metadata only). Result:
+    /// [`EngineYield::SessionList`] — an empty `sessions` vec when nothing is
+    /// saved or no durable store is configured (never an error). The bus-side
+    /// counterpart of the app-server's synchronous `session/list` RPC, for
+    /// frontends that speak raw directives (in-process c_facade pump,
+    /// `oneai serve`).
+    ListSessions,
     /// Bootstrap the engine + bus + directive pump from a config blob. Only the
     /// in-process 3-symbol c_facade pump consumes this (it intercepts `Init`
     /// *before* the bus forwards anything — the pump, bus, and `AppSession`
@@ -942,6 +974,10 @@ pub enum EngineYield {
     /// Session deleted (`Directive::DeleteSession`) — confirms the id removed
     /// from the durable store.
     SessionDeleted { id: String },
+    /// Saved-conversation list (`Directive::ListSessions`) — metadata rows for
+    /// a frontend sidebar. Empty `sessions` when nothing is saved / no durable
+    /// store is configured.
+    SessionList { sessions: Vec<BusSessionInfo> },
     /// Session ended — no further yields will be emitted.
     SessionEnded,
 }
@@ -1210,6 +1246,71 @@ mod tests {
         for c in cases {
             let _ = serde_json::from_str::<Directive>(&c).unwrap();
         }
+    }
+
+    // ── ListSessions / SessionList (sidebar over the raw bus) ──────────
+
+    fn session_row(id: &str) -> BusSessionInfo {
+        BusSessionInfo {
+            id: id.into(),
+            title: Some("面试演练·前端工程师".into()),
+            message_count: 12,
+            created_at_ms: 1_727_000_000_000,
+            updated_at_ms: 1_727_000_999_999,
+            archived: false,
+            workspace: None,
+        }
+    }
+
+    #[test]
+    fn list_sessions_directive_round_trips() {
+        let line = serde_json::to_string(&Directive::ListSessions).unwrap();
+        assert_eq!(line, r#"{"kind":"list_sessions"}"#);
+        assert!(matches!(
+            serde_json::from_str::<Directive>(&line).unwrap(),
+            Directive::ListSessions
+        ));
+    }
+
+    #[test]
+    fn session_list_yield_round_trips() {
+        let mut archived = session_row("s2");
+        archived.archived = true;
+        archived.workspace = Some("/Users/x/proj".into());
+        let y = EngineYield::SessionList {
+            sessions: vec![session_row("s1"), archived],
+        };
+        let line = serde_json::to_string(&y).unwrap();
+        assert!(line.contains(r#""kind":"session_list""#));
+        assert!(line.contains(r#""created_at_ms":1727000000000"#));
+        assert!(line.contains(r#""updated_at_ms":1727000999999"#));
+        match rt_yield(&y) {
+            EngineYield::SessionList { sessions } => {
+                assert_eq!(sessions.len(), 2);
+                assert_eq!(sessions[0].id, "s1");
+                assert_eq!(
+                    sessions[0].title.as_deref(),
+                    Some("面试演练·前端工程师"),
+                    "CJK title must survive the wire"
+                );
+                assert!(!sessions[0].archived);
+                assert!(sessions[0].workspace.is_none());
+                assert!(sessions[1].archived);
+                assert_eq!(sessions[1].workspace.as_deref(), Some("/Users/x/proj"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_list_rows_default_lenient_fields() {
+        // A minimal row (an older producer) deserializes with defaults.
+        let json = r#"{"id":"s3"}"#;
+        let row: BusSessionInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(row.id, "s3");
+        assert!(row.title.is_none());
+        assert_eq!(row.message_count, 0);
+        assert!(!row.archived);
     }
 
     // ── BusGroupScenario::validate ───────────────────────────────────────

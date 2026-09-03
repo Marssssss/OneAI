@@ -23,5 +23,10 @@ Two viable routes to call `oneai.dll` from C#:
    P/Invoke it from C# with `[DllImport("oneai")]`. Only JSON strings cross the
    boundary; no uniffi protocol to reimplement.
 
-Route 1 is preferred if `uniffi-bindgen-cs` cooperates; route 2 is the
-deterministic fallback. Decided when Phase 3 starts.
+**Decision (implemented):** route 2. The Windows app
+(`platforms/windows/OneAI/`) P/Invokes the **collapsed 3-symbol bus pump** in
+`crates/oneai-uniffi/src/c_facade.rs` (`oneai_submit_directive` /
+`oneai_poll_yield` / `oneai_shutdown`); everything else crosses as JSON
+`Directive` / `EngineYield` (oneai-bus protocol). See `bindings/c/oneai_c.h` for
+the C contract and `platforms/windows/README.md` for the C# side
+(`Native/OneAiNative.cs` + `Native/BusPump.cs`).

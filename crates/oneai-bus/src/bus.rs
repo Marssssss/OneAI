@@ -163,6 +163,7 @@ impl EngineBus for InProcessBus {
             | Directive::LoadSession { .. }
             | Directive::ClearSession
             | Directive::DeleteSession { .. }
+            | Directive::ListSessions
             | Directive::Init { .. }
             | Directive::StartGroupChat { .. }
             | Directive::GroupStart

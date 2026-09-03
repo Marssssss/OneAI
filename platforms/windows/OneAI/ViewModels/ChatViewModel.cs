@@ -1,20 +1,23 @@
-// ChatViewModel — port of Android/macOS VM. Drives the C facade via P/Invoke.
-// The native streaming callback fires on a tokio worker thread; marshalled
-// to the UI thread via DispatcherQueue (the WinUI counterpart of
-// DispatchQueue.main / runOnUiThread).
+// ChatViewModel — port of Android/macOS VM. Drives the engine through the
+// 3-symbol bus pump (Native/BusPump.cs): every action is a Directive JSON
+// submitted via oneai_submit_directive; every result is an EngineYield JSON
+// line drained by the pump's dedicated poll thread and routed here.
 //
-// Multi-agent scenario support (group chat): when a Scenario is active, events
-// carry a `speaker` id and are routed to that member's bubble; the VM mirrors
-// the macOS ChatViewModel (active-speaker routing, topic intake, debrief,
-// streaming coalescing to ~20fps so per-token TryEnqueue doesn't flood the UI
-// thread — the macOS beachball root cause).
+// The pump thread (NOT the UI thread) raises YieldReceived; the VM marshals
+// render work to the UI thread via DispatcherQueue — streaming fragments go
+// through StreamCoalescer (~20fps batching, the macOS beachball fix), and
+// request/response ops (session create/load/delete/list) correlate their yield
+// via a single-flight TaskCompletionSource slot.
+//
+// Multi-agent scenario support (group chat): fragment yields carry a `speaker`
+// id routed to that member's bubble (active-speaker routing, topic intake,
+// debrief) — mirrors the macOS ChatViewModel.
 
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
-using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
-using Windows.System;
 using OneAI.Native;
 using OneAI.Services;
 
@@ -23,14 +26,33 @@ namespace OneAI.ViewModels;
 public class ChatViewModel : ObservableObject
 {
     private readonly Microsoft.UI.Dispatching.DispatcherQueue _dq;
-    private IntPtr _app = IntPtr.Zero;
-    private IntPtr _session = IntPtr.Zero;
-    /// <summary>Group-chat session when CurrentScenario != null.</summary>
-    private IntPtr _groupSession = IntPtr.Zero;
+    /// <summary>The in-process engine bus driver (3-symbol pump). Null until
+    /// EnsureApp builds the engine.</summary>
+    private BusPump? _pump;
+    private StreamCoalescer _coalescer;
+    /// <summary>True once Directive::Init built the engine.</summary>
+    private bool _engineReady;
+    /// <summary>True while a group-chat scenario is the active conversation.</summary>
+    private bool _inGroupMode;
+    /// <summary>Set when start_group_chat is submitted, cleared on the first
+    /// successful group yield (or reset on a group-start error yield) — lets us
+    /// attribute an early `error` yield to a failed group build.</summary>
+    private volatile bool _groupStarting;
     /// <summary>The AssistantItem currently accumulating events for the active
     /// speaker. Reset to null at the start of each round; the first event
     /// (or a speaker change) seeds a new item.</summary>
     private AssistantItem? _activeSpeakerItem;
+
+    // ── Request/response correlation (single-flight per op) ─────────────
+    // The bus is fire-and-observe: a submitted directive's result arrives later
+    // as a yield on the pump thread. Each awaitable op parks a
+    // TaskCompletionSource here; the matching yield completes it.
+    private TaskCompletionSource<string>? _pendingSessionCreated;
+    private TaskCompletionSource<JsonElement>? _pendingSessionLoaded;
+    private TaskCompletionSource<string>? _pendingSessionDeleted;
+    private TaskCompletionSource<JsonElement>? _pendingSessionList;
+    private readonly object _corrLock = new();
+    private const int AwaitTimeoutMs = 5000;
 
     public ProviderConfig Provider { get; }
     public ObservableCollection<ChatItem> Items { get; } = new();
@@ -95,7 +117,8 @@ public class ChatViewModel : ObservableObject
         get => _debriefActive;
         set { SetProperty(ref _debriefActive, value); Raise(nameof(DebriefButtonVis)); Raise(nameof(DebriefPhaseVis)); Raise(nameof(TurnStatusLabel)); }
     }
-    /// <summary>Lightweight per-turn token estimate (chars/4) — top-bar indicator.</summary>
+    /// <summary>Per-turn token usage (real counts from the token_usage yield,
+    /// chars/4 fallback) — top-bar indicator.</summary>
     private int _lastTurnTokens;
     public int LastTurnTokens
     {
@@ -174,6 +197,7 @@ public class ChatViewModel : ObservableObject
         _dq = dq ?? throw new InvalidOperationException("VM must be created on UI thread");
         Provider = ProviderStore.Load();
         OnboardingDismissed = OnboardingStore.LoadDismissed();
+        _coalescer = new StreamCoalescer(this, _dq);
         // Items is an ObservableCollection; add/remove fires CollectionChanged
         // (not PropertyChanged), so the welcome-screen visibility (which reads
         // Items.Count) wouldn't otherwise re-evaluate on the first/last message.
@@ -191,31 +215,47 @@ public class ChatViewModel : ObservableObject
         Raise(nameof(OnboardingVis));
     }
 
-    // ── App lifecycle ────────────────────────────────────────────────
+    // ── Engine lifecycle ───────────────────────────────────────────────
+
+    /// <summary>Build the engine (Directive::Init) + start the pump. Idempotent.
+    /// The Init runs off the UI thread so engine construction doesn't stall
+    /// WinUI.</summary>
     public async Task EnsureApp()
     {
-        if (_app != IntPtr.Zero) return;
+        if (_engineReady && _pump != null) return;
         Provider.DbPath = ProviderStore.DbPath;
-        var json = Provider.ToJson();
-        _app = OneAiNative.CreateApp(json);
-        if (_app == IntPtr.Zero)
+        var configJson = Provider.ToJson();
+        var pump = new BusPump();
+        _pump = pump;                     // so OnYield (auto-approve) can reach it
+        pump.YieldReceived += OnYield;
+        pump.Start();
+        int code = await Task.Run(() => pump.Init(configJson));
+        if (code != OneAiNative.Ok)
         {
-            string err = OneAiNative.PtrToUtf8(OneAiNative.LastError()) ?? "build failed";
-            Error = err;
+            Error = "engine init failed: " + OneAiNative.SubmitCodeMessage(code);
+            pump.YieldReceived -= OnYield;
+            pump.Shutdown();
+            _pump = null;
+            return;
         }
+        _engineReady = true;
     }
 
     public async Task RebuildApp()
     {
         Scenario? savedScenario = CurrentScenario;
-        if (_groupSession != IntPtr.Zero) OneAiNative.FreeGroupSession(_groupSession);
-        if (_session != IntPtr.Zero) OneAiNative.FreeSession(_session);
-        if (_app != IntPtr.Zero) OneAiNative.FreeApp(_app);
-        _app = _session = _groupSession = IntPtr.Zero;
+        // Tear down: stop streaming, abandon pending ops, shut the engine + pump.
+        Running = false;
+        FailAllPending(new InvalidOperationException("engine is rebuilding"));
+        _engineReady = false;
+        _inGroupMode = false;
+        _groupStarting = false;
+        if (_pump != null) { _pump.YieldReceived -= OnYield; _pump.Shutdown(); _pump = null; }
         CurrentSessionId = null;
         CurrentScenario = null;
         DebriefActive = false;
         _activeSpeakerItem = null;
+        ActiveSpeakerId = null;
         Items.Clear();
         Error = null;
         await EnsureApp();
@@ -225,15 +265,31 @@ public class ChatViewModel : ObservableObject
         else await NewConversation();
     }
 
+    // ── Sidebar (session list) ─────────────────────────────────────────
+
     public async Task RefreshSessions()
     {
-        if (_app == IntPtr.Zero) return;
-        var json = OneAiNative.PtrToUtf8(OneAiNative.ListConversations(_app));
-        var list = SessionInfo.ParseArray(json);
-        list.Sort((a, b) => b.UpdatedAtMs.CompareTo(a.UpdatedAtMs));
-        Sessions.Clear();
-        foreach (var s in list) Sessions.Add(s);
+        if (!_engineReady || _pump == null) return;
+        var tcs = ResetSlot(ref _pendingSessionList);
+        int code = _pump.ListSessions();
+        if (code != OneAiNative.Ok) { ClearSlot(ref _pendingSessionList); return; }
+        JsonElement payload;
+        try { payload = await WithTimeout(tcs.Task); }
+        catch (TimeoutException) { return; }   // keep the current sidebar
+        catch (OperationCanceledException) { return; }   // superseded by a newer list
+        catch (Exception) { return; }   // engine error failed the slot — keep sidebar
+        var list = SessionInfo.ParseSessionList(payload)
+            .Where(s => !s.Archived)             // archived rows fold away
+            .OrderByDescending(s => s.UpdatedAtMs)
+            .ToList();
+        await RunOnUi(() =>
+        {
+            Sessions.Clear();
+            foreach (var s in list) Sessions.Add(s);
+        });
     }
+
+    // ── Conversations ──────────────────────────────────────────────────
 
     public Task NewConversation() => NewConversation(null, null);
 
@@ -260,9 +316,9 @@ public class ChatViewModel : ObservableObject
     /// round (e.g. writing workshop → writer drafts).</summary>
     public async Task NewConversation(Scenario? scenario, Dictionary<string, string>? topicValues)
     {
-        if (_app == IntPtr.Zero) return;
+        if (!_engineReady || _pump == null) return;
         CurrentScenario = scenario;
-        if (_groupSession != IntPtr.Zero) { OneAiNative.FreeGroupSession(_groupSession); _groupSession = IntPtr.Zero; }
+        _groupStarting = false;
         _activeSpeakerItem = null;
         ActiveSpeakerId = null;
         DebriefActive = false;
@@ -271,25 +327,24 @@ public class ChatViewModel : ObservableObject
         {
             var spec = scenario.SpecDto(Provider.Kind, Provider.ApiKey ?? "", Provider.BaseUrl ?? "",
                                         Provider.Model, topicValues);
-            _groupSession = OneAiNative.CreateGroupSession(_app, spec.ToJson());
-            if (_groupSession == IntPtr.Zero)
+            int code = _pump.StartGroupChat(spec.ToJson());
+            if (code != OneAiNative.Ok)
             {
-                Error = OneAI.Services.Loc.Str("scenario_failed") + (OneAiNative.PtrToUtf8(OneAiNative.LastError()) ?? "unknown");
+                Error = OneAI.Services.Loc.Str("scenario_failed") + OneAiNative.SubmitCodeMessage(code);
                 CurrentScenario = null;
-                _groupSession = IntPtr.Zero;
                 Running = false;
                 return;
             }
-            _session = IntPtr.Zero;
+            _inGroupMode = true;
+            _groupStarting = true;   // an early error yield is a group-build failure
             Items.Clear();
             Error = null;
             CurrentSessionId = null;   // group-chat conversation id is engine-side
             if (scenario.OpenerAgentId != null)
             {
                 // Opener speaks first (it knows the topic from its system prompt).
-                Running = true;
+                // The round runs async; turn_complete clears Running + refreshes.
                 await RunGroupStart();
-                await RefreshSessions();   // scenario session shows up, titled, immediately
             }
             else
             {
@@ -302,11 +357,25 @@ public class ChatViewModel : ObservableObject
         }
         else
         {
-            // Single-agent path.
-            _session = OneAiNative.CreateSession(_app, null);
-            CurrentSessionId = OneAiNative.PtrToUtf8(OneAiNative.SessionId(_session));
-            Items.Clear();
-            Error = null;
+            // Single-agent path: create a fresh session.
+            _inGroupMode = false;
+            var tcs = ResetSlot(ref _pendingSessionCreated);
+            int code = _pump.CreateSession();
+            if (code != OneAiNative.Ok) { ClearSlot(ref _pendingSessionCreated); Error = OneAiNative.SubmitCodeMessage(code); return; }
+            try
+            {
+                var newId = await WithTimeout(tcs.Task);
+                await RunOnUi(() =>
+                {
+                    CurrentSessionId = newId;
+                    Items.Clear();
+                    Error = null;
+                    _activeSpeakerItem = null;
+                });
+            }
+            catch (TimeoutException) { Error = "create session timed out"; }
+            catch (OperationCanceledException) { /* superseded by a newer new-conversation */ }
+            catch (Exception ex) { Error = ex.Message; }   // engine error failed the slot
         }
     }
 
@@ -330,78 +399,244 @@ public class ChatViewModel : ObservableObject
     /// summary. Subsequent user messages route only to the debrief member.</summary>
     public async Task EndScenarioDebrief()
     {
-        if (Running || _groupSession == IntPtr.Zero || CurrentScenario?.Debrief is not { } debrief || DebriefActive)
+        if (Running || !_inGroupMode || _pump == null || CurrentScenario?.Debrief is not { } debrief || DebriefActive)
             return;
         DebriefActive = true;
-        OneAiNative.PtrToUtf8(OneAiNative.GroupSetScriptedOrder(_groupSession,
-            JsonSerializer.Serialize(new[] { debrief.DebriefMemberId })));
+        _pump.GroupSetScriptedOrder(JsonSerializer.Serialize(new[] { debrief.DebriefMemberId }));
         // Send the summary prompt as a user turn; the now-singleton order routes
-        // only to the debrief member. RunGroupTask handles streaming/save.
+        // only to the debrief member. RunGroupTask handles streaming.
         await RunGroupTask(debrief.SummaryPrompt, addUserItem: true);
     }
 
     public async Task LoadSession(string id)
     {
-        if (_app == IntPtr.Zero) return;
-        if (_groupSession != IntPtr.Zero) { OneAiNative.FreeGroupSession(_groupSession); _groupSession = IntPtr.Zero; }
+        if (!_engineReady || _pump == null) return;
+        _inGroupMode = false;
+        _groupStarting = false;
         CurrentScenario = null;
         DebriefActive = false;
-        if (_session != IntPtr.Zero) OneAiNative.FreeSession(_session);
-        _session = OneAiNative.CreateSession(_app, id);
-        CurrentSessionId = OneAiNative.PtrToUtf8(OneAiNative.SessionId(_session));
-        Items.Clear();
-        Error = null;
-        _lastUserTask = null;
-        var json = OneAiNative.PtrToUtf8(OneAiNative.SessionMessages(_session));
-        // Fold consecutive same-speaker assistant messages into one bubble —
-        // a single user turn persists several assistant messages (tool-call
-        // preludes + final answer), but the chat view renders the whole turn
-        // as ONE bubble (issue #17, mirrors macOS rebuildEntries / Android
-        // loadSession). system / tool messages between assistants don't break
-        // a turn; an empty-text (tool-call-only) assistant renders no bubble.
-        AssistantItem? pending = null;
-        foreach (var m in ChatMessage.ParseArray(json))
+        var tcs = ResetSlot(ref _pendingSessionLoaded);
+        int code = _pump.LoadSession(id);
+        if (code != OneAiNative.Ok) { ClearSlot(ref _pendingSessionLoaded); Error = OneAiNative.SubmitCodeMessage(code); return; }
+        JsonElement loaded;
+        try { loaded = await WithTimeout(tcs.Task); }
+        catch (TimeoutException) { Error = "load session timed out"; return; }
+        catch (OperationCanceledException) { return; }   // superseded by a newer load
+        catch (Exception ex) { Error = ex.Message; return; }   // engine error failed the slot
+
+        var resolvedId = loaded.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+            ? idEl.GetString() : id;
+        var msgs = ChatMessage.ParseSessionLoaded(loaded);
+
+        await RunOnUi(() =>
         {
-            if (m.Role == "user")
+            CurrentSessionId = resolvedId;
+            Items.Clear();
+            Error = null;
+            _lastUserTask = null;
+            _activeSpeakerItem = null;
+            ActiveSpeakerId = null;
+            // Fold consecutive same-speaker assistant messages into one bubble —
+            // a single user turn persists several assistant messages (tool-call
+            // preludes + final answer), but the chat view renders the whole turn
+            // as ONE bubble (issue #17, mirrors macOS rebuildEntries / Android
+            // loadSession). system / tool messages between assistants don't break
+            // a turn; an empty-text (tool-call-only) assistant renders no bubble.
+            AssistantItem? pending = null;
+            foreach (var m in msgs)
             {
-                if (pending != null) { Items.Add(pending); pending = null; }
-                if (!string.IsNullOrWhiteSpace(m.Text))
-                { Items.Add(new UserItem(m.Text)); _lastUserTask = m.Text; }
-            }
-            else if (m.Role == "assistant")
-            {
-                if (string.IsNullOrWhiteSpace(m.Text)) continue; // tool-call-only, no bubble
-                if (pending != null && pending.SpeakerId == m.Speaker)
+                if (m.Role == "user")
                 {
-                    // Same turn, same speaker — accumulate the text.
-                    if (!string.IsNullOrEmpty(pending.Text)) pending.Text += "\n";
-                    pending.Text += m.Text;
+                    if (pending != null) { Items.Add(pending); pending = null; }
+                    if (!string.IsNullOrWhiteSpace(m.Text))
+                    { Items.Add(new UserItem(m.Text)); _lastUserTask = m.Text; }
                 }
-                else
+                else if (m.Role == "assistant")
                 {
-                    // New turn or speaker change — flush the previous bubble.
-                    if (pending != null) Items.Add(pending);
-                    var (nm, col, av) = ScenarioStore.SpeakerMeta(m.Speaker ?? "", null);
-                    pending = new AssistantItem
+                    if (string.IsNullOrWhiteSpace(m.Text)) continue; // tool-call-only, no bubble
+                    if (pending != null && pending.SpeakerId == m.Speaker)
                     {
-                        Text = m.Text, Done = true, SpeakerId = m.Speaker,
-                        SpeakerName = nm, SpeakerColor = col, SpeakerAvatar = av,
-                    };
+                        // Same turn, same speaker — accumulate the text.
+                        if (!string.IsNullOrEmpty(pending.Text)) pending.Text += "\n";
+                        pending.Text += m.Text;
+                    }
+                    else
+                    {
+                        // New turn or speaker change — flush the previous bubble.
+                        if (pending != null) Items.Add(pending);
+                        var (nm, col, av) = ScenarioStore.SpeakerMeta(m.Speaker ?? "", null);
+                        pending = new AssistantItem
+                        {
+                            Text = m.Text,
+                            Done = true,
+                            SpeakerId = m.Speaker,
+                            SpeakerName = nm,
+                            SpeakerColor = col,
+                            SpeakerAvatar = av,
+                        };
+                    }
                 }
+                // else: empty assistant / system / tool — don't break the turn
             }
-            // else: empty assistant / system / tool — don't break the turn
-        }
-        if (pending != null) Items.Add(pending);
-        StreamTick++;
+            if (pending != null) Items.Add(pending);
+            StreamTick++;
+        });
     }
 
     public async Task DeleteSession(string id)
     {
-        if (_app == IntPtr.Zero) return;
-        OneAiNative.DeleteConversation(_app, id);
+        if (!_engineReady || _pump == null) return;
+        var tcs = ResetSlot(ref _pendingSessionDeleted);
+        int code = _pump.DeleteSession(id);
+        if (code != OneAiNative.Ok) { ClearSlot(ref _pendingSessionDeleted); return; }
+        try { await WithTimeout(tcs.Task); }
+        catch (TimeoutException) { /* sidebar refresh still runs */ }
+        catch (OperationCanceledException) { /* superseded; refresh below is harmless */ }
+        catch (Exception) { /* engine error failed the slot; refresh below is harmless */ }
         await RefreshSessions();
         if (id == CurrentSessionId) await NewConversation();
     }
+
+    // ── Pump yield dispatch (runs on the pump's poll thread) ──────────
+
+    private void OnYield(BusYield y)
+    {
+        switch (y.Kind)
+        {
+            case "session_created":
+                CompleteSlot(ref _pendingSessionCreated, StrProp(y.Json, "id") ?? "");
+                return;
+            case "session_loaded":
+                CompleteSlot(ref _pendingSessionLoaded, y.Json);
+                return;
+            case "session_deleted":
+                CompleteSlot(ref _pendingSessionDeleted, StrProp(y.Json, "id") ?? "");
+                return;
+            case "session_list":
+                CompleteSlot(ref _pendingSessionList, y.Json);
+                return;
+            case "approval_request":
+                AutoApprove(y.Json);
+                return;
+            case "token_usage":
+                UpdateTokens(y.Json);
+                return;
+            case "speaker_turn":
+                _groupStarting = false;   // group is up and speaking
+                var sp = StrProp(y.Json, "speaker");
+                if (sp != null) _dq.TryEnqueue(() => ActiveSpeakerId = sp);
+                return;
+            case "error":
+                HandleErrorYield(y.Json);
+                return;
+        }
+
+        // Fragment / turn yields → the render path. A fragment proves a group
+        // started successfully (clears the group-build-failure window).
+        if (_groupStarting && y.Kind is "stream_chunk" or "thinking" or "direct_answer" or "turn_complete")
+            _groupStarting = false;
+        foreach (var ev in ChatEvent.FromBusYield(y)) _coalescer.OnEvent(ev);
+    }
+
+    /// <summary>Auto-proceed a tool-approval request — mirrors the macOS
+    /// sidecar's <c>respondApproval</c> fire-and-forget (the app has no approval
+    /// UI yet; the iOS UIAlertController pattern is the future affordance).</summary>
+    private void AutoApprove(JsonElement j)
+    {
+        var rid = StrProp(j, "request_id");
+        if (rid != null) _pump?.RespondApproval(rid, proceed: true);
+    }
+
+    private void UpdateTokens(JsonElement j)
+    {
+        if (!j.TryGetProperty("usage", out var u)) return;
+        uint prompt = u.TryGetProperty("prompt_tokens", out var p) && p.TryGetUInt32(out var pv) ? pv : 0;
+        uint completion = u.TryGetProperty("completion_tokens", out var c) && c.TryGetUInt32(out var cv) ? cv : 0;
+        int total = (int)(prompt + completion);
+        _dq.TryEnqueue(() => LastTurnTokens = total);
+    }
+
+    private void HandleErrorYield(JsonElement j)
+    {
+        bool recoverable = j.TryGetProperty("recoverable", out var r) && r.ValueKind == JsonValueKind.True;
+        string msg = StrProp(j, "message") ?? "engine error";
+        if (!recoverable) FailAllPending(new InvalidOperationException(msg));
+        if (_groupStarting)
+        {
+            // The group failed to build — reset the scenario state.
+            _groupStarting = false;
+            _inGroupMode = false;
+            _dq.TryEnqueue(() =>
+            {
+                CurrentScenario = null;
+                Running = false;
+                Error = msg;
+            });
+            return;
+        }
+        _coalescer.OnEvent(new ChatEvent { Type = "Error", Message = msg });
+    }
+
+    // ── Correlation slot helpers (thread-safe) ────────────────────────
+
+    private TaskCompletionSource<T> ResetSlot<T>(ref TaskCompletionSource<T>? slot)
+    {
+        lock (_corrLock)
+        {
+            slot?.TrySetCanceled();
+            slot = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return slot;
+        }
+    }
+    private void CompleteSlot<T>(ref TaskCompletionSource<T>? slot, T value)
+    {
+        TaskCompletionSource<T>? tcs;
+        lock (_corrLock) { tcs = slot; slot = null; }
+        tcs?.TrySetResult(value);
+    }
+    private void ClearSlot<T>(ref TaskCompletionSource<T>? slot)
+    {
+        TaskCompletionSource<T>? tcs;
+        lock (_corrLock) { tcs = slot; slot = null; }
+        tcs?.TrySetCanceled();
+    }
+    private void FailAllPending(Exception ex)
+    {
+        TaskCompletionSource<string>? c; TaskCompletionSource<JsonElement>? l;
+        TaskCompletionSource<string>? d; TaskCompletionSource<JsonElement>? s;
+        lock (_corrLock)
+        {
+            c = _pendingSessionCreated; _pendingSessionCreated = null;
+            l = _pendingSessionLoaded; _pendingSessionLoaded = null;
+            d = _pendingSessionDeleted; _pendingSessionDeleted = null;
+            s = _pendingSessionList; _pendingSessionList = null;
+        }
+        c?.TrySetException(ex); l?.TrySetException(ex);
+        d?.TrySetException(ex); s?.TrySetException(ex);
+    }
+    private static async Task<T> WithTimeout<T>(Task<T> t)
+    {
+        var done = await Task.WhenAny(t, Task.Delay(AwaitTimeoutMs));
+        return done == t ? await t : throw new TimeoutException();
+    }
+
+    /// <summary>Run an action on the UI thread and await it (WinUI 3 has no
+    /// SynchronizationContext for async continuations, so an <c>await</c> off a
+    /// pump/threadpool completion must marshal UI mutations explicitly).</summary>
+    private Task RunOnUi(Action action)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool queued = _dq.TryEnqueue(() =>
+        {
+            try { action(); tcs.TrySetResult(true); }
+            catch (Exception ex) { tcs.TrySetException(ex); }
+        });
+        if (!queued) tcs.TrySetException(new InvalidOperationException("DispatcherQueue unavailable"));
+        return tcs.Task;
+    }
+
+    private static string? StrProp(JsonElement parent, string prop) =>
+        parent.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     // ── Event handling (speaker routing) ──────────────────────────────
     // Route an event to the active speaker's AssistantItem. When the speaker
@@ -478,8 +713,12 @@ public class ChatViewModel : ObservableObject
                 if (!string.IsNullOrEmpty(ev.FinalText)) turn.Text = ev.FinalText;
                 if (turn.ThinkingActive) { turn.ThinkingActive = false; turn.ThinkingDone = true; }
                 turn.Streaming = false; turn.Done = true;
-                LastTurnTokens = ((ev.FinalText?.Length ?? 0) + turn.Thinking.Length) / 4;
-                if (CurrentScenario == null) Running = false;
+                // Fallback estimate only if the token_usage yield didn't land.
+                if (LastTurnTokens == 0)
+                    LastTurnTokens = ((ev.FinalText?.Length ?? 0) + turn.Thinking.Length) / 4;
+                // turn_complete ends a single-agent turn AND a group round.
+                Running = false;
+                _ = RefreshSessions();   // engine auto-saved; sidebar picks it up
                 break;
             case "Error":
                 turn.Error = ev.Message; turn.Streaming = false; turn.Done = true; Running = false;
@@ -488,110 +727,74 @@ public class ChatViewModel : ObservableObject
         StreamTick++;
     }
 
+    // ── Turn submission ───────────────────────────────────────────────
+
     public async Task RunTask(string task, bool addUserItem = true)
     {
         _lastUserTask = task;
-        if (_groupSession != IntPtr.Zero)
+        if (_inGroupMode)
         {
             await RunGroupTask(task, addUserItem);
             return;
         }
-        if (_session == IntPtr.Zero) { Error = "session not built"; return; }
+        if (!_engineReady || _pump == null) { Error = "engine not ready"; return; }
         if (addUserItem) Items.Add(new UserItem(task));
         var turn = new AssistantItem();
         _activeSpeakerItem = turn;
         Items.Add(turn);
         Running = true;
         Error = null;
+        LastTurnTokens = 0;
 
-        // Mid-turn save so the new chat shows in the sidebar instantly.
-        OneAiNative.SessionSave(_session);
-        _ = RefreshSessions();
-
-        var coalescer = new StreamCoalescer(this, _dq);
-        await Task.Run(() =>
+        int code = _pump.SendUserMessage(task);
+        if (code != OneAiNative.Ok)
         {
-            OneAiEventCb cb = (ctx, jsonPtr) =>
-            {
-                string? json = jsonPtr == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(jsonPtr);
-                ChatEvent? ev = json is null ? null : ChatEvent.Parse(json);
-                if (ev != null) coalescer.OnEvent(ev!);
-            };
-            IntPtr err = OneAiNative.SessionRunTask(_session, task, cb, IntPtr.Zero);
-            string? errMsg = OneAiNative.PtrToUtf8(err);
-            coalescer.FlushNow();
-            _dq.TryEnqueue(() =>
-            {
-                turn.Streaming = false; turn.Done = true; Running = false;
-                if (errMsg != null) turn.Error = errMsg;
-            });
-        });
-        await RefreshSessions();
+            turn.Error = OneAiNative.SubmitCodeMessage(code);
+            turn.Streaming = false; turn.Done = true; Running = false;
+        }
+        await Task.CompletedTask;
     }
 
     /// <summary>Run the scenario's opener turn (no user message). The opener
-    /// knows the topic from its system prompt; its events route via Handle.</summary>
+    /// knows the topic from its system prompt; its events route via Handle. The
+    /// round runs async — turn_complete clears Running.</summary>
     private async Task RunGroupStart()
     {
+        if (_pump == null) return;
         Running = true;
         Error = null;
+        LastTurnTokens = 0;
         _activeSpeakerItem = null;
         ActiveSpeakerId = null;
-        var coalescer = new StreamCoalescer(this, _dq);
-        await Task.Run(() =>
+        int code = _pump.GroupStart();
+        if (code != OneAiNative.Ok)
         {
-            OneAiEventCb cb = (ctx, jsonPtr) =>
-            {
-                string? json = jsonPtr == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(jsonPtr);
-                ChatEvent? ev = json is null ? null : ChatEvent.Parse(json);
-                if (ev != null) coalescer.OnEvent(ev!);
-            };
-            IntPtr err = OneAiNative.GroupStart(_groupSession, cb, IntPtr.Zero);
-            string? errMsg = OneAiNative.PtrToUtf8(err);
-            coalescer.FlushNow();
-            _dq.TryEnqueue(() =>
-            {
-                Running = false;
-                if (errMsg != null) Error = errMsg;
-            });
-        });
+            _groupStarting = false; _inGroupMode = false;
+            Running = false;
+            Error = OneAiNative.SubmitCodeMessage(code);
+        }
+        await Task.CompletedTask;
     }
 
-    /// <summary>Multi-agent run: append the user item, run the round (each
-    /// member's events route to its own item via Handle), stop at the user's
-    /// turn.</summary>
+    /// <summary>Multi-agent run: append the user item, submit the round (each
+    /// member's events route to its own item via Handle). The round runs async —
+    /// turn_complete clears Running + refreshes the sidebar.</summary>
     private async Task RunGroupTask(string task, bool addUserItem)
     {
-        if (_groupSession == IntPtr.Zero) return;
+        if (!_inGroupMode || _pump == null) return;
         if (addUserItem) Items.Add(new UserItem(task));
         _activeSpeakerItem = null;   // a new round starts; first event seeds item
         ActiveSpeakerId = null;
         Running = true;
         Error = null;
-        var coalescer = new StreamCoalescer(this, _dq);
-        await Task.Run(() =>
+        LastTurnTokens = 0;
+        int code = _pump.GroupUserMessage(task);
+        if (code != OneAiNative.Ok)
         {
-            OneAiEventCb cb = (ctx, jsonPtr) =>
-            {
-                string? json = jsonPtr == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(jsonPtr);
-                ChatEvent? ev = json is null ? null : ChatEvent.Parse(json);
-                if (ev != null) coalescer.OnEvent(ev!);
-            };
-            IntPtr err = OneAiNative.GroupRunTask(_groupSession, task, cb, IntPtr.Zero);
-            string? errMsg = OneAiNative.PtrToUtf8(err);
-            coalescer.FlushNow();
-            _dq.TryEnqueue(() =>
-            {
-                // Attach the error to the active speaker's item (or a fresh one).
-                if (_activeSpeakerItem == null)
-                { var item = new AssistantItem(); _activeSpeakerItem = item; Items.Add(item); }
-                if (errMsg != null) _activeSpeakerItem!.Error = errMsg;
-                _activeSpeakerItem!.Streaming = false; _activeSpeakerItem!.Done = true;
-                Running = false;
-            });
-        });
-        if (_groupSession != IntPtr.Zero) OneAiNative.GroupSave(_groupSession);
-        await RefreshSessions();
+            Running = false;
+            Error = OneAiNative.SubmitCodeMessage(code);
+        }
+        await Task.CompletedTask;
     }
 
     public async Task RetryLast()
@@ -610,8 +813,9 @@ public class ChatViewModel : ObservableObject
 
     public void Stop()
     {
-        if (_groupSession != IntPtr.Zero) OneAiNative.GroupInterrupt(_groupSession);
-        if (_session != IntPtr.Zero) OneAiNative.SessionInterrupt(_session);
+        // Cooperative interrupt — the bus fires the cancel token for a
+        // single-agent turn; the facade intercepts it for an active group round.
+        _pump?.SendInterrupt("user stopped");
     }
 
     public void SaveConfig()

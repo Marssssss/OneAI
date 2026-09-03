@@ -20,8 +20,8 @@ use async_trait::async_trait;
 use futures::FutureExt; // `catch_unwind` for async dispatch
 use oneai_agent::{AgentLoop, ParadigmKind, SubAgentKind, SubAgentSummary, ToolCallRequest};
 use oneai_bus::{
-    BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary, Directive,
-    EngineBus, EngineYield, InProcessBus,
+    BusParadigmKind, BusSessionInfo, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary,
+    Directive, EngineBus, EngineYield, InProcessBus,
 };
 use oneai_core::{traits::LlmProvider, ContentBlock, Message};
 use tokio::sync::{mpsc, Mutex};
@@ -79,6 +79,23 @@ pub fn sub_agent_summary_from_bus(s: BusSubAgent) -> SubAgentSummary {
     }
 }
 
+/// Project a durable-store [`oneai_core::SessionInfo`] row onto the bus wire
+/// DTO ([`BusSessionInfo`]) — the [`EngineYield::SessionList`] payload shape.
+/// Millis shape mirrors the app-server `session/list` RPC so a foreign UI
+/// renders one sidebar regardless of transport. Lives here (not in
+/// `oneai-bus`) because the bus crate doesn't depend on chrono.
+pub fn session_info_to_bus(s: oneai_core::SessionInfo) -> BusSessionInfo {
+    BusSessionInfo {
+        id: s.id,
+        title: s.title,
+        message_count: s.message_count,
+        created_at_ms: s.created_at.timestamp_millis(),
+        updated_at_ms: s.updated_at.timestamp_millis(),
+        archived: s.archived,
+        workspace: s.workspace,
+    }
+}
+
 /// The engine-side abstraction a frontend's session holder implements. Each
 /// method locks the holder itself (the pump holds an `Arc<Mutex<R>>` and
 /// locks per directive, exactly as the TUI did before the extraction).
@@ -119,6 +136,15 @@ pub trait DirectiveRuntime: Send {
 
     /// Delete a saved session from the durable store.
     async fn delete_session(&mut self, id: String) -> Result<()>;
+
+    /// List saved conversations (metadata only) for a frontend sidebar — the
+    /// bus-side counterpart of the app-server's synchronous `session/list`
+    /// RPC. Read-only, so the default is an empty list (a runtime without a
+    /// durable store, e.g. the TUI's `SessionState`, answers honestly rather
+    /// than erroring); runtimes with an `App` override it.
+    async fn list_sessions(&mut self) -> Vec<oneai_core::SessionInfo> {
+        Vec::new()
+    }
 
     /// Current session id (owned — crosses awaits).
     async fn session_id(&mut self) -> String;
@@ -398,6 +424,14 @@ async fn dispatch_directive<R: DirectiveRuntime>(
                 }),
             };
         }
+        Directive::ListSessions => {
+            // Sidebar metadata for raw-bus frontends (in-process c_facade
+            // pump, `oneai serve`). Read-only — an empty list (no durable
+            // store) is a valid answer, not an error.
+            let infos = { rt.lock().await.list_sessions().await };
+            let sessions = infos.into_iter().map(session_info_to_bus).collect();
+            let _ = bus.emit(EngineYield::SessionList { sessions });
+        }
         Directive::Shutdown => {
             tracing::info!("Directive::Shutdown received — stopping directive pump");
             return false;
@@ -572,6 +606,101 @@ mod tests {
         match yields.recv().await.expect("yield after recovery") {
             EngineYield::SessionCreated { id } => assert_eq!(id, "post-panic-session"),
             other => panic!("expected SessionCreated, got {other:?}"),
+        }
+    }
+
+    /// `Directive::ListSessions` with the trait's DEFAULT impl (a runtime that
+    /// doesn't override it) — answers an empty `SessionList`, never an error.
+    #[tokio::test]
+    async fn list_sessions_defaults_to_empty_list_yield() {
+        let (bus, directive_rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let rt = Arc::new(Mutex::new(PanickingRuntime)); // no list_sessions override
+        let slot = Arc::new(Mutex::new(None));
+        let mut yields = bus.subscribe_yields();
+        let _handle = spawn_directive_pump(directive_rx, rt, slot, bus.clone());
+
+        bus.submit(Directive::ListSessions).await.unwrap();
+        match yields.recv().await.expect("yield after ListSessions") {
+            EngineYield::SessionList { sessions } => assert!(sessions.is_empty()),
+            other => panic!("expected SessionList, got {other:?}"),
+        }
+    }
+
+    /// A runtime WITH a durable store projects its rows onto the millis wire
+    /// shape (`session_info_to_bus`).
+    #[tokio::test]
+    async fn list_sessions_projects_runtime_rows_to_bus_shape() {
+        struct ListingRuntime;
+        #[async_trait]
+        impl DirectiveRuntime for ListingRuntime {
+            async fn run_turn(
+                &mut self,
+                _task: &str,
+                _interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
+            ) -> Result<BusTurnSummary> {
+                Err(oneai_core::error::OneAIError::Agent("unused".into()))
+            }
+            async fn set_paradigm(&mut self, _to: ParadigmKind) -> Option<ParadigmKind> {
+                None
+            }
+            async fn set_plan_mode(&mut self, _on: bool) {}
+            async fn compact(&mut self, _keep: usize) -> Result<CompactOutcome> {
+                Err(oneai_core::error::OneAIError::Agent("unused".into()))
+            }
+            fn provider(&self) -> Option<Arc<dyn LlmProvider>> {
+                None
+            }
+            async fn create_session(
+                &mut self,
+                _id: Option<String>,
+                _workspace: Option<String>,
+            ) -> String {
+                String::new()
+            }
+            async fn load_session(&mut self, id: String) -> (String, Vec<Message>) {
+                (id, Vec::new())
+            }
+            async fn reset_session(&mut self) -> String {
+                String::new()
+            }
+            async fn delete_session(&mut self, _id: String) -> Result<()> {
+                Ok(())
+            }
+            async fn list_sessions(&mut self) -> Vec<oneai_core::SessionInfo> {
+                vec![oneai_core::SessionInfo::with_title(
+                    "s1".into(),
+                    chrono::DateTime::from_timestamp_millis(1_727_000_000_000).unwrap(),
+                    chrono::DateTime::from_timestamp_millis(1_727_000_999_999).unwrap(),
+                    12,
+                    Some("秋天散文".into()),
+                )]
+            }
+            async fn session_id(&mut self) -> String {
+                String::new()
+            }
+        }
+
+        let (bus, directive_rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let rt = Arc::new(Mutex::new(ListingRuntime));
+        let slot = Arc::new(Mutex::new(None));
+        let mut yields = bus.subscribe_yields();
+        let _handle = spawn_directive_pump(directive_rx, rt, slot, bus.clone());
+
+        bus.submit(Directive::ListSessions).await.unwrap();
+        match yields.recv().await.expect("yield after ListSessions") {
+            EngineYield::SessionList { sessions } => {
+                assert_eq!(sessions.len(), 1);
+                let row = &sessions[0];
+                assert_eq!(row.id, "s1");
+                assert_eq!(row.title.as_deref(), Some("秋天散文"));
+                assert_eq!(row.message_count, 12);
+                assert_eq!(row.created_at_ms, 1_727_000_000_000);
+                assert_eq!(row.updated_at_ms, 1_727_000_999_999);
+                assert!(!row.archived);
+            }
+            other => panic!("expected SessionList, got {other:?}"),
         }
     }
 

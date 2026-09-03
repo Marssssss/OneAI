@@ -1,13 +1,18 @@
 # OneAI Windows app (WinUI 3 / C#)
 
 Native C# chat app — the Windows port of `platforms/android` / `platforms/macos`.
-Consumes the Rust `oneai-uniffi` core through a **hand-rolled `extern "C"` JSON
-facade** (`crates/oneai-uniffi/src/c_facade.rs`) because `uniffi-bindgen` 0.32
-has no C# generator. P/Invokes `oneai_native.dll`; all strings cross as UTF-8 so CJK
-(thinking text, answers) round-trips correctly. The native DLL is staged as
-`oneai_native.dll` (not the crate's `oneai.dll`) to avoid an NTFS case-insensitive
-collision with the managed assembly `OneAI.dll` in the output dir; the
-`OneAiNative` P/Invoke `Dll` constant is `"oneai_native"` to match.
+Consumes the Rust `oneai-uniffi` core through the **collapsed 3-symbol bus pump**
+(`crates/oneai-uniffi/src/c_facade.rs`) because `uniffi-bindgen` 0.32 has no C#
+generator. The whole C surface is `oneai_submit_directive` / `oneai_poll_yield` /
+`oneai_shutdown`; everything else rides JSON `Directive` (in) / `EngineYield` (out)
+— the oneai-bus protocol. `Native/BusPump.cs` owns a dedicated poll thread (the
+yield buffer is thread-local) and hands each yield to the ViewModel; the C#
+counterpart of `examples/native/{ios,android}/OneAIBusPump.{swift,kt}`. P/Invokes
+`oneai_native.dll`; all strings cross as UTF-8 so CJK (thinking text, answers)
+round-trips correctly. The native DLL is staged as `oneai_native.dll` (not the
+crate's `oneai.dll`) to avoid an NTFS case-insensitive collision with the managed
+assembly `OneAI.dll` in the output dir; the `OneAiNative` P/Invoke `Dll` constant
+is `"oneai_native"` to match.
 
 ## Build (on a Windows machine with Visual Studio + WindowsAppSDK 1.8 workload)
 
@@ -37,8 +42,9 @@ dotnet run --project platforms\windows\OneAI\OneAI.csproj -r win-x64 -c Debug
 The Windows app can reach the engine through **two transports**:
 
 - **FFI / in-process (default)** — the app P/Invokes `oneai_native.dll` (the
-  `extern "C"` JSON facade). This is the verified, shipping path; everything
-  in *Architecture* / *Feature parity* below describes it.
+  collapsed 3-symbol bus pump: submit_directive / poll_yield / shutdown). This
+  is the shipping path; everything in *Architecture* / *Feature parity* below
+  describes it.
 - **app-server sidecar (newer, skeleton)** — a C# `OneAiRpcClient` over a
   Windows named pipe + an `EngineProcessManager` that spawns
   `oneai app-server --listen pipe://oneai-<pid>`. Same JSON-RPC 2.0 frontend
@@ -56,15 +62,19 @@ default. When the WinUI sidecar wiring lands, see the per-frontend table in
 ```
 OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpackaged)
   Native/
-    OneAiNative.cs          # P/Invoke of oneai_native.dll (UTF-8 string marshalling) — single +
-                            # group-chat sessions
-    Models.cs              # ChatEvent(+speaker) / SessionInfo / ChatMessage(+speaker) /
-                            # ProviderConfig / AgentSpecDto / ScenarioSpecDto / ReviewLoopSpecDto DTOs
+    OneAiNative.cs          # P/Invoke of the 3-symbol pump (submit_directive / poll_yield /
+                            # shutdown); UTF-8 string marshalling, no free_string
+    BusPump.cs             # dedicated poll-thread driver (20fps drain of oneai_poll_yield) +
+                            # Directive builders (init/user_message/session/group/approve/interrupt)
+    Models.cs              # ChatEvent.FromBusYield (EngineYield → render events) / SessionInfo
+                            # (session_list) / ChatMessage (session_loaded replay) / ProviderConfig /
+                            # AgentSpecDto / ScenarioSpecDto / ReviewLoopSpecDto DTOs
   ViewModels/
     ChatModels.cs          # ObservableObject base + UserItem / AssistantItem(+speaker meta,
                             # streaming cap) / ToolStep + ColorUtil
-    ChatViewModel.cs       # App/session/group lifecycle; StreamCoalescer (20fps hot-event
-                            # batching to avoid UI-thread flooding); speaker-routed Handle
+    ChatViewModel.cs       # Engine lifecycle (Init/Shutdown), Directive submission, yield
+                            # dispatch + TaskCompletionSource correlation; StreamCoalescer
+                            # (20fps hot-event batching); speaker-routed Handle
     ScenarioModels.cs      # TurnPolicy / Agent / TopicField / DebriefConfig /
                             # ReviewLoopConfig / Scenario.SpecDto (per-member visibility →
                             # background fold) — port of macOS Models.swift
@@ -95,15 +105,19 @@ OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpacka
 native/oneai_native.dll   # staged by build_windows.ps1 (gitignored; renamed from oneai.dll)
 ```
 
-The `extern "C"` contract is documented in `bindings/c/oneai_c.h` (now incl. group-chat
-entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Models.cs`.
+The 3-symbol `extern "C"` contract is documented in `bindings/c/oneai_c.h`
+(submit_directive / poll_yield / shutdown, error codes, single-poll-thread rule).
+`Directive` / `EngineYield` JSON shapes live in `crates/oneai-bus/src/protocol.rs`
+(serde tag `"kind"`, snake_case); `ChatEvent.FromBusYield` in `Models.cs` maps the
+yields onto the render events.
 
 ## Feature parity (with macOS — full design port)
 
 - **Sidebar**: scenarios section (5 built-in presets + user-edited, tap→start, edit/delete)
   + recent sessions (new/switch/delete-confirm), new-conversation menu (single Agent /
   from scenario).
-- **Scenario system** (multi-agent group chat via the C facade group entry points):
+- **Scenario system** (multi-agent group chat via the bus group directives —
+  `start_group_chat` / `group_start` / `group_user_message` / `group_set_scripted_order`):
   - 5 presets: 面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴 — system prompts,
     topic fields, debrief, review loop ported verbatim from macOS AgentStore.swift.
   - Turn policies: scripted / round-robin / moderator.
@@ -128,7 +142,8 @@ entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Mod
   list, table, inline `code`/`**bold**`), thinking Expander (collapsible, "思考中…" →
   "已深度思考"), tool steps (`✓/✗/⚙ name(args)` + truncated result), retry-on-error,
   copy/share context menu, dark theme (follows system), first-run hint, stop button →
-  `oneai_group_interrupt` / `oneai_session_interrupt`.
+  the `interrupt` Directive (cooperative cancel; the facade intercepts it for an
+  active group round).
 - Provider settings (openai/anthropic/ollama presets) persisted as a JSON file;
   provider config + scenarios live under `%LOCALAPPDATA%\OneAI\` (`provider.json`,
   `oneai_scenarios.json`). The session SQLite db lives at the canonical

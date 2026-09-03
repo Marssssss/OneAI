@@ -1,100 +1,71 @@
 /* ──────────────────────────────────────────────────────────────────────
- * OneAI C facade — extern "C" JSON ABI over the uniffi wrappers.
+ * OneAI C facade — the collapsed 3-symbol bus pump (Shape A).
  *
- * Exported from liboneai.dylib / oneai.dll / liboneai.so alongside the
- * uniffi symbols. For foreign runtimes UniFFI 0.32 can't generate bindings
- * for (C# / NAPI-C++): every call is JSON-in / JSON-out + one C callback,
- * so neither side knows the uniffi wire protocol.
+ * Exported from liboneai.dylib / oneai.dll / liboneai.so by
+ * crates/oneai-uniffi/src/c_facade.rs. This is the ENTIRE C surface —
+ * the legacy 29-symbol OneAiApp/OneAiSession/OneAiGroupSession facade is
+ * gone. Everything else rides JSON `Directive` (inbound) / `EngineYield`
+ * (outbound) — the oneai-bus protocol, serde-tagged `"kind"`,
+ * snake_case: see crates/oneai-bus/src/protocol.rs.
  *
- * Threading: each entry drives a shared multi-thread tokio runtime.
- * oneai_session_run_task BLOCKS the caller for the whole agent loop and
- * fires the callback on a worker thread — marshal to your UI thread.
- * oneai_session_interrupt is safe to call from a different thread.
+ * Lifecycle:
+ *   1. oneai_submit_directive("{\"kind\":\"init\",\"config\":{...}}")
+ *      builds the engine + bus + directive pump (once).
+ *   2. Submit directives (user_message / approve / interrupt /
+ *      create_session / load_session / delete_session / list_sessions /
+ *      start_group_chat / group_start / group_user_message / ...) and
+ *      drain yields (stream_chunk / thinking / tool_calls / tool_result /
+ *      turn_complete / approval_request / session_* / error / ...) from
+ *      your poll loop.
+ *   3. oneai_shutdown() stops the pump and drops the engine; a later
+ *      Init rebuilds it cleanly.
  *
- * Ownership: strings returned by oneai_* (session_id, list_conversations,
- * session_messages, run_task error) are heap CString; free with
- * oneai_free_string. oneai_last_error returns a borrowed pointer (do NOT free).
+ * Threading:
+ *   - oneai_submit_directive blocks until the bus accepts the directive
+ *     (a bounded-channel send — fast) and is safe from any thread.
+ *   - oneai_poll_yield is non-blocking. Its return pointer aliases a
+ *     THREAD-LOCAL buffer, valid only until the next oneai_poll_yield on
+ *     the SAME thread: poll from exactly ONE thread, copy the string
+ *     immediately, and NEVER free the pointer (there is no free_string).
+ *   - Panics never unwind across the boundary (caught and surfaced as an
+ *     `error` yield + non-zero return code).
  * ────────────────────────────────────────────────────────────────────── */
 #ifndef ONEAI_C_FACADE_H
 #define ONEAI_C_FACADE_H
 
-#include <stddef.h>
-#include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Opaque handles (heap-allocated Arc). */
-typedef struct OneAiApp OneAiApp;
-typedef struct OneAiSession OneAiSession;
-typedef struct OneAiGroupSession OneAiGroupSession;
+/* Submit one Directive as a NUL-terminated UTF-8 JSON line.
+ *
+ * {"kind":"init","config":{...}} builds the engine on first call:
+ *   {"kind":"init","config":{
+ *      "kind":"openai"|"anthropic"|"ollama",
+ *      "api_key":"..","base_url":"..","model":"..",
+ *      "host":"..","port":11434,
+ *      "db_path":"/path/oneai.db","default_tools":true}}
+ * Every other kind is forwarded to the engine bus.
+ *
+ * Returns: 0 ok · 1 null/invalid input · 2 bad JSON · 3 engine already
+ * built (submit Shutdown first) · 4 engine build failed · 5 engine not
+ * initialized (submit Init first) · 6 bus submit failed · 7 internal
+ * panic caught at the FFI boundary (detail rides an `error` yield when an
+ * engine exists). */
+int32_t oneai_submit_directive(const char* json);
 
-/* Streaming event callback. Fires on a tokio worker thread.
- * event_json is a NUL-terminated UTF-8 string, borrowed for the duration
- * of the call only — copy it before returning. ctx is passed through. */
-typedef void (*oneai_event_cb)(void* ctx, const char* event_json);
+/* Poll the next EngineYield as one NUL-terminated UTF-8 JSON line, or
+ * NULL when none is pending. The pointer aliases a thread-local buffer —
+ * valid until the next call on the SAME thread; copy it immediately and
+ * do NOT free it. Call from exactly one thread (dedicated poll thread). */
+const char* oneai_poll_yield(void);
 
-/* ── App lifecycle ─────────────────────────────────────────────────────
- * config_json:
- *   {"kind":"openai"|"anthropic"|"ollama",
- *    "api_key":"..","base_url":"..","model":"..",
- *    "host":"..","port":11434,
- *    "db_path":"/path/oneai.db","default_tools":true}
- * Returns null on error → call oneai_last_error. */
-OneAiApp* oneai_create_app(const char* config_json);
-void      oneai_free_app(OneAiApp* app);
-bool      oneai_has_provider(OneAiApp* app);
-
-/* ── Sessions ──────────────────────────────────────────────────────────
- * id null/empty → new conversation; else resume by id (history loaded). */
-OneAiSession* oneai_create_session(OneAiApp* app, const char* id);
-void          oneai_free_session(OneAiSession* s);
-char*         oneai_session_id(OneAiSession* s);            /* free w/ oneai_free_string */
-
-/* ── Conversations ───────────────────────────────────────────────────── */
-/* JSON array of {"id","title"(null),"message_count","updated_at_ms"} */
-char* oneai_list_conversations(OneAiApp* app);              /* free w/ oneai_free_string */
-void  oneai_delete_conversation(OneAiApp* app, const char* id);
-
-/* ── Messages (replay) ───────────────────────────────────────────────── */
-/* JSON array of {"role":"user"|"assistant"|"system"|"tool","text":".."} */
-char* oneai_session_messages(OneAiSession* s);              /* free w/ oneai_free_string */
-bool  oneai_session_save(OneAiSession* s);
-
-/* ── Run the agent loop (BLOCKS until complete) ───────────────────────
- * Returns null on success; else an error message (free w/ oneai_free_string). */
-char* oneai_session_run_task(OneAiSession* s, const char* task,
-                             oneai_event_cb cb, void* ctx);
-void  oneai_session_interrupt(OneAiSession* s);
-
-/* ── Group chat (multi-agent scenario) ────────────────────────────────
- * scenario_json shape (mirrors the uniffi ScenarioSpecView/AgentSpecView
- * records the Swift/macOS binding builds):
- *   {"members":[{"id","name","system_prompt","kind"("openai"|"anthropic"|"ollama"),
- *                "model","api_key"?,"base_url"?,"color"?,"avatar"?}],
- *    "turn_policy":"scripted"|"roundrobin"|"moderator",
- *    "script_order"?:["id",..], "moderator_id"?,
- *    "opener_agent_id"?, "opener_line"?, "title"?,
- *    "review_loop"?:{"reviewer_id","approve_marker","max_rounds"}}
- * Group events carry a "speaker" id (null for single-agent sessions) so the
- * foreign UI can route fragments to the correct member's bubble.
- * oneai_group_start / oneai_group_run_task BLOCK until the round completes
- * and fire cb on a worker thread (marshal to your UI thread). */
-OneAiGroupSession* oneai_create_group_session(OneAiApp* app, const char* scenario_json);
-void   oneai_free_group_session(OneAiGroupSession* gs);
-char*  oneai_group_start(OneAiGroupSession* gs, oneai_event_cb cb, void* ctx);
-char*  oneai_group_run_task(OneAiGroupSession* gs, const char* user_input,
-                            oneai_event_cb cb, void* ctx);
-void   oneai_group_interrupt(OneAiGroupSession* gs);
-/* order_json is a JSON string array ["id",..]; returns null on success. */
-char*  oneai_group_set_scripted_order(OneAiGroupSession* gs, const char* order_json);
-char*  oneai_group_messages(OneAiGroupSession* gs);    /* free w/ oneai_free_string */
-bool   oneai_group_save(OneAiGroupSession* gs);
-
-/* ── String + error ──────────────────────────────────────────────────── */
-void  oneai_free_string(char* s);
-const char* oneai_last_error(void);   /* borrowed, do NOT free */
+/* Shut the engine down: submits Directive::Shutdown, aborts the pump,
+ * drops the engine state. Returns 0 ok · 1 no engine built · 2 internal
+ * panic caught. A subsequent Init rebuilds cleanly. */
+int32_t oneai_shutdown(void);
 
 #ifdef __cplusplus
 }
