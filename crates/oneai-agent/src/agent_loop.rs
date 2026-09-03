@@ -527,7 +527,18 @@ pub struct ParadigmConfig {
 
     /// Tools available in this paradigm — only these tools are sent to the
     /// model as tool definitions. Other tools are hidden from the model.
+    /// An EMPTY list means "all tools available" (after `tool_denylist`).
     pub tool_filter: Vec<String>,
+
+    /// Tools that are NEVER visible in this paradigm, applied after
+    /// `tool_filter`. This is the drift-proof way to express a restricted
+    /// paradigm: instead of allowlisting every permitted tool (which silently
+    /// hides newly registered tools — the 2026-09 webUI verify-session
+    /// postmortem: a ReAct allowlist of 10 hardcoded tools filtered out
+    /// `write_file`/`web_search`/`tool_search` and forced the model into
+    /// shell heredoc hacks), denylist the tools to exclude and let new
+    /// tools appear automatically.
+    pub tool_denylist: Vec<String>,
 
     /// Decision hint — injected into context as a system message when
     /// this paradigm becomes active. Tells the model what kind of
@@ -539,11 +550,35 @@ impl ParadigmConfig {
     /// Get the default configuration for each paradigm kind.
     ///
     /// These defaults are modeled after Aider's Architect/Editor pattern:
-    /// - Plan: No execution tools, focus on decomposition
+    /// - Plan: No mutation/execution tools, focus on decomposition
     /// - ReAct: Full tool set, focus on action
-    /// - Reflect: Read-only tools, focus on review
-    /// - Explore: Read + search tools, focus on discovery
+    /// - Reflect: No mutation/execution tools, focus on review
+    /// - Explore: No mutation/execution tools, focus on discovery
+    ///
+    /// Tool scoping uses a DENYLIST of mutating tools (not an allowlist of
+    /// read tools): an allowlist silently hides any tool registered after the
+    /// list was written. That drift is what made a webUI session lose
+    /// `write_file`/`web_search`/`tool_search` under `SwitchParadigm(ReAct)`
+    /// (2026-09 verify-session postmortem) — the system prompt promised
+    /// "use write_file" but the filter had dropped it, forcing the model into
+    /// `shell cat > f` heredoc hacks. With a denylist, newly registered read
+    /// tools become visible in restricted paradigms automatically, and ReAct —
+    /// the default execution mode — sees the full registry.
     pub fn defaults() -> Vec<ParadigmConfig> {
+        // Tools that mutate the workspace or execute arbitrary code — hidden
+        // in the read-only paradigms (Plan/Reflect/Explore).
+        let mutating_denylist: Vec<String> = [
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "notebook_edit",
+            "shell",
+            "code_interpreter",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
         vec![
             ParadigmConfig {
                 paradigm: ParadigmKind::Plan,
@@ -554,10 +589,8 @@ impl ParadigmConfig {
                     Focus on: understanding the task scope, identifying dependencies, \
                     ordering steps logically, and flagging risks or unknowns."
                     .to_string(),
-                tool_filter: vec![
-                    "read_file".into(), "grep".into(), "glob".into(),
-                    "list_directory".into(), "environment".into(),
-                ],
+                tool_filter: vec![], // Empty = all tools, then denylist applied
+                tool_denylist: mutating_denylist.clone(),
                 decision_hint: "You are in PLAN mode — focus on decomposing the task into ordered steps. \
                     Do NOT execute any tools. Produce only a plan.".to_string(),
             },
@@ -569,12 +602,11 @@ impl ParadigmConfig {
                     answer when done. If you encounter errors, try to fix them in subsequent iterations. \
                     Focus on: executing actions efficiently, verifying results, and iterating until complete."
                     .to_string(),
-                tool_filter: vec![
-                    "read_file".into(), "edit_file".into(), "apply_patch".into(),
-                    "shell".into(), "grep".into(), "glob".into(),
-                    "list_directory".into(), "environment".into(),
-                    "web_fetch".into(), "notebook_edit".into(),
-                ],
+                // ReAct is the default execution mode — it must see the FULL
+                // tool set, whatever is registered. A hardcoded allowlist here
+                // drifts every time a tool is added (the verify-session bug).
+                tool_filter: vec![], // Empty filter = all tools available
+                tool_denylist: vec![],
                 decision_hint: "You are in REACT mode — reason about what to do, then act using tools, \
                     observe results, and iterate.".to_string(),
             },
@@ -587,10 +619,8 @@ impl ParadigmConfig {
                     with: (1) issues found, (2) improvements suggested, (3) next steps recommended. \
                     Focus on: correctness, completeness, quality, and potential risks."
                     .to_string(),
-                tool_filter: vec![
-                    "read_file".into(), "grep".into(), "glob".into(),
-                    "list_directory".into(), "environment".into(),
-                ],
+                tool_filter: vec![], // Empty = all tools, then denylist applied
+                tool_denylist: mutating_denylist.clone(),
                 decision_hint: "You are in REFLECT mode — review the current state, identify errors \
                     and improvements, and suggest next steps.".to_string(),
             },
@@ -604,15 +634,28 @@ impl ParadigmConfig {
                     Focus on: thoroughness, accuracy, and providing useful context for \
                     subsequent planning or execution."
                     .to_string(),
-                tool_filter: vec![
-                    "read_file".into(), "grep".into(), "glob".into(),
-                    "list_directory".into(), "environment".into(),
-                    "web_fetch".into(),
-                ],
+                tool_filter: vec![], // Empty = all tools, then denylist applied
+                tool_denylist: mutating_denylist,
                 decision_hint: "You are in EXPLORE mode — search and understand the environment. \
                     Report findings without modifying anything.".to_string(),
             },
         ]
+    }
+
+    /// Human-readable one-line description of this paradigm's tool scope, for
+    /// activation logs — e.g. `all tools` (ReAct) or
+    /// `all tools except [write_file, ...]` (read-only paradigms).
+    pub fn tool_scope_description(&self) -> String {
+        let allow = if self.tool_filter.is_empty() {
+            "all tools".to_string()
+        } else {
+            self.tool_filter.join(", ")
+        };
+        if self.tool_denylist.is_empty() {
+            allow
+        } else {
+            format!("{} except [{}]", allow, self.tool_denylist.join(", "))
+        }
     }
 
     /// Get the ParadigmConfig for a specific paradigm kind from the defaults.
@@ -624,6 +667,7 @@ impl ParadigmConfig {
                 paradigm: kind,
                 system_prompt: String::new(),
                 tool_filter: vec![], // Empty filter = all tools available
+                tool_denylist: vec![],
                 decision_hint: String::new(),
             })
     }
@@ -5174,6 +5218,24 @@ impl AgentLoop {
             return call;
         }
 
+        // ─── Shell-metacharacter guard ──────────────────────────────────────────
+        // Routing decides the rewrite from the command's FIRST segment and
+        // discards the rest of the line. When the command contains structural
+        // shell syntax — redirection, pipes, chaining, command substitution —
+        // that discard silently changes what the command does. Observed
+        // incident (2026-09 webUI verify-session): `cat > "xx.md"` (a WRITE)
+        // was rewritten to `read_file(path=">")` → "Error: File not found: >".
+        // Any structural metacharacter aborts the rewrite; the command stays
+        // as shell. Routing is only an optimization — shell is always correct.
+        // (`>>` / `<<` / `&&` / `||` are covered by their single-char halves.)
+        if command
+            .chars()
+            .any(|c| matches!(c, '>' | '<' | '|' | ';' | '&' | '`' | '\n' | '\r'))
+            || command.contains("$(")
+        {
+            return call;
+        }
+
         // Parse the first word (the actual command) and its arguments
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
@@ -5288,13 +5350,9 @@ impl AgentLoop {
                 };
             }
 
-            // echo (simple, no redirect) → environment-like
-            "echo" => {
-                // If it has > or >>, it's a write operation → keep as shell
-                if cmd_args.iter().any(|a| a.contains(">") || a.contains(">>")) {
-                    return call;
-                }
-            }
+            // echo stays as shell — the metacharacter guard above already
+            // keeps `echo x > f` (a write) unrewritten, and plain echo has no
+            // specialized tool to route to.
 
             // tree → list_directory
             "tree" => {
@@ -5826,9 +5884,9 @@ impl AgentLoop {
         state.active_paradigm_config = Some(config.clone());
 
         format!(
-            "{} paradigm activated — tools filtered to: [{}]",
+            "{} paradigm activated — tool scope: {}",
             paradigm_name(&paradigm),
-            config.tool_filter.join(", ")
+            config.tool_scope_description()
         )
     }
 
@@ -6505,6 +6563,23 @@ impl AgentLoop {
         } else {
             // No paradigm config — all tools available (default ReAct behavior)
             tools_map.values().collect()
+        };
+
+        // Apply the paradigm denylist — tools a restricted paradigm must never
+        // expose regardless of the allowlist outcome. This is what keeps
+        // Plan/Reflect/Explore read-only while their allowlists stay empty
+        // (= all tools), so newly registered read tools appear automatically.
+        let filtered_tools: Vec<&Arc<dyn Tool>> = if let Some(config) = paradigm_config {
+            if config.tool_denylist.is_empty() {
+                filtered_tools
+            } else {
+                filtered_tools
+                    .into_iter()
+                    .filter(|tool| !config.tool_denylist.contains(&tool.name().to_string()))
+                    .collect()
+            }
+        } else {
+            filtered_tools
         };
 
         // ─── Footprint gate (check_fn) ──────────────────────────────────────────
@@ -7568,9 +7643,9 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
 
         Ok(oneai_workflow::ActionResult {
             output: format!(
-                "{} paradigm activated — system prompt changed, tools filtered to: [{}]",
+                "{} paradigm activated — system prompt changed, tool scope: {}",
                 paradigm,
-                paradigm_config.tool_filter.join(", ")
+                paradigm_config.tool_scope_description()
             ),
             error: None,
         })
@@ -7836,6 +7911,26 @@ impl AgentLoopGraphActionExecutor {
             }
         } else {
             tools_map.values().collect()
+        };
+
+        // Paradigm denylist — see `build_tool_definitions_for_paradigm`. The
+        // denylist applies only to paradigm-derived scoping; an explicit
+        // `tool_filter_override` from a StateGraph node is authoritative.
+        let filtered_tools: Vec<&Arc<dyn Tool>> = if tool_filter_override.is_none() {
+            if let Some(config) = &paradigm_config {
+                if !config.tool_denylist.is_empty() {
+                    filtered_tools
+                        .into_iter()
+                        .filter(|tool| !config.tool_denylist.contains(&tool.name().to_string()))
+                        .collect()
+                } else {
+                    filtered_tools
+                }
+            } else {
+                filtered_tools
+            }
+        } else {
+            filtered_tools
         };
 
         // Footprint gate — see `build_tool_definitions_for_paradigm`.
@@ -8160,6 +8255,61 @@ mod smart_router_tests {
         let routed = AgentLoop::route_shell_to_specialized(call);
         assert_eq!(routed.name, "shell"); // Empty command stays as shell
     }
+
+    // ─── Metacharacter guard (2026-09 webUI verify-session regression) ─────
+    // Redirection / piping / chaining changes what a command does; the router
+    // must never rewrite such a command based on its first segment alone.
+
+    #[test]
+    fn test_no_redirect_for_cat_write_redirect() {
+        // The incident: `cat > file` is a WRITE — it was rewritten to
+        // read_file(path=">") → "File not found: >".
+        let call = ToolCallRequest {
+            id: "guard-1".to_string(),
+            name: "shell".to_string(),
+            args: serde_json::json!({"command": "cat > \"xx.md\""}),
+        };
+        let routed = AgentLoop::route_shell_to_specialized(call);
+        assert_eq!(routed.name, "shell");
+        assert_eq!(routed.args["command"], "cat > \"xx.md\"");
+    }
+
+    #[test]
+    fn test_no_redirect_for_heredoc_or_append() {
+        for cmd in [
+            "cat << EOF > out.txt",
+            "cat notes.md >> log.md",
+            "grep foo f.txt | wc -l",
+            "ls src/ && rm -rf src/",
+            "cat a.md; rm a.md",
+            "echo $(date) > stamp.txt",
+            "cat `ls`",
+        ] {
+            let call = ToolCallRequest {
+                id: "guard-2".to_string(),
+                name: "shell".to_string(),
+                args: serde_json::json!({ "command": cmd }),
+            };
+            let routed = AgentLoop::route_shell_to_specialized(call);
+            assert_eq!(
+                routed.name, "shell",
+                "command with structural metacharacters must stay as shell: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_plain_cat_still_routes_after_guard() {
+        // The guard must not over-block: no metacharacters → routing lives.
+        let call = ToolCallRequest {
+            id: "guard-3".to_string(),
+            name: "shell".to_string(),
+            args: serde_json::json!({"command": "cat src/main.rs"}),
+        };
+        let routed = AgentLoop::route_shell_to_specialized(call);
+        assert_eq!(routed.name, "read_file");
+        assert_eq!(routed.args["path"], "src/main.rs");
+    }
 }
 #[cfg(test)]
 mod dynamic_tool_prompt_tests {
@@ -8428,10 +8578,17 @@ mod dynamic_tool_prompt_tests {
 
     #[tokio::test]
     async fn paradigm_tool_filter_no_match_falls_back_to_all() {
-        // Plan paradigm filters to [read_file, grep, glob]; registry has only
-        // "shell". Without the fallback this would yield zero real tools.
+        // A custom allowlist that names no registered tool falls back to all
+        // tools — without the fallback a stale allowlist would silently hand
+        // the model zero real tools.
         let loop_ = build_loop(&["shell"]);
-        let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
+        let cfg = ParadigmConfig {
+            paradigm: ParadigmKind::ReAct,
+            system_prompt: String::new(),
+            tool_filter: vec!["nonexistent_tool".into()],
+            tool_denylist: vec![],
+            decision_hint: String::new(),
+        };
         let defs = loop_
             .build_tool_definitions_for_paradigm(Some(&cfg), false)
             .await;
@@ -8441,22 +8598,68 @@ mod dynamic_tool_prompt_tests {
             "shell should be exposed via fallback, got {:?}",
             names
         );
-        assert!(!names.contains(&"read_file"));
     }
 
     #[tokio::test]
-    async fn paradigm_tool_filter_with_match_scopes_normally() {
-        // When the filter matches, least-privilege scoping is preserved:
-        // edit_file and shell are excluded for the Plan paradigm.
-        let loop_ = build_loop(&["read_file", "edit_file", "shell"]);
+    async fn react_paradigm_exposes_full_registry() {
+        // Regression (2026-09 webUI verify-session): the ReAct default
+        // allowlist drifted to 10 hardcoded names and silently filtered out
+        // write_file/web_search/tool_search. ReAct is the default execution
+        // mode — it must see EVERY registered tool.
+        let loop_ = build_loop(&[
+            "read_file",
+            "write_file",
+            "web_search",
+            "tool_search",
+            "shell",
+        ]);
+        let cfg = ParadigmConfig::for_paradigm(ParadigmKind::ReAct);
+        let defs = loop_
+            .build_tool_definitions_for_paradigm(Some(&cfg), false)
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        for expected in [
+            "read_file",
+            "write_file",
+            "web_search",
+            "tool_search",
+            "shell",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "ReAct must expose `{}`, got {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_paradigm_denylist_hides_mutating_tools_only() {
+        // Read-only paradigms scope via a denylist of mutating tools: read
+        // and search tools stay visible — including tools registered after
+        // the defaults were written — while write/exec tools stay hidden.
+        let loop_ = build_loop(&[
+            "read_file",
+            "edit_file",
+            "shell",
+            "web_search",
+            "write_file",
+        ]);
         let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
         let defs = loop_
             .build_tool_definitions_for_paradigm(Some(&cfg), false)
             .await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
+        assert!(
+            names.contains(&"web_search"),
+            "new read tools must appear automatically, got {:?}",
+            names
+        );
         assert!(!names.contains(&"edit_file"));
         assert!(!names.contains(&"shell"));
+        assert!(!names.contains(&"write_file"));
     }
 
     #[tokio::test]

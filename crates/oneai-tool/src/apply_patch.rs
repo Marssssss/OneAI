@@ -192,19 +192,89 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<DiffHunk>> {
     Ok(hunks)
 }
 
-/// Strip `a/` or `b/` prefixes and `/dev/null` from file paths.
+/// Strip timestamps, quotes, `a/` or `b/` prefixes and `/dev/null` from
+/// diff-header file paths.
 fn clean_file_path(path: &str) -> String {
+    let path = path.trim();
+    // Tab-separated timestamp suffix ("file.rs\t2024-01-01 ...") first — the
+    // timestamp sits OUTSIDE any quotes, so this must precede unquoting.
+    let path = match path.find('\t') {
+        Some(idx) => &path[..idx],
+        None => path,
+    };
+    // Git wraps paths with special characters in C-style double quotes
+    // (`core.quotePath`), and models also emit plain `"file name.md"`
+    // headers. Unquote so the quotes don't become part of the file name
+    // (2026-09 webUI verify-session: a literal `"剪映….md"` — quotes
+    // included — was created on disk and cost 4 extra verification rounds).
+    let path = unquote_diff_path(path);
     if path == "/dev/null" {
         return String::new();
     }
     // Strip common prefixes: a/ or b/
     let stripped = path.trim_start_matches("a/").trim_start_matches("b/");
-    // Also handle tab-separated timestamps: "file.rs\t2024-01-01 ..."
-    if let Some(idx) = stripped.find('\t') {
-        stripped[..idx].to_string()
-    } else {
-        stripped.to_string()
+    // Mixed form — prefix outside the quotes: `b/"file name.md"`.
+    unquote_diff_path(stripped)
+}
+
+/// Unquote a diff-header path quoted in git's C-style (`core.quotePath`):
+/// `"docs/\346\226\207\344\273\266.md"` → `docs/文件.md`. Supports the
+/// standard escapes (`\"` `\\` `\t` `\n` `\r` `\a` `\b` `\f` `\v` and octal
+/// `\NNN`, which git uses for non-ASCII bytes). Paths without a balanced
+/// pair of enclosing quotes are returned unchanged.
+fn unquote_diff_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return path.to_string();
     }
+    let inner = &path[1..path.len() - 1];
+    // Fast path: no escapes — just drop the enclosing quotes.
+    if !inner.contains('\\') {
+        return inner.to_string();
+    }
+    let b = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            match b[i + 1] {
+                b'"' => out.push(b'"'),
+                b'\\' => out.push(b'\\'),
+                b'n' => out.push(b'\n'),
+                b't' => out.push(b'\t'),
+                b'r' => out.push(b'\r'),
+                b'a' => out.push(0x07),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0C),
+                b'v' => out.push(0x0B),
+                b'0'..=b'7' => {
+                    // Octal byte escape — up to 3 digits (git's encoding of
+                    // each UTF-8 byte under core.quotePath, e.g. \346).
+                    let mut val: u32 = 0;
+                    let mut j = i + 1;
+                    let mut digits = 0;
+                    while j < b.len() && digits < 3 && matches!(b[j], b'0'..=b'7') {
+                        val = val * 8 + (b[j] - b'0') as u32;
+                        j += 1;
+                        digits += 1;
+                    }
+                    out.push((val & 0xFF) as u8);
+                    i = j;
+                    continue;
+                }
+                other => {
+                    // Unknown escape — keep both characters verbatim.
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+            i += 2;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parse the start line number from a range like "-3,5" or "+3,5".
@@ -950,6 +1020,74 @@ mod tests {
         assert_eq!(clean_file_path("/dev/null"), "");
         assert_eq!(clean_file_path("src/main.rs\t2024-01-01"), "src/main.rs");
         assert_eq!(clean_file_path("src/main.rs"), "src/main.rs");
+        // Quoted header paths (git core.quotePath / model-emitted) — the
+        // quotes must NOT become part of the file name (2026-09 incident).
+        assert_eq!(clean_file_path("\"剪映CapCut.md\""), "剪映CapCut.md");
+        assert_eq!(clean_file_path("a/\"file name.md\""), "file name.md");
+        assert_eq!(clean_file_path("b/\"file.md\"\t2024-01-01"), "file.md");
+        // A quoted /dev/null is still the deletion marker.
+        assert_eq!(clean_file_path("\"/dev/null\""), "");
+    }
+
+    #[test]
+    fn test_unquote_diff_path_c_style_escapes() {
+        // Plain quotes — fast path.
+        assert_eq!(unquote_diff_path("\"file name.md\""), "file name.md");
+        // Git octal-escaped UTF-8: \346\226\207\346\241\243 = 文档.
+        assert_eq!(
+            unquote_diff_path(r#""docs/\346\226\207\346\241\243.md""#),
+            "docs/文档.md"
+        );
+        // Escaped quote + backslash + tab.
+        assert_eq!(unquote_diff_path(r#""a\"b\\c\td""#), "a\"b\\c\td");
+        // No quotes / unbalanced quotes → unchanged.
+        assert_eq!(unquote_diff_path("plain.md"), "plain.md");
+        assert_eq!(unquote_diff_path("\"unbalanced"), "\"unbalanced");
+        assert_eq!(unquote_diff_path("\""), "\"");
+        assert_eq!(unquote_diff_path(""), "");
+    }
+
+    #[test]
+    fn test_parse_diff_with_quoted_paths() {
+        // The incident shape: git-style quoted headers must parse to the
+        // bare file name, not a quoted one.
+        let diff =
+            "--- \"a/剪映CapCut.md\"\n+++ \"b/剪映CapCut.md\"\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+        let hunks = parse_unified_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_file, "剪映CapCut.md");
+        assert_eq!(hunks[0].new_file, "剪映CapCut.md");
+    }
+
+    #[tokio::test]
+    async fn patch_with_quoted_header_targets_unquoted_file() {
+        // End-to-end regression (2026-09 verify-session): a patch whose
+        // header quotes the path must modify the real file, not create a
+        // `"...quoted..."` sibling.
+        let dir = temp_dir("quoted-header");
+        let target = dir.join("剪映CapCut.md");
+        std::fs::write(&target, "line1\nold\n").unwrap();
+
+        let patch = format!(
+            "--- \"{f}\"\n+++ \"{f}\"\n@@ -1,2 +1,2 @@\n line1\n-old\n+new\n",
+            f = target.display()
+        );
+
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(serde_json::json!({"patch": patch}))
+            .await
+            .unwrap();
+
+        assert!(out.success, "output: {}", out.content);
+        assert!(std::fs::read_to_string(&target).unwrap().contains("new"));
+        // No quoted sibling may have appeared.
+        let quoted_sibling = dir.join(format!("\"{}\"", "剪映CapCut.md"));
+        assert!(
+            !quoted_sibling.exists(),
+            "a file with literal quotes must not be created"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
