@@ -47,24 +47,23 @@ use crate::tool_decorator::ToolDecorator;
 /// Defines the coding agent's role, capabilities, and behavioral guidelines.
 /// This replaces the generic system prompt in AgentLoopConfig when CodingPack
 /// is active.
+///
+/// **Tool references are MARKERS, not literals** (2026-09 verify-session P2):
+/// the tool-selection rules and the control-tools section are resolved at turn
+/// start against the tool definitions the model will actually see (paradigm
+/// filter + footprint gate + exposure gate). A static promise like "use
+/// write_file" drifted when a paradigm/tool filter removed the tool — the
+/// model then fell back to `shell cat > f` heredoc hacks. `oneai-agent`'s
+/// `resolve_prompt_markers` expands both markers; an absent tool produces no
+/// rule for it.
 pub const CODING_SYSTEM_PROMPT: &str = "\
 You are an intelligent coding assistant that can plan, execute, and reflect on \
 software development tasks. You have access to tools for reading, editing, searching, \
 and executing code in the project.
+{{TOOL_PREFERENCE_RULES}}
 
-**Tool Selection Rules (CRITICAL — always follow these):**
-
-Always prefer the most specific tool available over shell commands:
-- For reading files: use read_file (NOT shell cat/head/tail/less)
-- For editing files: use edit_file (NOT shell sed/awk/perl -i)
-- For creating files: use write_file (or apply_patch for multi-file) (NOT shell echo/tee/cat>)
-- For listing directories: use list_directory (NOT shell ls/find -type d)
-- For searching content: use grep (NOT shell grep/find)
-- For finding files: use glob (NOT shell find/locate)
-
-Use shell ONLY for: compilation, testing, git operations, package management, \
-running scripts, and commands that have no dedicated tool equivalent. \
-Shell is the LEAST preferred tool — always check if a specialized tool exists first.
+Always prefer the most specific tool available over shell commands — shell is the \
+LEAST preferred tool; check whether a specialized tool exists first.
 
 Key principles:
 1. **Read before edit**: Always read the relevant files before making changes. \
@@ -80,32 +79,13 @@ files you've modified and what decisions you've made.
 
 When you need to use a tool, output a tool call. When you have the final answer, \
 respond with just text without any tool calls.
-
-**Model-driven control tools** (call these when the task warrants them, instead of \
-just the plain file/search/shell tools):
-- `delegate(task, agent_type, budget_tokens?)`: hand a self-contained subtask to a \
-specialized sub-agent that runs in its own fresh context window and returns a summary. \
-`agent_type` is one of `Plan` (decompose a task), `Explore` (search/understand), \
-`Code` (implement/modify), `Review` (audit). Use it when the subtask has a clear \
-boundary (e.g. one independent module or a well-scoped search) and the main loop \
-should not be cluttered with its intermediate steps. After calling `delegate`, the \
-main loop waits for the sub-agent's summary — do not call other tools in the same turn.
-- `switch_paradigm(paradigm)`: switch to a fixed graph flow. `paradigm` is one of \
-`plan` (structured decomposition), `reflect` (deep review of the last result), \
-`explore` (breadth-first search), `react` (return to the standard reason-then-act \
-loop). After calling, execution continues inside that paradigm's graph and the result \
-is fed back to you.
-- `enter_plan_mode(plan?)`: escalate from normal execution into plan mode. Call this \
-ONLY when the task is genuinely complex and needs step-by-step decomposition — NOT for \
-simple one-shot tasks, which you should just do directly with execution tools. After \
-calling, you are switched into the plan toolset (task_create / exit_plan_mode) so you \
-can commit a plan for approval. Avoid calling it for trivia.
+{{MODEL_DRIVEN_CONTROL_TOOLS}}
 
 **Current information**: Your knowledge has a training cutoff. For anything that may \
 have changed since then (recent news, latest library/framework versions, current \
-prices, live data, recent documentation), call `web_search` to find current sources \
-and `web_fetch` to read them — do not answer from memory. The current date/time is \
-appended to this prompt; use it to judge recency.";
+prices, live data, recent documentation), prefer live sources over training memory \
+when a web tool is available. The current date/time is appended to this prompt; use \
+it to judge recency.";
 
 // ─── Coding Sub-Agent Type Definitions ─────────────────────────────────────────
 
@@ -1241,6 +1221,28 @@ mod tests {
         assert_eq!(pack.tool_decorators.len(), 12); // 8 original + apply_patch + web_search + write_file + code_interpreter
         assert_eq!(pack.context_sources.len(), 5); // ProjectInstructions + RepoMap + GitStatus + Date + Environment (FileTreeSource + ProjectConfigSource dropped)
         assert!(!pack.system_prompt_template.is_empty());
+    }
+
+    #[test]
+    fn test_coding_system_prompt_uses_alignment_markers() {
+        // The template must route every tool-specific promise through the
+        // alignment markers (resolved against the VISIBLE tool set at turn
+        // start) instead of hardcoding tool names — the 2026-09 verify-session
+        // P2 fix. A static "use write_file" promise drifted when a paradigm
+        // filter removed the tool.
+        assert!(
+            CODING_SYSTEM_PROMPT.contains("{{TOOL_PREFERENCE_RULES}}"),
+            "template must carry the tool-preference marker"
+        );
+        assert!(
+            CODING_SYSTEM_PROMPT.contains("{{MODEL_DRIVEN_CONTROL_TOOLS}}"),
+            "template must carry the control-tools marker"
+        );
+        // No static tool-selection rules or hardcoded web-tool promises survive.
+        assert!(!CODING_SYSTEM_PROMPT.contains("use write_file (or apply_patch"));
+        assert!(!CODING_SYSTEM_PROMPT.contains("call `web_search` to find current sources"));
+        assert!(!CODING_SYSTEM_PROMPT.contains("**Tool Selection Rules"));
+        assert!(!CODING_SYSTEM_PROMPT.contains("`delegate(task, agent_type"));
     }
 
     #[test]

@@ -106,6 +106,13 @@ impl ContextAssembler {
         // inference copy is trimmed — the durable log keeps full outputs.
         self.truncate_stale_tool_results(&mut conversation);
 
+        // Collapse the giant arguments of ALREADY-SUCCESSFUL tool calls (the
+        // 67KB write_file/heredoc payload from the 2026-09 verify-session
+        // postmortem). Once a write succeeds, its content argument is on disk
+        // — re-sending it every iteration only inflates context and kills the
+        // prefix cache. Ephemeral only: the durable log keeps full arguments.
+        collapse_successful_huge_tool_args(&mut conversation);
+
         Ok(conversation)
     }
 
@@ -402,6 +409,166 @@ pub(crate) fn current_user_turn_idx(conv: &Conversation) -> Option<usize> {
     conv.messages
         .iter()
         .position(|m| m.metadata.contains_key(CURRENT_TURN_KEY))
+}
+
+// ─── Post-success giant tool-argument collapsing ─────────────────────────────
+//
+// 2026-09 verify-session postmortem (P2): a write-class call can carry a huge
+// content argument (the session's 67KB heredoc). The call executes once, but
+// the full argument rides along in EVERY subsequent inference request,
+// inflating context and churning the provider's prompt-prefix cache. Once the
+// call has SUCCEEDED the payload is consumed (for write-class tools it is on
+// disk — readable via read_file), so the ephemeral assembly collapses it to a
+// truncated placeholder. The durable log keeps full arguments (lossless
+// transcript / export / replay); collapsing is applied to the per-request
+// clone here, and additionally to the durable clone handed to the compressor
+// in `AgentLoop::run_loop` so the summarizer's LLM call doesn't ingest it.
+
+/// Args of successful write-class calls above this size (chars) are collapsed.
+pub(crate) const WRITE_ARGS_COLLAPSE_THRESHOLD: usize = 2000;
+/// Any other successful tool's args collapse only above this (much larger)
+/// size — non-write args (scripts, delegate task text) have no on-disk copy,
+/// so the bar is higher.
+pub(crate) const ANY_ARGS_COLLAPSE_THRESHOLD: usize = 16_000;
+/// How many leading chars of each oversized string value survive collapsing.
+const COLLAPSED_VALUE_KEEP_CHARS: usize = 200;
+
+/// Tools whose arguments ARE the content written to the workspace — after a
+/// success the payload lives on disk, so collapsing its in-context copy is
+/// lossless in practice (read_file gets it back).
+pub(crate) fn is_write_class_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "file_write" | "apply_patch" | "edit_file" | "file_edit" | "notebook_edit"
+    )
+}
+
+/// Whether a tool-result's content indicates a NON-success. All failure paths
+/// in the loop prefix the result text: `Error: …` (feed_tool_results, incl.
+/// "Error: User rejected" / "Error: Denied by domain policy"), `Denied …`
+/// (lifecycle hook denial), or the plan-mode synthetic note. Failed calls keep
+/// full arguments — the model needs them to correct and retry.
+fn looks_like_failed_result(content: &str) -> bool {
+    content.starts_with("Error:")
+        || content.starts_with("Denied")
+        || content.starts_with("Plan mode is active")
+}
+
+/// Truncate every oversized string inside `value`, recursively. Small values
+/// (paths, flags, short strings) pass through untouched, so the collapsed
+/// args keep their structure and the model can still see WHAT was written
+/// where — only the bulk payload is elided.
+fn collapse_json_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => {
+            // Idempotence guard: never re-truncate an already-collapsed value.
+            if s.contains("[collapsed: full value was") {
+                return Value::String(s);
+            }
+            let n = s.chars().count();
+            if n > COLLAPSED_VALUE_KEEP_CHARS {
+                let kept: String = s.chars().take(COLLAPSED_VALUE_KEEP_CHARS).collect();
+                Value::String(format!(
+                    "{kept}\n…[collapsed: full value was {n} chars — omitted to save \
+                     context after the call succeeded]"
+                ))
+            } else {
+                Value::String(s)
+            }
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(collapse_json_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, collapse_json_value(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Build the collapsed replacement for an oversized args JSON string. Keeps
+/// valid JSON (providers replay assistant tool-call arguments verbatim); falls
+/// back to a generic placeholder when the args aren't parseable JSON.
+fn collapse_args_payload(args: &str) -> String {
+    let total = args.chars().count();
+    let placeholder = format!(
+        "{{\"_collapsed_args\":\"original {total}-char arguments omitted after \
+                 successful execution — the durable session transcript keeps them\"}}"
+    );
+    match serde_json::from_str::<serde_json::Value>(args) {
+        Ok(value) => serde_json::to_string(&collapse_json_value(value)).unwrap_or(placeholder),
+        Err(_) => placeholder,
+    }
+}
+
+/// Collapse giant arguments of SUCCEEDED tool calls on the ephemeral
+/// inference copy.
+///
+/// A call is eligible when (a) a tool result for its id exists and does not
+/// look like a failure, and (b) its serialized args exceed the threshold for
+/// its class ([`WRITE_ARGS_COLLAPSE_THRESHOLD`] for write-class tools,
+/// [`ANY_ARGS_COLLAPSE_THRESHOLD`] otherwise).
+///
+/// **Cache stability**: success is monotonic — once a result exists it never
+/// reverts, so a call flips full→collapsed exactly once, on the first
+/// assembly after its result landed. That assembly extends the cached prefix
+/// with new bytes anyway (the assistant reply + result), so the collapse adds
+/// no extra invalidation, and every later request carries the identical
+/// collapsed bytes.
+///
+/// Idempotent: collapsed args are far below both thresholds, and
+/// [`collapse_json_value`] refuses to re-truncate its own marker.
+pub(crate) fn collapse_successful_huge_tool_args(conv: &mut Conversation) {
+    // 1. Collect the call ids whose tool result indicates success.
+    let mut succeeded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &conv.messages {
+        if m.role != oneai_core::Role::Tool {
+            continue;
+        }
+        for block in &m.content {
+            if let oneai_core::ContentBlock::ToolResult { call_id, content } = block {
+                if !looks_like_failed_result(content) {
+                    succeeded.insert(call_id.clone());
+                }
+            }
+        }
+    }
+    if succeeded.is_empty() {
+        return;
+    }
+
+    // 2. Collapse eligible tool-call arguments in assistant messages.
+    for m in &mut conv.messages {
+        if m.role != oneai_core::Role::Assistant {
+            continue;
+        }
+        for block in &mut m.content {
+            if let oneai_core::ContentBlock::ToolCall { id, name, args } = block {
+                if !succeeded.contains(id) {
+                    continue;
+                }
+                let threshold = if is_write_class_tool(name) {
+                    WRITE_ARGS_COLLAPSE_THRESHOLD
+                } else {
+                    ANY_ARGS_COLLAPSE_THRESHOLD
+                };
+                let original_chars = args.chars().count();
+                if original_chars <= threshold {
+                    continue;
+                }
+                let collapsed = collapse_args_payload(args);
+                tracing::debug!(
+                    tool = %name,
+                    call_id = %id,
+                    original_chars,
+                    collapsed_chars = collapsed.chars().count(),
+                    "collapsed huge successful tool args in the ephemeral assembly"
+                );
+                *args = collapsed;
+            }
+        }
+    }
 }
 
 /// Sort the dynamic tail (context sources + pinned blocks, both injected as
@@ -755,15 +922,29 @@ pub fn blockers_block(ws: &oneai_core::WorkingState) -> String {
 /// `DateSource` context source (which is now date-only and injected in the
 /// dynamic tail each turn). The base prompt must stay byte-stable across
 /// iterations so the provider's prompt-prefix cache can hold it.
-pub fn runtime_context_block() -> String {
-    "\n\n**Time-sensitive questions (IMPORTANT)**: If the user asks about recent \
-     events, news, latest releases or library versions, current prices, live data, \
-     or any information that may have changed since your training, do NOT answer from \
-     memory — your knowledge has a cutoff. Call `web_search` first to discover current \
-     sources, then `web_fetch` to read the most promising results, and answer based on \
-     what you find. Only answer from your own knowledge when the topic is clearly stable \
-     and well within your training cutoff."
-        .to_string()
+/// `has_web_tools` reflects whether the turn's visible tool set actually
+/// contains the web tools — the block must never promise `web_search` /
+/// `web_fetch` when they are footprint-gated or filtered out of the model's
+/// schema (2026-09 verify-session P2: prompt aligned to the visible set).
+pub fn runtime_context_block(has_web_tools: bool) -> String {
+    if has_web_tools {
+        "\n\n**Time-sensitive questions (IMPORTANT)**: If the user asks about recent \
+         events, news, latest releases or library versions, current prices, live data, \
+         or any information that may have changed since your training, do NOT answer from \
+         memory — your knowledge has a cutoff. Call `web_search` first to discover current \
+         sources, then `web_fetch` to read the most promising results, and answer based on \
+         what you find. Only answer from your own knowledge when the topic is clearly stable \
+         and well within your training cutoff."
+            .to_string()
+    } else {
+        "\n\n**Time-sensitive questions (IMPORTANT)**: Your knowledge has a training \
+         cutoff, and this session has NO live-information tools (no web access). If the \
+         user asks about recent events, latest releases or versions, current prices, or \
+         anything that may have changed since your training, do NOT fabricate — say that \
+         you cannot verify it live, flag the uncertainty, and give your best answer with \
+         that caveat."
+            .to_string()
+    }
 }
 
 /// Build the memory-guidance block appended to the system prompt when the
@@ -991,7 +1172,7 @@ mod tests {
 
     #[test]
     fn runtime_context_block_has_search_guidance_and_no_timestamp() {
-        let block = runtime_context_block();
+        let block = runtime_context_block(true);
         assert!(
             block.contains("web_search"),
             "block should nudge web_search: {block}"
@@ -1001,6 +1182,19 @@ mod tests {
         assert!(
             !block.contains("Current date and time"),
             "runtime block must not carry a timestamp: {block}"
+        );
+    }
+
+    #[test]
+    fn runtime_context_block_without_web_tools_promises_nothing() {
+        let block = runtime_context_block(false);
+        assert!(
+            !block.contains("web_search") && !block.contains("web_fetch"),
+            "no-web variant must not promise web tools: {block}"
+        );
+        assert!(
+            block.contains("NO live-information tools"),
+            "no-web variant must state the absence honestly: {block}"
         );
     }
 
@@ -1165,6 +1359,156 @@ mod tests {
         for m in &conv.messages {
             assert_eq!(tool_content(m).len(), 5000, "≤4 tool results → all full");
         }
+    }
+
+    // ─── Post-success giant tool-argument collapsing ──────────────────────
+
+    /// Helper: an assistant message carrying one ToolCall block.
+    fn tool_call_msg(id: &str, name: &str, args: &str) -> oneai_core::Message {
+        oneai_core::Message {
+            role: oneai_core::Role::Assistant,
+            content: vec![oneai_core::ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                args: args.to_string(),
+            }],
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Helper: a conversation of one successful write_file call with `content_len`
+    /// chars of payload plus its (successful) result.
+    fn successful_write_conv(call_id: &str, content_len: usize) -> oneai_core::Conversation {
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        let args = serde_json::json!({
+            "path": "docs/big.md",
+            "content": "y".repeat(content_len),
+        })
+        .to_string();
+        conv.add_message(tool_call_msg(call_id, "write_file", &args));
+        conv.add_message(oneai_core::Message::tool_result(
+            call_id.to_string(),
+            "File written: docs/big.md".to_string(),
+        ));
+        conv
+    }
+
+    fn first_call_args(conv: &oneai_core::Conversation) -> String {
+        match &conv.messages[0].content[0] {
+            oneai_core::ContentBlock::ToolCall { args, .. } => args.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn collapses_huge_successful_write_args_keeps_small_fields() {
+        let mut conv = successful_write_conv("w1", 70_000);
+        collapse_successful_huge_tool_args(&mut conv);
+        let args = first_call_args(&conv);
+        assert!(
+            args.chars().count() < 2000,
+            "collapsed args must be small, got {} chars",
+            args.chars().count()
+        );
+        // Structure survives: the path field is intact.
+        let v: serde_json::Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(v["path"], "docs/big.md", "small fields must be preserved");
+        // The oversized content value is truncated with a marker.
+        let content = v["content"].as_str().unwrap();
+        assert!(content.contains("[collapsed: full value was 70000 chars"));
+        assert!(
+            content.starts_with(&"y".repeat(100)),
+            "value head preserved"
+        );
+    }
+
+    #[test]
+    fn does_not_collapse_failed_write_args() {
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        let args = serde_json::json!({"path": "a.md", "content": "y".repeat(70_000)}).to_string();
+        conv.add_message(tool_call_msg("w2", "write_file", &args));
+        conv.add_message(oneai_core::Message::tool_result(
+            "w2".into(),
+            "Error: permission denied".to_string(),
+        ));
+        collapse_successful_huge_tool_args(&mut conv);
+        assert_eq!(
+            first_call_args(&conv),
+            args,
+            "failed call must keep full args for the model to correct and retry"
+        );
+    }
+
+    #[test]
+    fn does_not_collapse_pending_or_small_args() {
+        // No result yet → pending; also a small-args successful call.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        let big = serde_json::json!({"path": "a.md", "content": "y".repeat(70_000)}).to_string();
+        conv.add_message(tool_call_msg("pending", "write_file", &big));
+        let small = serde_json::json!({"path": "b.md", "content": "short"}).to_string();
+        conv.add_message(tool_call_msg("small", "write_file", &small));
+        conv.add_message(oneai_core::Message::tool_result(
+            "small".into(),
+            "File written: b.md".to_string(),
+        ));
+        collapse_successful_huge_tool_args(&mut conv);
+        match &conv.messages[0].content[0] {
+            oneai_core::ContentBlock::ToolCall { args, .. } => {
+                assert_eq!(args, &big, "pending call must keep full args")
+            }
+            _ => unreachable!(),
+        }
+        match &conv.messages[1].content[0] {
+            oneai_core::ContentBlock::ToolCall { args, .. } => {
+                assert_eq!(args, &small, "small args must stay untouched")
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn non_write_tools_collapse_only_above_higher_threshold() {
+        // A 4KB successful shell arg stays (under the 16KB generic threshold);
+        // a 20KB one collapses.
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        let mid = serde_json::json!({"command": "z".repeat(4_000)}).to_string();
+        let huge = serde_json::json!({"command": "z".repeat(20_000)}).to_string();
+        conv.add_message(tool_call_msg("s1", "shell", &mid));
+        conv.add_message(tool_call_msg("s2", "shell", &huge));
+        conv.add_message(oneai_core::Message::tool_result("s1".into(), "ok".into()));
+        conv.add_message(oneai_core::Message::tool_result("s2".into(), "ok".into()));
+        collapse_successful_huge_tool_args(&mut conv);
+        match &conv.messages[0].content[0] {
+            oneai_core::ContentBlock::ToolCall { args, .. } => {
+                assert_eq!(args, &mid, "4KB non-write args must survive")
+            }
+            _ => unreachable!(),
+        }
+        match &conv.messages[1].content[0] {
+            oneai_core::ContentBlock::ToolCall { args, .. } => {
+                assert!(args.contains("[collapsed: full value was 20000 chars"))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn collapse_is_idempotent_and_unparseable_args_get_placeholder() {
+        let mut conv = successful_write_conv("w3", 70_000);
+        collapse_successful_huge_tool_args(&mut conv);
+        let once = first_call_args(&conv);
+        collapse_successful_huge_tool_args(&mut conv);
+        assert_eq!(first_call_args(&conv), once, "second pass must be a no-op");
+
+        // Unparseable (non-JSON) huge args → generic placeholder, still valid JSON.
+        let mut conv2 = oneai_core::Conversation::with_id("c".into());
+        conv2.add_message(tool_call_msg("w4", "write_file", &"q".repeat(30_000)));
+        conv2.add_message(oneai_core::Message::tool_result("w4".into(), "ok".into()));
+        collapse_successful_huge_tool_args(&mut conv2);
+        let args = first_call_args(&conv2);
+        let v: serde_json::Value =
+            serde_json::from_str(&args).expect("placeholder must be valid JSON");
+        assert!(v["_collapsed_args"].as_str().unwrap().contains("30000"));
     }
 
     // ─── Issue #40 context snapshot (build_context_snapshot) ──────────────

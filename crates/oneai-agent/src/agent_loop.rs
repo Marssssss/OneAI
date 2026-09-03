@@ -1219,30 +1219,18 @@ impl std::fmt::Debug for AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            system_prompt: "You are an intelligent AI agent that can plan, execute, and reflect on tasks. \
+            // The control-tools and tool-preference sections are MARKERS, resolved
+            // at turn start against the tool definitions the model will actually
+            // see (paradigm filter + footprint gate + exposure gate) — so the
+            // prompt never promises a tool that is absent from the schema
+            // (2026-09 verify-session P2). See `resolve_prompt_markers`.
+            system_prompt:
+                "You are an intelligent AI agent that can plan, execute, and reflect on tasks. \
                 When you need to use a tool, output a tool call. When you have the final answer, \
-                respond with just text without any tool calls.\n\n\
-                **Model-driven control tools** (call these instead of plain tools when appropriate):\n\
-                - `delegate(task, agent_type, budget_tokens?)`: hand a self-contained subtask to a \
-                specialized sub-agent that runs in its own context window and returns a summary. \
-                `agent_type` is one of \"Plan\", \"Explore\", \"Code\", \"Review\". Use it when the \
-                subtask has a clear boundary and the main loop should not be cluttered with its \
-                intermediate steps. After calling `delegate`, the main loop waits for the \
-                sub-agent's summary — do not call other tools in the same turn.\n\
-                - `switch_paradigm(paradigm)`: switch to a fixed graph flow. `paradigm` is one of \
-                \"plan\", \"react\", \"reflect\", \"explore\". Use \"plan\" for structured \
-                decomposition, \"reflect\" to deeply review the last result, \"explore\" for \
-                breadth-first search, \"react\" to return to the standard reason-then-act loop. \
-                After calling, execution continues inside that paradigm's graph and the result is \
-                fed back to you.\n\
-                - `enter_plan_mode(plan?)`: escalate from normal execution into plan mode. Call \
-                this ONLY when the task is genuinely complex and needs step-by-step decomposition \
-                — NOT for simple one-shot tasks, which you should just do directly with execution \
-                tools. After calling, you are switched into the plan toolset (task_create / \
-                exit_plan_mode) so you can commit a plan for approval. Avoid calling it for trivia.\n\
-                (Sub-agent kinds mirror the configured SubAgentTypeDefinitions; see the domain pack.)\n\n\
+                respond with just text without any tool calls.\
+                {{MODEL_DRIVEN_CONTROL_TOOLS}}\
                 {{TOOL_PREFERENCE_RULES}}"
-                .to_string(),
+                    .to_string(),
             use_streaming: false,
             temperature: None,
             top_p: None,
@@ -1815,15 +1803,19 @@ impl AgentLoop {
             // task sat first, every new task would change byte 0 and invalidate
             // the cached base prompt + durable history in one shot. (LoopState
             // already appended the user task, so this re-orders to
-            // [base prompt][user task][…].) The base prompt is resolved through
-            // `build_system_prompt`, which substitutes the
-            // `{{TOOL_PREFERENCE_RULES}}` marker with rules derived from the
-            // actual tool registry — so the prompt never references tools the
-            // model cannot call.
+            // [base prompt][user task][…].) The prompt-alignment markers
+            // (`{{TOOL_PREFERENCE_RULES}}` / `{{MODEL_DRIVEN_CONTROL_TOOLS}}`)
+            // resolve against the SAME tool definitions the first iteration
+            // sends — paradigm filter, footprint gate and exposure gate
+            // included — so the prompt never references tools the model cannot
+            // call (2026-09 verify-session P2).
+            let visible_names = self.visible_tool_names_for_state(&state).await;
             let system_prompt = format!(
                 "{}{}",
-                self.build_system_prompt().await,
-                crate::context_assembler::runtime_context_block(),
+                resolve_prompt_markers(&self.config.system_prompt, &visible_names),
+                crate::context_assembler::runtime_context_block(
+                    visible_names.contains("web_search") && visible_names.contains("web_fetch")
+                ),
             );
             state
                 .conversation
@@ -1848,6 +1840,14 @@ impl AgentLoop {
         let mut state = LoopState::from_conversation(conversation, task);
         self.hydrate_working_state(&mut state).await;
 
+        // Materialize a frontend-forced paradigm (Directive::SwitchParadigm →
+        // conversation.metadata["active_paradigm"]) before the loop runs, so
+        // this turn starts under the chosen paradigm's prompt + tool filter.
+        // No-op when no paradigm was forced (the default-turn path). This runs
+        // BEFORE the base prompt is built so the prompt-alignment markers
+        // resolve against the forced paradigm's visible tool set.
+        self.activate_forced_paradigm(&mut state);
+
         if !state
             .conversation
             .messages
@@ -1856,24 +1856,22 @@ impl AgentLoop {
         {
             // See run_with_observer: insert the base prompt at index 0 (BEFORE
             // the user task) so it anchors the prompt-prefix cache, and resolve
-            // the `{{TOOL_PREFERENCE_RULES}}` marker against the actual tool
-            // registry.
+            // the prompt-alignment markers against the first iteration's
+            // VISIBLE tool definitions (paradigm filter + gates) — never
+            // promising a tool the model cannot call.
+            let visible_names = self.visible_tool_names_for_state(&state).await;
             let system_prompt = format!(
                 "{}{}",
-                self.build_system_prompt().await,
-                crate::context_assembler::runtime_context_block(),
+                resolve_prompt_markers(&self.config.system_prompt, &visible_names),
+                crate::context_assembler::runtime_context_block(
+                    visible_names.contains("web_search") && visible_names.contains("web_fetch")
+                ),
             );
             state
                 .conversation
                 .messages
                 .insert(0, Message::system(system_prompt));
         }
-
-        // Materialize a frontend-forced paradigm (Directive::SwitchParadigm →
-        // conversation.metadata["active_paradigm"]) before the loop runs, so
-        // this turn starts under the chosen paradigm's prompt + tool filter.
-        // No-op when no paradigm was forced (the default-turn path).
-        self.activate_forced_paradigm(&mut state);
 
         self.run_loop(state, observer).await
     }
@@ -2125,10 +2123,18 @@ impl AgentLoop {
                 .await;
 
             if self.context_budget.needs_compression(&conv_for_inference) {
-                state.conversation = self
-                    .context_budget
-                    .compress(state.conversation.clone())
-                    .await?;
+                // Collapse giant successful tool args (67KB write payloads)
+                // BEFORE the compressor sees them, so the summarizer's LLM call
+                // doesn't ingest content that is already on disk. The collapsed
+                // clone becomes the new durable base — messages the compressor
+                // keeps verbatim carry the collapsed args forward (postmortem
+                // P2: "durable log 折叠"); the full args stay in the pre-
+                // compression transcript history / event log.
+                let mut durable_for_compress = state.conversation.clone();
+                crate::context_assembler::collapse_successful_huge_tool_args(
+                    &mut durable_for_compress,
+                );
+                state.conversation = self.context_budget.compress(durable_for_compress).await?;
                 conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
                 self.inject_pinned_blocks(&mut conv_for_inference, &state)
                     .await;
@@ -4339,10 +4345,23 @@ impl AgentLoop {
             .any(|m| m.role == Role::System)
         {
             // Base prompt first (before the user task) — anchors the cache.
-            initial_state
-                .conversation
-                .messages
-                .insert(0, Message::system(self.config.system_prompt.clone()));
+            // Resolve the prompt-alignment markers against the react paradigm's
+            // visible tool set (the graph entry's default paradigm, set below)
+            // so the entry prompt never leaks a marker nor promises absent
+            // tools (parity with the main-loop entry points).
+            let react_config = ParadigmConfig::for_paradigm(ParadigmKind::ReAct);
+            let defs = self
+                .build_tool_definitions_for_paradigm(Some(&react_config), false)
+                .await;
+            let visible_names: std::collections::HashSet<String> =
+                defs.iter().map(|d| d.name.clone()).collect();
+            initial_state.conversation.messages.insert(
+                0,
+                Message::system(resolve_prompt_markers(
+                    &self.config.system_prompt,
+                    &visible_names,
+                )),
+            );
         }
         initial_state
             .variables
@@ -6395,21 +6414,16 @@ impl AgentLoop {
         }
     }
 
-    /// Build the tool-preference rules block dynamically from the actual tool
-    /// registry, so the system prompt never promises the model tools it cannot
-    /// call. Each rule is emitted only when its referenced tool is registered;
-    /// if none of the known coding tools are present, a generic nudge is
-    /// emitted instead. This is the dynamic replacement for the
-    /// `{{TOOL_PREFERENCE_RULES}}` marker in the default system prompt.
+    /// Test helper: the tool-preference rules block derived from the FULL
+    /// registry (each rule emitted only when its tool is registered; a generic
+    /// nudge when none are). Production paths resolve the markers against the
+    /// VISIBLE tool set instead — see the `resolve_prompt_markers` call sites.
+    #[cfg(test)]
     async fn tool_preference_block(&self) -> String {
         let tools = self.tools.read().await;
         build_tool_preference_block(&tools)
     }
 
-    /// Resolve the effective system prompt: the configured prompt with the
-    /// `{{TOOL_PREFERENCE_RULES}}` marker (if present) replaced by the
-    /// registry-derived preference block. Domain-provided prompts that do not
-    /// contain the marker are returned unchanged, so this only mutates the
     /// Derive the Layer-1 `ConstrainedOutputConfig` to attach to an inference
     /// request, bridging `structured_output.schema` with the tier-gating policy.
     ///
@@ -6435,15 +6449,17 @@ impl AgentLoop {
         })
     }
 
-    /// default prompt path — preserving domain prompt behavior.
+    /// Test helper: resolve the configured prompt's alignment markers against
+    /// the FULL registry (legacy set). The production turn entry points
+    /// (`run_with_observer` / `run_with_conversation`) resolve against the
+    /// first iteration's VISIBLE definitions instead.
+    #[cfg(test)]
     async fn build_system_prompt(&self) -> String {
-        let prompt = self.config.system_prompt.clone();
-        if prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
-            let block = self.tool_preference_block().await;
-            prompt.replace("{{TOOL_PREFERENCE_RULES}}", &block)
-        } else {
-            prompt
-        }
+        let tools = self.tools.read().await;
+        resolve_prompt_markers(
+            &self.config.system_prompt,
+            &tool_names_from_registry(&tools),
+        )
     }
 
     #[allow(dead_code)]
@@ -6521,6 +6537,30 @@ impl AgentLoop {
                 })
                 .collect()
         }
+    }
+
+    /// Names of the tools visible in the first iteration's schema for `state`
+    /// — the resolution set for the base prompt's alignment markers. Applies
+    /// the same pipeline as [`Self::build_tool_definitions_for_paradigm`]
+    /// (paradigm allowlist/denylist → footprint gate → exposure gate → plan
+    /// control tools → meta-tools), so whatever the definitions include or
+    /// exclude is exactly what the prompt promises or omits.
+    async fn visible_tool_names_for_state(
+        &self,
+        state: &LoopState,
+    ) -> std::collections::HashSet<String> {
+        let has_committed_plan = state
+            .plan_state
+            .as_ref()
+            .is_some_and(|p| !p.steps.is_empty());
+        self.build_tool_definitions_for_paradigm(
+            state.active_paradigm_config.as_ref(),
+            has_committed_plan,
+        )
+        .await
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
     }
 
     /// Build tool definitions filtered by paradigm config.
@@ -7370,19 +7410,27 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             }
         };
 
-        // Build system prompt — use override or default from config. When the
-        // default config is in use (no override), resolve the
-        // `{{TOOL_PREFERENCE_RULES}}` marker against the actual tool registry so
+        // Build tool definitions FIRST (when requested) so the prompt-alignment
+        // markers resolve against the SAME visible set the request carries —
         // the StateGraph path, like the main loop, never promises tools the
-        // model cannot call and never leaks the marker verbatim.
+        // model cannot call and never leaks a marker verbatim. With
+        // `include_tool_definitions = false` the visible set is empty, so the
+        // markers degrade to the generic no-tool nudge (honest for a pure
+        // reasoning node).
+        let tool_defs = if include_tool_definitions {
+            self.build_tool_definitions_for_state(&tool_filter_override, &state.active_paradigm)
+                .await
+        } else {
+            vec![]
+        };
+        let visible_names: std::collections::HashSet<String> =
+            tool_defs.iter().map(|d| d.name.clone()).collect();
+
+        // Build system prompt — use override or default from config. Overrides
+        // may use the markers too; absent markers pass through unchanged.
         let base_prompt =
             system_prompt_override.unwrap_or_else(|| self.config.system_prompt.clone());
-        let system_prompt = if base_prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
-            let tools = self.tools.read().await;
-            resolve_tool_preference_marker(&base_prompt, &tools)
-        } else {
-            base_prompt
-        };
+        let system_prompt = resolve_prompt_markers(&base_prompt, &visible_names);
 
         let mut conversation = state.conversation.clone();
         // Inject the base prompt at index 0 (before the user task) if not
@@ -7392,14 +7440,6 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                 .messages
                 .insert(0, Message::system(&system_prompt));
         }
-
-        // Build tool definitions if requested
-        let tool_defs = if include_tool_definitions {
-            self.build_tool_definitions_for_state(&tool_filter_override, &state.active_paradigm)
-                .await
-        } else {
-            vec![]
-        };
 
         // Build inference request.
         //
@@ -8027,41 +8067,82 @@ fn active_paradigm_to_config(paradigm: &Option<String>) -> Option<ParadigmConfig
     })
 }
 
-/// Build the tool-preference rules block from a tool registry, emitting a rule
-/// only for tools that are actually registered. Used both by the main
-/// `AgentLoop` (via `tool_preference_block`) and by the StateGraph
-/// `AgentLoopGraphActionExecutor` when resolving the `{{TOOL_PREFERENCE_RULES}}`
-/// marker — so neither path promises the model tools it cannot call.
-fn build_tool_preference_block(tools: &HashMap<String, Arc<dyn Tool>>) -> String {
-    let has = |n: &str| tools.contains_key(n);
+/// Build the tool-preference rules block from a set of VISIBLE tool names,
+/// emitting a rule only for tools the model can actually call. Used by the
+/// main `AgentLoop` and the StateGraph `AgentLoopGraphActionExecutor` when
+/// resolving the `{{TOOL_PREFERENCE_RULES}}` marker — neither path may promise
+/// tools that are absent from the request's schema (paradigm denylist,
+/// footprint gate, exposure gate). 2026-09 verify-session P2: this block was
+/// previously derived from the FULL registry; the static CodingPack template
+/// promised `write_file` even when the paradigm filter had removed it.
+fn build_tool_preference_block_from_names(names: &std::collections::HashSet<String>) -> String {
+    let has = |n: &str| names.contains(n);
 
-    let mut rules: Vec<&str> = Vec::new();
+    let mut rules: Vec<String> = Vec::new();
     if has("read_file") {
-        rules.push("- For reading files: use read_file (NOT shell cat/head/tail)");
+        rules.push("- For reading files: use read_file (NOT shell cat/head/tail)".to_string());
     }
     if has("edit_file") {
-        rules.push("- For editing files: use edit_file (NOT shell sed/awk)");
+        rules.push("- For editing files: use edit_file (NOT shell sed/awk)".to_string());
     }
     if has("write_file") {
-        rules.push("- For creating/writing files: use write_file (NOT shell echo/tee/cat>)");
+        let multi = if has("apply_patch") {
+            " (or apply_patch for multi-file)"
+        } else {
+            ""
+        };
+        rules.push(format!(
+            "- For creating/writing files: use write_file{multi} (NOT shell echo/tee/cat>)"
+        ));
+    } else if has("apply_patch") {
+        rules.push(
+            "- For creating/modifying files: use apply_patch (NOT shell echo/tee/cat>)".to_string(),
+        );
+    }
+    if has("apply_patch") {
+        rules
+            .push("- For batch/multi-file changes: use apply_patch (one atomic patch)".to_string());
     }
     if has("list_directory") {
-        rules.push("- For listing directories: use list_directory (NOT shell ls)");
+        rules.push("- For listing directories: use list_directory (NOT shell ls)".to_string());
     }
     if has("grep") {
-        rules.push("- For searching content: use grep (NOT shell grep/find)");
+        rules.push("- For searching content: use grep (NOT shell grep/find)".to_string());
     }
     if has("glob") {
-        rules.push("- For finding files: use glob (NOT shell find)");
+        rules.push("- For finding files: use glob (NOT shell find)".to_string());
+    }
+    if has("web_search") {
+        if has("web_fetch") {
+            rules.push(
+                "- For up-to-date information (recent news, latest versions, live data): use \
+                 web_search to discover sources and web_fetch to read them — do not answer \
+                 from training memory"
+                    .to_string(),
+            );
+        } else {
+            rules.push(
+                "- For up-to-date information (recent news, latest versions, live data): use \
+                 web_search — do not answer from training memory"
+                    .to_string(),
+            );
+        }
+    } else if has("web_fetch") {
+        rules.push(
+            "- To read a known URL for up-to-date information: use web_fetch — do not answer \
+             from training memory"
+                .to_string(),
+        );
     }
     if has("shell") {
         rules.push(
             "- Use shell ONLY for: compilation, testing, git operations, package management, \
-             running scripts, or commands that have no dedicated tool equivalent",
+             running scripts, or commands that have no dedicated tool equivalent"
+                .to_string(),
         );
     }
     if rules.is_empty() {
-        // No known coding tools registered — don't promise specifics. Nudge the
+        // No known coding tools visible — don't promise specifics. Nudge the
         // model toward the tools that ARE available (listed in its tool
         // definitions) rather than naming tools that may not exist.
         return "\n\n**Tool Use**: Use the tools available to you when they help; \
@@ -8076,17 +8157,107 @@ fn build_tool_preference_block(tools: &HashMap<String, Arc<dyn Tool>>) -> String
     )
 }
 
-/// Replace the `{{TOOL_PREFERENCE_RULES}}` marker in `prompt` with a block
-/// derived from `tools`, returning the prompt unchanged when the marker is
-/// absent. Shared by the main loop and the graph action executor so the marker
-/// can never leak into a system message unexpanded.
-fn resolve_tool_preference_marker(prompt: &str, tools: &HashMap<String, Arc<dyn Tool>>) -> String {
-    if prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
-        let block = build_tool_preference_block(tools);
-        prompt.replace("{{TOOL_PREFERENCE_RULES}}", &block)
-    } else {
-        prompt.to_string()
+/// Registry-wide wrapper over [`build_tool_preference_block_from_names`] —
+/// legacy behavior, test-only; production resolves against the visible set.
+#[cfg(test)]
+fn build_tool_preference_block(tools: &HashMap<String, Arc<dyn Tool>>) -> String {
+    build_tool_preference_block_from_names(&tool_names_from_registry(tools))
+}
+
+/// Build the model-driven control-tools section of the base prompt, emitting a
+/// bullet only for control tools actually present in the request's visible
+/// tool set: `delegate` is hidden in plan mode or when the sub-agent factory
+/// has no kinds, `switch_paradigm` is hidden in plan mode, and
+/// `enter_plan_mode` is hidden once a plan is committed (or in plan mode).
+/// Returns an empty string when none are visible — the section vanishes
+/// instead of promising absent tools.
+fn build_control_tools_block_from_names(names: &std::collections::HashSet<String>) -> String {
+    let mut bullets: Vec<String> = Vec::new();
+    if names.contains(crate::meta_tool::TOOL_DELEGATE) {
+        bullets.push(
+            "- `delegate(task, agent_type, budget_tokens?)`: hand a self-contained subtask to a \
+             specialized sub-agent that runs in its own fresh context window and returns a summary. \
+             `agent_type` is one of `Plan` (decompose a task), `Explore` (search/understand), \
+             `Code` (implement/modify), `Review` (audit). Use it when the subtask has a clear \
+             boundary (e.g. one independent module or a well-scoped search) and the main loop \
+             should not be cluttered with its intermediate steps. After calling `delegate`, the \
+             main loop waits for the sub-agent's summary — do not call other tools in the same turn. \
+             (Sub-agent kinds mirror the configured SubAgentTypeDefinitions; see the domain pack.)"
+                .to_string(),
+        );
     }
+    if names.contains(crate::meta_tool::TOOL_SWITCH_PARADIGM) {
+        bullets.push(
+            "- `switch_paradigm(paradigm)`: switch to a fixed graph flow. `paradigm` is one of \
+             `plan` (structured decomposition), `reflect` (deep review of the last result), \
+             `explore` (breadth-first search), `react` (return to the standard reason-then-act \
+             loop). After calling, execution continues inside that paradigm's graph and the result \
+             is fed back to you."
+                .to_string(),
+        );
+    }
+    if names.contains(crate::plan_state::TOOL_ENTER_PLAN_MODE) {
+        bullets.push(
+            "- `enter_plan_mode(plan?)`: escalate from normal execution into plan mode. Call this \
+             ONLY when the task is genuinely complex and needs step-by-step decomposition — NOT for \
+             simple one-shot tasks, which you should just do directly with execution tools. After \
+             calling, you are switched into the plan toolset (task_create / exit_plan_mode) so you \
+             can commit a plan for approval. Avoid calling it for trivia."
+                .to_string(),
+        );
+    }
+    if bullets.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n**Model-driven control tools** (call these when the task warrants them, instead of \
+         just the plain tools):\n{}",
+        bullets.join("\n")
+    )
+}
+
+/// The names of every tool in a registry (legacy resolution set for callers
+/// that do not compute the visible subset).
+#[cfg(test)]
+fn tool_names_from_registry(
+    tools: &HashMap<String, Arc<dyn Tool>>,
+) -> std::collections::HashSet<String> {
+    tools.keys().cloned().collect()
+}
+
+/// Replace the prompt-alignment markers in `prompt` with blocks derived from
+/// `visible_names` — the tool names the model will ACTUALLY see in this
+/// request's schema:
+/// - `{{TOOL_PREFERENCE_RULES}}` → per-tool preference rules (only visible tools)
+/// - `{{MODEL_DRIVEN_CONTROL_TOOLS}}` → delegate/switch_paradigm/enter_plan_mode
+///   bullets (only the visible ones)
+///
+/// Markers absent from the template leave it unchanged, so custom prompts
+/// without markers pass through verbatim. A template must never carry a
+/// hardcoded promise for a tool — that drifted in the 2026-09 verify-session
+/// incident (system prompt said "use write_file" while the paradigm filter had
+/// removed it, pushing the model into `shell cat > f` heredoc hacks).
+fn resolve_prompt_markers(
+    prompt: &str,
+    visible_names: &std::collections::HashSet<String>,
+) -> String {
+    let mut out = prompt.to_string();
+    if out.contains("{{TOOL_PREFERENCE_RULES}}") {
+        let block = build_tool_preference_block_from_names(visible_names);
+        out = out.replace("{{TOOL_PREFERENCE_RULES}}", &block);
+    }
+    if out.contains("{{MODEL_DRIVEN_CONTROL_TOOLS}}") {
+        let block = build_control_tools_block_from_names(visible_names);
+        out = out.replace("{{MODEL_DRIVEN_CONTROL_TOOLS}}", &block);
+    }
+    out
+}
+
+/// Registry-wide wrapper over [`resolve_prompt_markers`] — test-only; new call
+/// sites resolve against the actual visible definitions instead.
+#[cfg(test)]
+fn resolve_tool_preference_marker(prompt: &str, tools: &HashMap<String, Arc<dyn Tool>>) -> String {
+    resolve_prompt_markers(prompt, &tool_names_from_registry(tools))
 }
 
 #[cfg(test)]
@@ -8505,6 +8676,159 @@ mod dynamic_tool_prompt_tests {
         let loop_ = build_loop_with(&["read_file"], cfg);
         let prompt = loop_.build_system_prompt().await;
         assert_eq!(prompt, "You are a research agent. Use the available tools.");
+    }
+
+    // ─── Prompt ↔ visible-tool-set alignment (verify-session P2) ──────────
+
+    #[test]
+    fn preference_block_from_names_omits_absent_tools() {
+        // Only read tools visible → no write/edit rules, no shell-only rule.
+        let names: std::collections::HashSet<String> =
+            ["read_file".into(), "grep".into()].into_iter().collect();
+        let block = build_tool_preference_block_from_names(&names);
+        assert!(block.contains("read_file") && block.contains("grep"));
+        assert!(
+            !block.contains("write_file"),
+            "absent tool promised: {block}"
+        );
+        assert!(
+            !block.contains("edit_file"),
+            "absent tool promised: {block}"
+        );
+        assert!(
+            !block.contains("Use shell ONLY for"),
+            "absent shell must get no shell rule: {block}"
+        );
+
+        // web pair visible → the recency rule names both.
+        let names: std::collections::HashSet<String> = ["web_search".into(), "web_fetch".into()]
+            .into_iter()
+            .collect();
+        let block = build_tool_preference_block_from_names(&names);
+        assert!(block.contains("web_search") && block.contains("web_fetch"));
+
+        // write_file + apply_patch → the multi-file annotation appears.
+        let names: std::collections::HashSet<String> = ["write_file".into(), "apply_patch".into()]
+            .into_iter()
+            .collect();
+        let block = build_tool_preference_block_from_names(&names);
+        assert!(block.contains("write_file (or apply_patch for multi-file)"));
+    }
+
+    #[test]
+    fn control_tools_block_from_names_follows_visibility() {
+        let all: std::collections::HashSet<String> = [
+            "delegate".into(),
+            "switch_paradigm".into(),
+            "enter_plan_mode".into(),
+        ]
+        .into_iter()
+        .collect();
+        let block = build_control_tools_block_from_names(&all);
+        assert!(block.contains("`delegate("));
+        assert!(block.contains("`switch_paradigm("));
+        assert!(block.contains("`enter_plan_mode("));
+
+        let none: std::collections::HashSet<String> = ["read_file".into()].into_iter().collect();
+        assert_eq!(
+            build_control_tools_block_from_names(&none),
+            "",
+            "no visible control tools → the section must vanish entirely"
+        );
+
+        let only_delegate: std::collections::HashSet<String> =
+            ["delegate".into()].into_iter().collect();
+        let block = build_control_tools_block_from_names(&only_delegate);
+        assert!(block.contains("`delegate("));
+        assert!(!block.contains("switch_paradigm"));
+        assert!(!block.contains("enter_plan_mode"));
+    }
+
+    #[test]
+    fn resolve_prompt_markers_replaces_both_markers() {
+        let template = "Role text.{{MODEL_DRIVEN_CONTROL_TOOLS}}{{TOOL_PREFERENCE_RULES}}";
+        let names: std::collections::HashSet<String> =
+            ["read_file".into(), "switch_paradigm".into()]
+                .into_iter()
+                .collect();
+        let resolved = resolve_prompt_markers(template, &names);
+        assert!(!resolved.contains("{{TOOL_PREFERENCE_RULES}}"));
+        assert!(!resolved.contains("{{MODEL_DRIVEN_CONTROL_TOOLS}}"));
+        assert!(resolved.contains("Tool Preference Rules"));
+        assert!(resolved.contains("Model-driven control tools"));
+        assert!(resolved.starts_with("Role text."));
+    }
+
+    #[tokio::test]
+    async fn base_prompt_aligns_with_visible_tool_set() {
+        // write_file registered → promised; absent → never mentioned.
+        let state = LoopState::new("task");
+
+        let with_write = build_loop(&["read_file", "write_file"]);
+        let names = with_write.visible_tool_names_for_state(&state).await;
+        let prompt = resolve_prompt_markers(&with_write.config.system_prompt, &names);
+        assert!(
+            prompt.contains("use write_file"),
+            "registered write_file must be promised: {prompt}"
+        );
+
+        let without_write = build_loop(&["read_file"]);
+        let names = without_write.visible_tool_names_for_state(&state).await;
+        let prompt = resolve_prompt_markers(&without_write.config.system_prompt, &names);
+        assert!(
+            !prompt.contains("write_file"),
+            "absent write_file must not be promised: {prompt}"
+        );
+        assert!(
+            prompt.contains("use read_file"),
+            "visible read tools stay promised"
+        );
+    }
+
+    #[tokio::test]
+    async fn paradigm_denylist_removes_write_tools_from_prompt() {
+        // A read-only paradigm denies write_file even though it is registered —
+        // the resolved prompt must not promise it either (the 2026-09
+        // verify-session failure mode: prompt said write_file, schema had none).
+        let loop_ = build_loop(&["read_file", "write_file"]);
+        let mut state = LoopState::new("task");
+        state.active_paradigm = ParadigmKind::Plan;
+        state.active_paradigm_config = Some(ParadigmConfig::for_paradigm(ParadigmKind::Plan));
+        let names = loop_.visible_tool_names_for_state(&state).await;
+        assert!(
+            !names.contains("write_file"),
+            "denylist must hide write_file"
+        );
+        let prompt = resolve_prompt_markers(&loop_.config.system_prompt, &names);
+        assert!(
+            !prompt.contains("write_file"),
+            "read-only paradigm must not promise write_file: {prompt}"
+        );
+        assert!(prompt.contains("read_file"));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_hides_control_tools_from_prompt() {
+        // In plan mode enter_plan_mode/switch_paradigm/delegate leave the
+        // schema, so the base prompt must drop the whole control section.
+        let cfg = AgentLoopConfig {
+            plan_mode: true,
+            ..AgentLoopConfig::default()
+        };
+        let loop_ = build_loop_with(&["read_file"], cfg);
+        let state = LoopState::new("task");
+        let names = loop_.visible_tool_names_for_state(&state).await;
+        assert!(!names.contains("enter_plan_mode"));
+        assert!(!names.contains("switch_paradigm"));
+        assert!(
+            names.contains("exit_plan_mode"),
+            "plan toolset stays visible"
+        );
+        let prompt = resolve_prompt_markers(&loop_.config.system_prompt, &names);
+        assert!(
+            !prompt.contains("Model-driven control tools"),
+            "plan mode must drop the control-tools section: {prompt}"
+        );
     }
 
     #[test]

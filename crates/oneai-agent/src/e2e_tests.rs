@@ -759,12 +759,12 @@ async fn e2e_scenario_4b_footprint_gate_hides_unavailable_tool() {
 // ─── Scenario 4c: cache-stable system prompt survives paradigm switch ────────
 
 /// A paradigm switch must NOT nuke the durable system prefix. The stable
-/// prefix (`build_system_prompt() + runtime_context_block()` — current date +
-/// web-search nudge) must survive so the provider's prompt-prefix cache stays
-/// valid across switches and `runtime_context` (date / search guidance) is not
-/// lost for the rest of the session. The paradigm tail ("planning agent") is
-/// swapped in alongside it. Regression for the old `retain(|m| m.role !=
-/// Role::System)` behavior that wiped everything.
+/// prefix (base prompt + `runtime_context_block()` — training-cutoff /
+/// time-sensitive guidance) must survive so the provider's prompt-prefix cache
+/// stays valid across switches and the runtime guidance is not lost for the
+/// rest of the session. The paradigm tail ("planning agent") is swapped in
+/// alongside it. Regression for the old `retain(|m| m.role != Role::System)`
+/// behavior that wiped everything.
 #[tokio::test]
 async fn e2e_scenario_4c_paradigm_switch_preserves_stable_prefix() {
     let read_file = MockTool::read_file_mock();
@@ -801,11 +801,15 @@ async fn e2e_scenario_4c_paradigm_switch_preserves_stable_prefix() {
         .map(|m| m.text_content())
         .collect();
 
-    // The stable prefix survives the switch — the web-search guidance (the
-    // runtime_context_block) and the base identity prompt are intact.
+    // The stable prefix survives the switch — the time-sensitive guidance (the
+    // runtime_context_block) and the base identity prompt are intact. Only
+    // `read_file` is registered here, so the no-web variant of the runtime
+    // block is in play — it must survive the switch exactly like the web one.
     assert!(
-        system_texts.iter().any(|t| t.contains("web_search")),
-        "web-search guidance (stable prefix) was dropped on paradigm switch: {system_texts:?}"
+        system_texts
+            .iter()
+            .any(|t| t.contains("Time-sensitive questions")),
+        "time-sensitive guidance (stable prefix) was dropped on paradigm switch: {system_texts:?}"
     );
     assert!(
         system_texts
