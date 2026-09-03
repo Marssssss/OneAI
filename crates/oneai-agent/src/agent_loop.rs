@@ -912,6 +912,7 @@ impl LoopState {
             completed: self.is_complete,
             active_paradigm: self.active_paradigm,
             sub_agent_results: self.sub_agent_results,
+            error: None,
         }
     }
 }
@@ -1012,6 +1013,11 @@ pub struct AgentLoopResult {
     pub completed: bool,
     pub active_paradigm: ParadigmKind,
     pub sub_agent_results: Vec<SubAgentSummary>,
+    /// Set when the run was aborted by an error (e.g. an inference failure)
+    /// instead of reaching `DirectAnswer`. The `conversation` still carries
+    /// everything produced before the failure so callers can persist partial
+    /// work — a failed turn must not silently discard its history.
+    pub error: Option<String>,
 }
 
 // ─── AgentLoopConfig ────────────────────────────────────────────────────────
@@ -1840,6 +1846,12 @@ impl AgentLoop {
         // with a clear message instead of infinitely retrying.
         let mut consecutive_rate_limit_errors: usize = 0;
         const MAX_CONSECUTIVE_RATE_LIMIT_ERRORS: usize = 10;
+        // Track consecutive mid-stream stalls — a stalled stream leaves the
+        // conversation untouched, so the SAME iteration is retried a bounded
+        // number of times (a provider hiccup must not kill a long turn). Beyond
+        // the cap the run terminates with a partial result, not a bare Err.
+        let mut consecutive_stream_stalls: usize = 0;
+        const MAX_CONSECUTIVE_STREAM_STALLS: usize = 2;
 
         // ─── Trace: start AGENT span for the entire loop ──────────────
         let loop_span_id = if let Some(ctx) = &self.config.trace_context {
@@ -2331,8 +2343,9 @@ impl AgentLoop {
 
             let mut response = match response_result {
                 Ok(resp) => {
-                    // Successful inference — reset consecutive rate limit counter
+                    // Successful inference — reset consecutive error counters
                     consecutive_rate_limit_errors = 0;
+                    consecutive_stream_stalls = 0;
                     resp
                 }
                 Err(oneai_core::error::OneAIError::RateLimit(msg)) => {
@@ -2399,6 +2412,37 @@ impl AgentLoop {
                     state.iterations -= 1;
                     continue;
                 }
+                Err(oneai_core::error::OneAIError::StreamStalled(msg)) => {
+                    // Mid-stream stall: the provider held the connection open
+                    // without data. The conversation is untouched, so re-run
+                    // the same iteration a bounded number of times.
+                    consecutive_stream_stalls += 1;
+                    if consecutive_stream_stalls > MAX_CONSECUTIVE_STREAM_STALLS {
+                        tracing::error!(
+                            "AgentLoop: {} consecutive stream stalls — terminating with partial result. Last error: {}",
+                            consecutive_stream_stalls, msg
+                        );
+                        state.conversation.add_message(Message::assistant(format!(
+                            "[Turn aborted after {} stream stalls]: {}",
+                            consecutive_stream_stalls, msg
+                        )));
+                        let mut result = state.into_result();
+                        result.error = Some(msg);
+                        observer.on_complete(&result);
+                        return Ok(result);
+                    }
+                    tracing::warn!(
+                        "AgentLoop iteration {}: stream stalled ({}/{}), waiting 3s before retrying the same iteration. Error: {}",
+                        state.iterations,
+                        consecutive_stream_stalls,
+                        MAX_CONSECUTIVE_STREAM_STALLS,
+                        msg
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // Don't count this as a real iteration — decrement and continue
+                    state.iterations -= 1;
+                    continue;
+                }
                 Err(other_err) => {
                     // ─── Trace: record non-rate-limit error ──────────────
                     if let Some(ctx) = &self.config.trace_context {
@@ -2422,8 +2466,25 @@ impl AgentLoop {
                         metrics.record_error();
                     }
 
-                    // Other errors — propagate as before (terminates the loop)
-                    return Err(other_err);
+                    // Other errors — terminate the loop, but PRESERVE the
+                    // partial work: return a result with `error` set so the
+                    // caller can persist the conversation produced so far.
+                    // A failed turn must not silently discard its history
+                    // (2026-09 delegate-session postmortem: a mid-turn
+                    // provider error wiped a 30-minute document task because
+                    // the failed turn was never merged back nor saved).
+                    tracing::error!(
+                        "AgentLoop iteration {}: inference error — terminating with partial result. Error: {}",
+                        state.iterations, other_err
+                    );
+                    state.conversation.add_message(Message::assistant(format!(
+                        "[Turn aborted by inference error]: {}",
+                        other_err
+                    )));
+                    let mut result = state.into_result();
+                    result.error = Some(other_err.to_string());
+                    observer.on_complete(&result);
+                    return Ok(result);
                 }
             };
 
@@ -4278,6 +4339,7 @@ impl AgentLoop {
                 _ => ParadigmKind::ReAct,
             },
             sub_agent_results: Vec::new(),
+            error: None,
         };
 
         observer.on_complete(&result);
@@ -4375,6 +4437,7 @@ impl AgentLoop {
                     completed: true,
                     active_paradigm: ParadigmKind::ReAct,
                     sub_agent_results: Vec::new(),
+                    error: None,
                 };
                 observer.on_complete(&result);
                 Ok(result)
@@ -5052,7 +5115,19 @@ impl AgentLoop {
         let outcomes = futures::future::join_all(futures).await;
         for outcome in outcomes {
             match outcome {
-                Ok(result) => results.push(result),
+                Ok(result) => {
+                    // Single chokepoint: the loop dispatches through its own
+                    // `tools_map` fast path, bypassing `ToolExecutor::execute`
+                    // — apply the same output cap here so a runaway tool
+                    // result (an unbounded grep on long-line files once hit
+                    // 2.7MB) can never blow past the model's input limit.
+                    let output = oneai_tool::executor::enforce_output_limit(
+                        &result.tool_name,
+                        result.output,
+                        oneai_tool::executor::DEFAULT_MAX_OUTPUT_BYTES,
+                    );
+                    results.push(ToolCallResult { output, ..result });
+                }
                 Err(e) => results.push(ToolCallResult {
                     call_id: String::new(),
                     tool_name: String::new(),
@@ -5973,7 +6048,9 @@ impl AgentLoop {
                         "infer_stream did not start within {}s — provider/proxy stalled on the request; aborting with retryable error",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     );
-                    return Err(oneai_core::error::OneAIError::Other(format!(
+                    // StreamStalled (not Other): the agent loop retries the
+                    // same iteration a bounded number of times on this variant.
+                    return Err(oneai_core::error::OneAIError::StreamStalled(format!(
                         "模型响应超时({}秒未开始),可能为网络/服务端中断,请重试。",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     )));
@@ -6019,7 +6096,9 @@ impl AgentLoop {
                              aborting with retryable error",
                             STREAM_IDLE_TIMEOUT.as_secs()
                         );
-                        return Err(oneai_core::error::OneAIError::Other(format!(
+                        // StreamStalled (not Other): the agent loop retries the
+                        // same iteration a bounded number of times on this variant.
+                        return Err(oneai_core::error::OneAIError::StreamStalled(format!(
                             "模型流式输出停滞({}秒无数据),可能为网络/服务端中断,请重试。",
                             STREAM_IDLE_TIMEOUT.as_secs()
                         )));

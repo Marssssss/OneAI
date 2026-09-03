@@ -41,6 +41,7 @@ impl InstanceHandle for FakeHandle {
             completed: true,
             active_paradigm: ParadigmKind::ReAct,
             sub_agent_results: Vec::new(),
+            error: None,
         });
         Ok(TurnSummary {
             final_answer: "hello".to_string(),

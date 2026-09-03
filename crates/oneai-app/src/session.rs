@@ -1101,16 +1101,19 @@ impl AppSession {
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
                 if !has_task && !self.unfinished_work_surfaced {
-                    self.unfinished_work_surfaced = true;
                     let user = self.app.memory_manager.user_id().await;
                     match store
                         .list_open_tasks(&user, &self.working_state_project())
                         .await
                     {
                         Ok(open) if !open.is_empty() => {
+                            self.unfinished_work_surfaced = true;
                             let block = render_unfinished_work(&open);
                             Some(std::sync::Arc::new(UnfinishedWorkSource::new(block)))
                         }
+                        // Do NOT consume the one-shot flag when there is
+                        // nothing to surface yet — a task created later (e.g.
+                        // by a mid-session plan) must stay discoverable.
                         _ => None,
                     }
                 } else {
@@ -1615,6 +1618,13 @@ impl AppSession {
         *interrupt_slot.lock().await = None;
 
         let result = result?;
+        // An aborted run (inference error / stream stalls exhausted) still
+        // returns Ok(partial) with `error` set. Fall through so the merge +
+        // auto-save below persists everything produced before the failure,
+        // then re-raise — the frontend sees the same error as before, but the
+        // session keeps its history (a follow-up "继续任务" can resume from
+        // real context instead of an empty conversation).
+        let run_error = result.error.clone();
 
         // §12.3: accumulate the importance of facts archived during this run
         // (compression-coupled extraction / self-managed tools) and the
@@ -1633,7 +1643,8 @@ impl AppSession {
             .sum::<f32>();
         self.accumulated_importance += (importance_after - importance_before).max(0.0);
         self.turns_since_last_reflection += result.iterations as u32;
-        if self.app.memory_manager.reflection().is_some() {
+        // Skip reflection/decay maintenance on aborted runs — persist first.
+        if run_error.is_none() && self.app.memory_manager.reflection().is_some() {
             match self
                 .app
                 .memory_manager
@@ -1668,9 +1679,10 @@ impl AppSession {
         // are swallowed — decay must never break the turn.
         let now = chrono::Utc::now();
         let decay = self.app.memory_manager.decay().await;
-        if decay
-            .as_ref()
-            .is_some_and(|d| d.enabled && d.sweep_on_reflect)
+        if run_error.is_none()
+            && decay
+                .as_ref()
+                .is_some_and(|d| d.enabled && d.sweep_on_reflect)
         {
             let report = self.app.memory_manager.run_decay(now).await;
             if !report.core_evicted.is_empty() || !report.archive_forgotten.is_empty() {
@@ -1705,6 +1717,13 @@ impl AppSession {
             }
         }
 
+        // Re-raise aborted runs AFTER the partial conversation is persisted —
+        // callers observe the same failure as before (the directive pump emits
+        // its EngineYield::Error), but the session no longer loses its work.
+        if let Some(err) = run_error {
+            return Err(oneai_core::error::OneAIError::Other(err));
+        }
+
         // ─── STM↔LTM Closed Loop: Memory Reflection ──────────────
         // At session end, reflect on the STM entries and generate
         // an episodic memory for long-term retention.
@@ -1712,7 +1731,7 @@ impl AppSession {
         // configured (via AppBuilder.with_memory_reflection()).
         if let Some(reflection) = self.app.memory_manager.reflection() {
             let config = reflection.config();
-            if config.auto_reflect {
+            if config.auto_reflect && run_error.is_none() {
                 // Reflect over the live conversation (M1 single source) and
                 // store the episodic as a canonical archival fact + persist.
                 let episodic = self

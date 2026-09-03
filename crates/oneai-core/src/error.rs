@@ -95,6 +95,14 @@ pub enum OneAIError {
     #[error("Fallback error: {0}")]
     Fallback(String),
 
+    /// A streaming response stalled mid-stream (no chunk for the idle window).
+    /// Distinct from `Other` so the agent loop can retry the SAME iteration a
+    /// bounded number of times instead of terminating the whole run — the
+    /// conversation is unchanged by a stalled stream, so re-running the
+    /// iteration is safe and cache-friendly.
+    #[error("Stream stalled: {0}")]
+    StreamStalled(String),
+
     /// Token counting errors (context overflow, estimation failures, etc.).
     #[error("Token counting error: {0}")]
     TokenCount(String),

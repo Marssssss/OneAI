@@ -183,6 +183,7 @@ mod tests {
             completed: true,
             active_paradigm: ParadigmKind::ReAct,
             sub_agent_results: Vec::new(),
+            error: None,
         });
 
         let events = cb.take();

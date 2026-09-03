@@ -452,6 +452,7 @@ mod tests {
             completed: true,
             active_paradigm: ParadigmKind::ReAct,
             sub_agent_results: Vec::new(),
+            error: None,
         };
         obs.on_complete(&result);
         match sub.recv().await.unwrap() {

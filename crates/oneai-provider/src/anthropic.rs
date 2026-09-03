@@ -299,6 +299,29 @@ impl AnthropicProvider {
             body["tools"] = Value::Array(tools_json);
         }
 
+        // Rolling TAIL breakpoint: cache the conversation history up to the
+        // last message, not just the static system+tools prefix. Without it,
+        // every iteration of a long agentic loop re-pays the full history
+        // (observed: hit rate pinned at the ~2k system+tools tokens while a
+        // 100k+ history missed entirely — 2026-09 delegate-session
+        // postmortem). The tail moves each iteration, so each request reads
+        // the previously cached prefix and writes only the new delta — the
+        // standard agentic-loop caching pattern. `Off` policy skips it.
+        if cache_on {
+            if let Some(blocks) = body["messages"]
+                .as_array_mut()
+                .and_then(|msgs| msgs.last_mut())
+                .and_then(|msg| msg.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
+            {
+                if let Some(last_block) = blocks.last_mut() {
+                    if let Some(obj) = last_block.as_object_mut() {
+                        obj.insert("cache_control".to_string(), cache_control());
+                    }
+                }
+            }
+        }
+
         body
     }
 

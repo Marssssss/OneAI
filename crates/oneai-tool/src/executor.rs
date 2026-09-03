@@ -609,7 +609,12 @@ async fn execute_with_timeout(
 /// chokepoint that protects the context window from runaway output
 /// (e.g. an unbounded MCP / custom tool) regardless of whether the tool
 /// self-truncates. `max_output_bytes == 0` disables the guard.
-fn enforce_output_limit(tool_name: &str, mut output: ToolOutput, cap: usize) -> ToolOutput {
+///
+/// `pub` because the `AgentLoop` dispatches tools through its own
+/// `tools_map` fast path (bypassing `ToolExecutor::execute`) and must apply
+/// the same cap there — a 2.7MB grep result on that path once blew past the
+/// model's 1M-token input limit (2026-09 delegate-session postmortem).
+pub fn enforce_output_limit(tool_name: &str, mut output: ToolOutput, cap: usize) -> ToolOutput {
     if cap == 0 || output.content.len() <= cap {
         return output;
     }

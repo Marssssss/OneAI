@@ -3930,6 +3930,7 @@ mod issue18_tests {
                 completed: true,
                 active_paradigm: oneai_agent::ParadigmKind::ReAct,
                 sub_agent_results: Vec::new(),
+                error: None,
             }),
         );
         dump(&mut app, "complete");

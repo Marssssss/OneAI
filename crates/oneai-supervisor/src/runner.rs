@@ -104,6 +104,7 @@ mod tests {
             completed,
             active_paradigm: paradigm,
             sub_agent_results: Vec::new(),
+            error: None,
         }
     }
 
