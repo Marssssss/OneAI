@@ -25,6 +25,7 @@ pub mod host_allowlist;
 pub mod interaction_gate;
 pub mod local_tools;
 pub mod mcp_real;
+pub mod media_tools;
 pub mod network_proxy;
 pub mod registry;
 pub mod sandbox;
@@ -58,6 +59,10 @@ pub use mcp_real::{
     ElicitationReviewer, McpBinding, McpConnection, McpConnectionStatus, McpFramingParser,
     McpOAuthTokenRefresher, McpServerConfig, McpServerConnectionIdentity, McpToolInfo,
     McpToolPermissions, McpTransport, McpTransportKind, ToolCatalogCache,
+};
+pub use media_tools::{
+    Edl, EdlClip, ImageToMotionTool, MakeThumbnailTool, ProbeMediaTool, RenderTool,
+    SampleFramesTool, ValidateTimelineTool, VerifyOutputTool,
 };
 pub use network_proxy::{NetworkApprovalMode, NetworkProxy};
 pub use registry::*;

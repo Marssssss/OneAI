@@ -322,6 +322,11 @@ pub async fn execute_with_approval(
                 effective_level = level.to_risk_level();
                 force_approval = false;
             }
+            PermissionAction::UseToolDefault => {
+                // No domain active — same posture as the `None` resolver branch.
+                effective_level = tool.risk_level();
+                force_approval = false;
+            }
         },
         // No resolver wired — fall back to the tool's inherent risk level.
         None => {

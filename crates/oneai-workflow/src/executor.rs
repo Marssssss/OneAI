@@ -475,6 +475,9 @@ async fn execute_step(
             oneai_core::PermissionAction::UseDefaultPermission { .. } => {
                 // No domain rule — fall through to existing approval flow.
             }
+            oneai_core::PermissionAction::UseToolDefault => {
+                // No domain active — fall through to existing approval flow.
+            }
         }
     }
 

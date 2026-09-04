@@ -801,6 +801,11 @@ pub trait WorkingStateStore: Send + Sync {
 
     /// Archive a task: gzip the event log, mark it `Archived` in the index.
     async fn archive_task(&self, task_id: &str) -> Result<()>;
+
+    /// Hot-swap the compaction thresholds (DomainPack hot-switch). Default
+    /// no-op — only stores that keep a concrete compaction config (e.g.
+    /// `FileWorkingStateStore`) override it.
+    fn set_compaction(&self, _event_threshold: usize, _keep_recent: usize) {}
 }
 
 // ─── SessionEventStore ───────────────────────────────────────────────────────

@@ -1019,6 +1019,15 @@ pub enum PermissionAction {
 
     /// No domain-specific rule — fall back to the tool's own permission level.
     UseDefaultPermission { level: PermissionLevel },
+
+    /// No domain pack is active — fall back to the tool's own `risk_level()`.
+    ///
+    /// Distinct from [`UseDefaultPermission`] (which carries a concrete domain
+    /// `default_threshold`): this is what a dynamic resolver returns when there
+    /// is no domain at all, so the executor reproduces the pre-resolver
+    /// "use the tool's inherent risk level" behaviour. See `oneai-app`'s
+    /// `DynamicDomainResolver`.
+    UseToolDefault,
 }
 
 // ─── ApprovalPolicy / Verdict / ReviewAction (#28 Stage 2) ──────────────────

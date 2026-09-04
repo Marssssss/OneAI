@@ -704,6 +704,17 @@ async fn handle_request(
             let list = probe.domainpacks().await;
             Response::ok(id, serde_json::to_value(list).unwrap_or(json!({})))
         }
+        method::DOMAINPACK_SWITCH => {
+            let name = match field::<String>(&params, "name") {
+                Ok(n) => n,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.switch_domainpack(&name).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
         method::SKILL_LIST => {
             let list = probe.skills().await;
             Response::ok(id, json!({"skills": list}))
@@ -1445,6 +1456,14 @@ mod tests {
         }
         async fn domainpacks(&self) -> crate::probe::DomainPackList {
             Default::default()
+        }
+        async fn switch_domainpack(&self, _: &str) -> crate::probe::DomainPackOpResult {
+            crate::probe::DomainPackOpResult {
+                ok: false,
+                active: None,
+                available: None,
+                error: Some("test probe".into()),
+            }
         }
         async fn skills(&self) -> Vec<crate::probe::SkillInfo> {
             Vec::new()

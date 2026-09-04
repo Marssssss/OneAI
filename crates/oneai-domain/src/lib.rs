@@ -57,6 +57,7 @@ pub mod spec;
 pub mod spec_file;
 pub mod tool_decorator;
 pub mod validator;
+pub mod video_editing_pack;
 
 pub use builtin_sources::*;
 pub use coding_pack::*;
@@ -77,3 +78,4 @@ pub use spec::*;
 pub use spec_file::DomainPackSpecFile;
 pub use tool_decorator::*;
 pub use validator::{DomainPackValidator, ValidationIssue, ValidationResult, ValidationSeverity};
+pub use video_editing_pack::*;

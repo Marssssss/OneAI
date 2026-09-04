@@ -5147,8 +5147,9 @@ impl AgentLoop {
                                 }
                             }
                         }
-                        None => {
-                            // No domain rule — fall back to tool's risk_level()
+                        Some(PermissionAction::UseToolDefault) | None => {
+                            // No domain active / no rule — fall back to tool's
+                            // risk_level()
                             match tool_opt {
                                 Some(tool) => {
                                     let perm_level = oneai_core::PermissionLevel::from_risk_level(
@@ -7643,6 +7644,13 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                         output: output.content,
                         error: output.error,
                     });
+                }
+                oneai_domain::PermissionAction::UseToolDefault => {
+                    // Unreachable here: this branch only runs when a domain is
+                    // active, and `MergedDomainPack::resolve_permission` never
+                    // emits `UseToolDefault` (that variant comes from the
+                    // app-level dynamic resolver, which this path doesn't use).
+                    // Fall through to the tool-risk-level path below.
                 }
             }
         }

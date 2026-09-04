@@ -184,6 +184,9 @@ impl PackRegistry {
         if name == "research" {
             return Ok(crate::research_pack(project_dir));
         }
+        if name == "video_editing" || name == "video-editing" {
+            return Ok(crate::video_editing_pack(project_dir));
+        }
         // "general" pack is in CLI, not here — handled by caller
 
         // Try installed pack directory
@@ -381,6 +384,25 @@ fn builtin_pack_entries() -> Vec<PackIndexEntry> {
             ],
             source: PackSource::Local {
                 path: PathBuf::from("builtin://research"),
+            },
+            is_builtin: true,
+        },
+        PackIndexEntry {
+            name: "video_editing".to_string(),
+            description: "Video editing domain pack — clip video/image materials into a themed finished video"
+                .to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "OneAI".to_string(),
+            tags: vec![
+                "video".to_string(),
+                "editing".to_string(),
+                "media".to_string(),
+                "ffmpeg".to_string(),
+                "clip".to_string(),
+                "render".to_string(),
+            ],
+            source: PackSource::Local {
+                path: PathBuf::from("builtin://video_editing"),
             },
             is_builtin: true,
         },

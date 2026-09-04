@@ -293,8 +293,9 @@ pub struct ExecPolicyStore {
     live: RwLock<ExecPolicy>,
     /// The DomainPack-static seed rules (never persisted — they come from
     /// config, not user approval). Kept so an amendment can rebuild the full
-    /// set without re-reading config.
-    base_rules: Vec<ExecRule>,
+    /// set without re-reading config. Interior-mutable so a DomainPack
+    /// hot-switch can swap the base rules in place (`replace_base`).
+    base_rules: std::sync::RwLock<Vec<ExecRule>>,
     /// Where amendments are persisted as JSONL (one `ExecRule` per line).
     /// `None` = in-memory only (tests, or amendment disabled).
     rules_file: Option<PathBuf>,
@@ -305,10 +306,40 @@ impl std::fmt::Debug for ExecPolicyStore {
         let n = self.live.try_read().map(|p| p.rule_count()).unwrap_or(0);
         f.debug_struct("ExecPolicyStore")
             .field("live_rules", &n)
-            .field("base_rules", &self.base_rules.len())
+            .field("base_rules", &self.base_rules.read().unwrap().len())
             .field("rules_file", &self.rules_file)
             .finish_non_exhaustive()
     }
+}
+
+/// Load the persisted amendment rules from `path` (JSONL, one `ExecRule` per
+/// line). Malformed lines are warned and skipped, never panicked. Returns the
+/// parsed rules in file order (dedup against the base set happens at the call
+/// site, which knows the base).
+fn load_amendments(path: Option<&Path>) -> Vec<ExecRule> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ExecRule>(line) {
+            Ok(r) => out.push(r),
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                line = i,
+                error = %e,
+                "execpolicy: skipping malformed amendment rule line"
+            ),
+        }
+    }
+    out
 }
 
 impl ExecPolicyStore {
@@ -321,40 +352,17 @@ impl ExecPolicyStore {
     /// `add_amendment_rule`, not here.
     pub fn from_base(base: Vec<ExecRule>, rules_file: Option<PathBuf>) -> Self {
         let mut all = base.clone();
-        if let Some(ref path) = rules_file {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                for (i, line) in text.lines().enumerate() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<ExecRule>(line) {
-                        Ok(r) => {
-                            // Idempotent reload: skip a line that duplicates an
-                            // already-collected rule (same pattern + decision).
-                            // Persisted files may carry dupes from races or
-                            // hand-edits; `from_rules` would keep both, but the
-                            // canonical set is the dedup'd one.
-                            let dup = all
-                                .iter()
-                                .any(|e| e.pattern == r.pattern && e.decision == r.decision);
-                            if !dup {
-                                all.push(r);
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            path = %path.display(),
-                            line = i,
-                            error = %e,
-                            "execpolicy: skipping malformed amendment rule line"
-                        ),
-                    }
-                }
+        for r in load_amendments(rules_file.as_deref()) {
+            if !all
+                .iter()
+                .any(|e| e.pattern == r.pattern && e.decision == r.decision)
+            {
+                all.push(r);
             }
         }
         Self {
             live: RwLock::new(ExecPolicy::from_rules(all)),
-            base_rules: base,
+            base_rules: std::sync::RwLock::new(base),
             rules_file,
         }
     }
@@ -385,7 +393,24 @@ impl ExecPolicyStore {
     /// The static base (DomainPack) rule count — amendments are
     /// `rule_count() - base_rule_count()`.
     pub fn base_rule_count(&self) -> usize {
-        self.base_rules.len()
+        self.base_rules.read().unwrap().len()
+    }
+
+    /// Hot-swap the DomainPack-static base rules (DomainPack hot-switch),
+    /// preserving any user-approved amendments. Rebuilds the live policy from
+    /// `new_base ∪ amendments` (re-reading the amendments file) and swaps it in.
+    pub async fn replace_base(&self, new_base: Vec<ExecRule>) {
+        let mut all = new_base.clone();
+        for r in load_amendments(self.rules_file.as_deref()) {
+            if !all
+                .iter()
+                .any(|e| e.pattern == r.pattern && e.decision == r.decision)
+            {
+                all.push(r);
+            }
+        }
+        *self.base_rules.write().unwrap() = new_base;
+        *self.live.write().await = ExecPolicy::from_rules(all);
     }
 
     /// The path amendments are persisted to, if any.

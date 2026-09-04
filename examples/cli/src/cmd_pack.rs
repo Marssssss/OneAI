@@ -2,13 +2,18 @@
 //!
 //! Subcommands for listing, inspecting, and installing domain packs.
 
-use oneai_domain::{coding_pack, research_pack, DomainPack};
+use oneai_domain::{coding_pack, research_pack, video_editing_pack, DomainPack};
 use std::sync::Arc;
 
 /// Builtin domain pack names and their descriptions.
 pub const BUILTIN_PACKS: &[(&str, &str, &str)] = &[
     ("coding", "Software development — read, edit, search, shell tools", "8 tools: read_file, edit_file, shell, grep, glob, list_directory, notebook_edit, environment"),
     ("research", "Research & analysis — web search, read-only tools", "7 tools: web_search, web_fetch, read_file, grep, glob, list_directory, environment"),
+    (
+        "video_editing",
+        "Video editing — clip video/image materials into a themed finished video (ffmpeg)",
+        "7 tools: probe_media, sample_frames, validate_timeline, render, image_to_motion, make_thumbnail, verify_output",
+    ),
     ("general", "General-purpose — minimal tool set", "1 tool: calculator"),
     (
         "containerized-coding",
@@ -25,6 +30,7 @@ pub fn get_builtin_pack(name: &str, project_dir: &str) -> Option<DomainPack> {
     match name {
         "coding" => Some(coding_pack(project_dir)),
         "research" => Some(research_pack(project_dir)),
+        "video_editing" | "video-editing" => Some(video_editing_pack(project_dir)),
         "general" => Some(general_pack(project_dir)),
         _ => None,
     }
@@ -84,7 +90,7 @@ pub fn cmd_pack_list() {
     for (name, desc, tools) in BUILTIN_PACKS {
         let icon = if matches!(
             *name,
-            "coding" | "research" | "general" | "containerized-coding"
+            "coding" | "research" | "general" | "containerized-coding" | "video_editing"
         ) {
             "✅"
         } else {

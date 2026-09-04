@@ -36,8 +36,10 @@ use tokio::io::AsyncWriteExt;
 pub struct FileWorkingStateStore {
     root: PathBuf,
     /// Compaction thresholds. Defaults mirror the CodingPack policy.
-    event_threshold: usize,
-    keep_recent: usize,
+    /// Interior-mutable (`AtomicUsize`) so a DomainPack hot-switch can update
+    /// them in place without rebuilding the shared `Arc<dyn WorkingStateStore>`.
+    event_threshold: std::sync::atomic::AtomicUsize,
+    keep_recent: std::sync::atomic::AtomicUsize,
 }
 
 impl FileWorkingStateStore {
@@ -46,16 +48,24 @@ impl FileWorkingStateStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            event_threshold: 200,
-            keep_recent: 50,
+            event_threshold: std::sync::atomic::AtomicUsize::new(200),
+            keep_recent: std::sync::atomic::AtomicUsize::new(50),
         }
     }
 
     /// Override compaction thresholds.
-    pub fn with_compaction(mut self, event_threshold: usize, keep_recent: usize) -> Self {
-        self.event_threshold = event_threshold;
-        self.keep_recent = keep_recent;
+    pub fn with_compaction(self, event_threshold: usize, keep_recent: usize) -> Self {
+        self.set_compaction(event_threshold, keep_recent);
         self
+    }
+
+    /// Hot-swap the compaction thresholds (DomainPack hot-switch). Reads are
+    /// `Relaxed` — a transient mixed threshold during a switch is harmless.
+    pub fn set_compaction(&self, event_threshold: usize, keep_recent: usize) {
+        use std::sync::atomic::Ordering;
+        self.event_threshold
+            .store(event_threshold, Ordering::Relaxed);
+        self.keep_recent.store(keep_recent, Ordering::Relaxed);
     }
 
     /// The root directory.
@@ -569,14 +579,17 @@ impl WorkingStateStore for FileWorkingStateStore {
     }
 
     async fn compact_if_needed(&self, task_id: &str) -> Result<()> {
+        use std::sync::atomic::Ordering;
         let events = self.read_events(task_id).await?;
-        if events.len() < self.event_threshold {
+        if events.len() < self.event_threshold.load(Ordering::Relaxed) {
             return Ok(());
         }
         // Snapshot = state projected from events[..tail_start]; keep events
         // [tail_start..] as the live tail. derive_state then replays the
         // snapshot + tail = final state, with no double-application.
-        let tail_start = events.len().saturating_sub(self.keep_recent);
+        let tail_start = events
+            .len()
+            .saturating_sub(self.keep_recent.load(Ordering::Relaxed));
         let snapshot_state = match project(&events[..tail_start]) {
             Some(s) => s,
             None => return Ok(()),
@@ -651,6 +664,12 @@ impl WorkingStateStore for FileWorkingStateStore {
         }
         self.write_index(&index).await?;
         Ok(())
+    }
+
+    fn set_compaction(&self, event_threshold: usize, keep_recent: usize) {
+        // Disambiguate from the inherent method (same name) so the trait-object
+        // path reaches the concrete hot-swap logic.
+        FileWorkingStateStore::set_compaction(self, event_threshold, keep_recent);
     }
 }
 

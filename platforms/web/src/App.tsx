@@ -699,11 +699,9 @@ export default function App(): React.ReactNode {
           store={settings}
           theme={theme}
           locale={locale}
-          planMode={interactionMode === 'plan'}
           connection={status}
           onToggleTheme={toggleTheme}
           onToggleLocale={toggleLocale}
-          onTogglePlan={() => applyMode(interactionMode === 'plan' ? 'normal' : 'plan')}
           hostOps={{
             list: () => projection.listHosts(),
             remove: (host) => projection.removeHost(host),

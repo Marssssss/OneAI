@@ -139,8 +139,11 @@ impl CommandReviewer for RuleGuardian {
 #[derive(Clone)]
 pub struct GuardianContext {
     reviewer: Arc<dyn CommandReviewer>,
-    policy: ApprovalPolicy,
-    trusted_dirs: Vec<PathBuf>,
+    /// Interior-mutable so a DomainPack hot-switch (`set_domain_policy`) can
+    /// update the approval posture without rebuilding the shared `Arc` the
+    /// `ToolExecutor` holds.
+    policy: Arc<std::sync::RwLock<ApprovalPolicy>>,
+    trusted_dirs: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     working_dir: PathBuf,
     /// Config-driven token-prefix rules + runtime amendments (#28 Stage 4/5).
     /// `None` → the reviewer heuristic decides (the pre-Stage-4 behaviour).
@@ -150,8 +153,8 @@ pub struct GuardianContext {
 impl std::fmt::Debug for GuardianContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GuardianContext")
-            .field("policy", &self.policy)
-            .field("trusted_dirs", &self.trusted_dirs)
+            .field("policy", &*self.policy.read().unwrap())
+            .field("trusted_dirs", &*self.trusted_dirs.read().unwrap())
             .field("working_dir", &self.working_dir)
             .field(
                 "exec_policy_rules",
@@ -174,8 +177,8 @@ impl GuardianContext {
     ) -> Self {
         Self {
             reviewer,
-            policy,
-            trusted_dirs,
+            policy: Arc::new(std::sync::RwLock::new(policy)),
+            trusted_dirs: Arc::new(std::sync::RwLock::new(trusted_dirs)),
             working_dir,
             exec_policy,
         }
@@ -183,12 +186,20 @@ impl GuardianContext {
 
     /// The configured policy (for introspection / TUI display).
     pub fn policy(&self) -> ApprovalPolicy {
-        self.policy
+        *self.policy.read().unwrap()
     }
 
     /// The live exec-policy store, if wired (#28 Stage 4/5).
     pub fn exec_policy_store(&self) -> Option<&Arc<ExecPolicyStore>> {
         self.exec_policy.as_ref()
+    }
+
+    /// Hot-swap the domain-derived approval policy + trusted dirs (DomainPack
+    /// hot-switch). The `exec_policy` base rules are swapped separately via
+    /// [`ExecPolicyStore::replace_base`].
+    pub fn set_domain_policy(&self, policy: ApprovalPolicy, trusted_dirs: Vec<PathBuf>) {
+        *self.policy.write().unwrap() = policy;
+        *self.trusted_dirs.write().unwrap() = trusted_dirs;
     }
 
     /// Record a user-approved shell command as a runtime amendment (#28 Stage
@@ -218,6 +229,7 @@ impl GuardianContext {
     /// Review the call and apply the policy matrix → the action the executor
     /// takes (Run / Deny / Prompt).
     pub async fn apply(&self, tool_name: &str, args: &serde_json::Value) -> ReviewAction {
+        let policy = self.policy();
         let cwd_trusted = self.is_trusted_dir();
         // #28 Stage 4/5 — declarative rule layer first (shell only). A matching
         // rule's verdict is authoritative; the reviewer heuristic is skipped.
@@ -226,21 +238,22 @@ impl GuardianContext {
             if let Some(cmd) = shell_command_for(tool_name, args) {
                 if !ep.is_empty().await {
                     if let Some(verdict) = ep.evaluate(&shell_tokens(&cmd)).await {
-                        return self.policy.decide(verdict, cwd_trusted);
+                        return policy.decide(verdict, cwd_trusted);
                     }
                 }
             }
         }
         let verdict = self.reviewer.review(tool_name, args).await;
-        self.policy.decide(verdict, cwd_trusted)
+        policy.decide(verdict, cwd_trusted)
     }
 
     fn is_trusted_dir(&self) -> bool {
-        if self.trusted_dirs.is_empty() {
+        let trusted_dirs = self.trusted_dirs.read().unwrap();
+        if trusted_dirs.is_empty() {
             // No trusted dirs configured → trust the working dir itself.
             return true;
         }
-        self.trusted_dirs
+        trusted_dirs
             .iter()
             .any(|d| self.working_dir.starts_with(d) || d.starts_with(&self.working_dir))
     }

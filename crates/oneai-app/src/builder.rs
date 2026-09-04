@@ -15,8 +15,8 @@ use oneai_core::error::Result;
 use oneai_core::platform::{Platform, PlatformAdapter};
 use oneai_core::rate_limiter::{RateLimitConfig, RateLimiter, TokenWindowRateLimiter};
 use oneai_core::traits::{
-    EmbeddingService, InteractionGate, LlmProvider, MemoryPersistence, OutputParser,
-    PermissionResolver, RerankerProvider, RetrievalBackend, Tool, VectorBackend,
+    EmbeddingService, ExposureResolver, InteractionGate, LlmProvider, MemoryPersistence,
+    OutputParser, PermissionResolver, RerankerProvider, RetrievalBackend, Tool, VectorBackend,
 };
 use oneai_core::usage::{InMemoryUsageTracker, UsageTracker};
 use oneai_core::ContextManager;
@@ -26,7 +26,7 @@ use oneai_core::ProviderPoolConfig;
 use oneai_core::SelectionMode;
 use oneai_core::SmartRouteConfig;
 use oneai_core::TokenCounter;
-use oneai_core::{CloudProviderKind, ModelConfig};
+use oneai_core::{CloudProviderKind, ModelConfig, PermissionAction, ToolExposure};
 use oneai_core::{Conversation, SessionInfo};
 
 use oneai_provider::{ProviderPool, SmartRouter};
@@ -1834,11 +1834,16 @@ impl AppBuilder {
             .unwrap_or_else(|| Arc::new(ThreeLayerParser::new()));
 
         // Merge domain packs (if any)
-        let merged_domain_pack = if self.domain_packs.is_empty() {
-            None
-        } else {
-            Some(Arc::new(MergedDomainPack::merge(self.domain_packs)))
-        };
+        // The shared, hot-swappable domain slot. `initial_domain` is the
+        // build-time snapshot used for everything below; the slot is what
+        // per-turn readers and the dynamic resolver consult at runtime.
+        let domain_slot: SharedDomainPack =
+            Arc::new(std::sync::RwLock::new(if self.domain_packs.is_empty() {
+                None
+            } else {
+                Some(Arc::new(MergedDomainPack::merge(self.domain_packs)))
+            }));
+        let initial_domain = domain_slot.read().unwrap().clone();
 
         // Create WASM module manager if runtime is provided
         let wasm_module_manager = self
@@ -1862,28 +1867,23 @@ impl AppBuilder {
             }
         });
 
-        // Domain permission resolver — the merged DomainPack's
-        // `PermissionProfile`, exposed via the core-level `PermissionResolver`
-        // trait so the ToolExecutor / WorkflowExecutor (which live below
-        // oneai-domain in the dep graph) honour DomainPack `deny_by_default`
-        // / `require_confirmation` policy. Closes the gap-analysis P1 bypass
-        // where tool-execution paths diverged from the agent-loop's permission
-        // checks. `None` when no domain pack is configured.
-        let permission_resolver: Option<Arc<dyn PermissionResolver>> = merged_domain_pack
-            .as_ref()
-            .map(|dp| Arc::new(dp.permission_profile.clone()) as Arc<dyn PermissionResolver>);
+        // Domain permission resolver — now a *dynamic* resolver that reads the
+        // current domain through the shared slot, so a hot-switch takes effect
+        // on the next tool call. When no domain is active it returns
+        // `UseToolDefault` (the executor falls back to the tool's own risk
+        // level — the pre-resolver behaviour). Always installed: the resolver
+        // itself is the seam that makes `switch_domain` transparent to the
+        // ToolExecutor / WorkflowExecutor (which hold it for the session).
+        let permission_resolver: Option<Arc<dyn PermissionResolver>> =
+            Some(Arc::new(DynamicDomainResolver::new(domain_slot.clone()))
+                as Arc<dyn PermissionResolver>);
 
-        // #27 — exposure resolver: the same `PermissionProfile` (which impls
-        // `ExposureResolver`) overrides a tool's `Tool::exposure` with the
-        // DomainPack's `tool_exposure` map. Wired into the model-schema
-        // filter (agent loop), the code-mode bridge tool list, and the
-        // `tool_search` discovery tool. `None` when no domain pack is
-        // configured → `effective_exposure` falls back to `Tool::exposure`.
+        // #27 — exposure resolver: the same dynamic resolver (it also impls
+        // `ExposureResolver`), so the DomainPack's `tool_exposure` map stays
+        // live across a switch.
         let exposure_resolver: Option<Arc<dyn oneai_core::traits::ExposureResolver>> =
-            merged_domain_pack.as_ref().map(|dp| {
-                Arc::new(dp.permission_profile.clone())
-                    as Arc<dyn oneai_core::traits::ExposureResolver>
-            });
+            Some(Arc::new(DynamicDomainResolver::new(domain_slot.clone()))
+                as Arc<dyn oneai_core::traits::ExposureResolver>);
 
         // #28 Stage 2 — Guardian (content-level safety review). The policy
         // comes from the DomainPack's PermissionProfile when a domain is
@@ -1897,11 +1897,11 @@ impl AppBuilder {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let guardian_policy = merged_domain_pack
+        let guardian_policy = initial_domain
             .as_ref()
             .map(|dp| dp.permission_profile.approval_policy)
             .unwrap_or(self.guardian_policy);
-        let trusted_dirs = merged_domain_pack
+        let trusted_dirs = initial_domain
             .as_ref()
             .and_then(|dp| {
                 if dp.permission_profile.trusted_dirs.is_empty() {
@@ -1918,7 +1918,7 @@ impl AppBuilder {
         // that also holds runtime amendments the user approved (hot-swapped +
         // persisted to `exec_rules_path`). `exec_amendment_enabled = false`
         // → in-memory store with no persistence (Stage-4 static posture).
-        let exec_policy_base: Vec<oneai_tool::ExecRule> = merged_domain_pack
+        let exec_policy_base: Vec<oneai_tool::ExecRule> = initial_domain
             .as_ref()
             .and_then(|dp| dp.permission_profile.exec_policy.as_ref())
             .map(|ep| ep.rules().to_vec())
@@ -1939,7 +1939,7 @@ impl AppBuilder {
             )))
         };
         let guardian: Option<std::sync::Arc<oneai_tool::GuardianContext>> =
-            if merged_domain_pack.is_some() || self.provider.is_some() {
+            if initial_domain.is_some() || self.provider.is_some() {
                 let reviewer: std::sync::Arc<dyn oneai_core::traits::CommandReviewer> =
                     match &self.provider {
                         Some(provider) => std::sync::Arc::new(oneai_agent::LlmGuardian::new(
@@ -2008,7 +2008,7 @@ impl AppBuilder {
         };
 
         // Eagerly register domain pack tools at build time
-        if let Some(domain) = &merged_domain_pack {
+        if let Some(domain) = &initial_domain {
             for tool in &domain.tools {
                 self.tool_registry.register(tool.clone()).await?;
                 workflow_executor.register_tool(tool.clone()).await;
@@ -2283,7 +2283,7 @@ impl AppBuilder {
                     self.tool_registry.clone(),
                 ))
             });
-        let has_data_sources = merged_domain_pack.is_some() || mcp_plugin_registry.is_some();
+        let has_data_sources = initial_domain.is_some() || mcp_plugin_registry.is_some();
         if has_data_sources {
             self.tool_registry
                 .register(Arc::new(oneai_agent::ReloadTool::new(
@@ -2338,7 +2338,7 @@ impl AppBuilder {
         let a2a_server_host = if self.a2a_server_host_enabled {
             let agent_card = if let Some(card) = self.a2a_server_agent_card {
                 card
-            } else if let Some(domain) = &merged_domain_pack {
+            } else if let Some(domain) = &initial_domain {
                 oneai_a2a::agent_card_from_domain_pack(
                     &domain.as_ref().to_domain_pack(),
                     "http://localhost:8080",
@@ -2428,7 +2428,7 @@ impl AppBuilder {
         // memory manager (mirrors set_user_id). `enabled=false` (coding
         // default) makes `run_decay` a no-op, so existing behavior is
         // unchanged unless the domain opts in (research / assistant).
-        if let Some(domain) = &merged_domain_pack {
+        if let Some(domain) = &initial_domain {
             memory_manager
                 .set_decay_policy(Some(domain.memory_profile.decay.clone()))
                 .await;
@@ -2440,13 +2440,13 @@ impl AppBuilder {
         // `enable_memory_tools(false)` opts out; no domain pack at all (the
         // mobile/macOS native path) also defaults ON so the agent can
         // remember across sessions out of the box.
-        let memory_tools_on = merged_domain_pack
+        let memory_tools_on = initial_domain
             .as_ref()
             .map(|d| d.memory_profile.enable_memory_tools)
             .unwrap_or(true);
         if memory_tools_on {
             let mm = memory_manager.clone();
-            let recall_cfg = merged_domain_pack
+            let recall_cfg = initial_domain
                 .as_ref()
                 .map(|d| d.memory_profile.recall.clone())
                 .unwrap_or_default();
@@ -2657,7 +2657,7 @@ impl AppBuilder {
         // name (multi-pack `"a+b"` unions both domains' builtin sets); a
         // pack-less build falls back to `"coding"` — the same default the CLI
         // commands use.
-        let skill_domain_name = merged_domain_pack
+        let skill_domain_name = initial_domain
             .as_ref()
             .map(|d| d.name.clone())
             .unwrap_or_else(|| "coding".to_string());
@@ -2676,10 +2676,11 @@ impl AppBuilder {
         // Working-state store: compaction thresholds come from the domain's
         // `MemoryProfile.working_state.compaction` (CodingPack 200/50,
         // assistant 500/100) so the persistence dimension is declarative
-        // per-domain, not hardcoded in the store. Precomputed here because
-        // `merged_domain_pack` is moved into the `App` literal below.
+        // per-domain, not hardcoded in the store. Precomputed from the
+        // build-time snapshot; `switch_domain` updates it live via
+        // `set_compaction`.
         let working_state_store = self.working_state_root.as_ref().map(|root| {
-            let (event_threshold, keep_recent) = merged_domain_pack
+            let (event_threshold, keep_recent) = initial_domain
                 .as_ref()
                 .map(|d| {
                     let c = &d.memory_profile.working_state.compaction;
@@ -2717,7 +2718,7 @@ impl AppBuilder {
         // auto-archived. The curator's referenced set (cron/workflow skills)
         // starts empty — Stage B has no cron yet (Phase 3.2); `set_referenced`
         // is the refresh hook.
-        let skill_policy = merged_domain_pack
+        let skill_policy = initial_domain
             .as_ref()
             .map(|d| d.memory_profile.skill_lifecycle.clone())
             .unwrap_or_else(oneai_domain::SkillLifecyclePolicy::coding);
@@ -2801,7 +2802,8 @@ impl AppBuilder {
             trace_context: self.trace_context,
             #[cfg(feature = "otel")]
             metrics_provider: self.metrics_provider,
-            domain_pack: merged_domain_pack,
+            domain_pack: domain_slot,
+            guardian,
             a2a_client: self.a2a_client,
             wasm_runtime: self.wasm_runtime,
             wasm_module_manager,
@@ -2862,6 +2864,53 @@ impl Default for AppBuilder {
     }
 }
 
+/// The shared, hot-swappable domain-pack slot.
+///
+/// `App` and every `AppSession`'s `AppResources` hold the **same** `Arc`, so a
+/// `switch_domain` write is visible to all per-turn readers and to the dynamic
+/// resolver/guardian. `std::sync::RwLock` (not `tokio`) because
+/// `PermissionResolver::resolve` is a sync method — the read is a cheap
+/// `Arc` clone.
+pub type SharedDomainPack = Arc<std::sync::RwLock<Option<Arc<MergedDomainPack>>>>;
+
+/// A permission/exposure resolver that reads the **current** domain through the
+/// shared slot, so a DomainPack hot-switch takes effect on the next tool call
+/// without rebuilding the `ToolExecutor` (which holds this resolver as an
+/// `Arc<dyn …>` for the session's lifetime).
+///
+/// - `resolve`: no domain → `PermissionAction::UseToolDefault` (executor falls
+///   back to the tool's own `risk_level`, matching the pre-resolver behaviour);
+///   domain present → the domain's `resolve_permission`.
+/// - `resolve_exposure`: no domain → `tool.exposure()`; domain present → the
+///   domain's `tool_exposure` map.
+pub struct DynamicDomainResolver {
+    slot: SharedDomainPack,
+}
+
+impl DynamicDomainResolver {
+    pub fn new(slot: SharedDomainPack) -> Self {
+        Self { slot }
+    }
+}
+
+impl PermissionResolver for DynamicDomainResolver {
+    fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction {
+        match self.slot.read().unwrap().as_ref() {
+            Some(domain) => domain.resolve_permission(tool_name, args),
+            None => PermissionAction::UseToolDefault,
+        }
+    }
+}
+
+impl ExposureResolver for DynamicDomainResolver {
+    fn resolve_exposure(&self, tool_name: &str, tool: &dyn Tool) -> ToolExposure {
+        match self.slot.read().unwrap().as_ref() {
+            Some(domain) => domain.resolve_exposure(tool_name, tool),
+            None => tool.exposure(),
+        }
+    }
+}
+
 /// A fully assembled OneAI application.
 pub struct App {
     /// LLM provider (optional).
@@ -2914,8 +2963,13 @@ pub struct App {
     /// AgentLoop config by AppSession.
     #[cfg(feature = "otel")]
     pub metrics_provider: Option<Arc<oneai_trace::OtelMetricsProvider>>,
-    /// Domain pack (optional — for domain-specific configuration).
-    pub domain_pack: Option<Arc<MergedDomainPack>>,
+    /// Domain pack (optional — for domain-specific configuration). Held in a
+    /// shared slot so `switch_domain` can hot-swap it at runtime.
+    pub domain_pack: SharedDomainPack,
+    /// Guardian content reviewer + policy (optional). Stored on `App` (in
+    /// addition to being wired into `ToolExecutor`) so `switch_domain` can
+    /// hot-swap its domain-derived policy/trusted-dirs/base-rules.
+    pub guardian: Option<Arc<oneai_tool::GuardianContext>>,
     /// A2A client (optional — for inter-agent communication).
     pub a2a_client: Option<Arc<A2AClient>>,
     /// WASM runtime (optional — for sandboxed tool execution).
@@ -3135,7 +3189,8 @@ impl App {
     /// This is called automatically after build() when domain packs are configured.
     /// It registers domain tools and applies tool decorators.
     pub async fn register_domain_tools(&self) -> Result<()> {
-        if let Some(domain) = &self.domain_pack {
+        let domain = self.domain_pack.read().unwrap().clone();
+        if let Some(domain) = domain {
             for tool in &domain.tools {
                 self.register_tool(tool.clone()).await?;
             }
@@ -3178,9 +3233,126 @@ impl App {
         self.trace_context.as_ref()
     }
 
-    /// Get the domain pack.
-    pub fn domain_pack(&self) -> Option<&Arc<MergedDomainPack>> {
-        self.domain_pack.as_ref()
+    /// Get the current domain pack (a clone of the shared slot's contents).
+    pub fn domain_pack(&self) -> Option<Arc<MergedDomainPack>> {
+        self.domain_pack.read().unwrap().clone()
+    }
+
+    /// The shared domain-pack slot (for a hot-switch caller or a dynamic
+    /// resolver that already holds a reference).
+    pub fn domain_pack_slot(&self) -> &SharedDomainPack {
+        &self.domain_pack
+    }
+
+    /// Hot-swap the active domain pack at runtime (the webUI settings "领域"
+    /// switch). Orchestrates the full switch — tools, permission posture,
+    /// guardian policy, memory decay, and working-state compaction — then flips
+    /// the shared slot last so a per-turn reader never observes a half-switched
+    /// domain.
+    ///
+    /// `pack` is an already-built `MergedDomainPack` (the CLI's `get_builtin_pack`
+    /// / `PackRegistry::load_installed` produce it); this method is pure
+    /// orchestration, decoupled from pack construction.
+    pub async fn switch_domain(&self, pack: MergedDomainPack) -> std::result::Result<(), String> {
+        // 1. Remove the previous domain's tools + builtin skills (read from the
+        //    slot before swap). `old_skill_names` is the full builtin set of the
+        //    previous domain (`skills_for_domain` = general + domain-specific),
+        //    so it does NOT include discovered (project/user) skills — those
+        //    survive the switch untouched.
+        let (old_tool_names, old_skill_names) = {
+            let slot = self.domain_pack.read().unwrap();
+            match slot.as_ref() {
+                Some(prev) => {
+                    let tools = prev
+                        .tools
+                        .iter()
+                        .map(|t| t.name().to_string())
+                        .collect::<Vec<_>>();
+                    let skills = prev
+                        .name
+                        .split('+')
+                        .flat_map(|p| {
+                            oneai_skill::builtin::skills_for_domain(p)
+                                .into_iter()
+                                .map(|s| s.name)
+                        })
+                        .collect::<Vec<_>>();
+                    (tools, skills)
+                }
+                None => (Vec::new(), Vec::new()),
+            }
+        };
+        for name in &old_tool_names {
+            let _ = self.tool_registry.unregister(name).await;
+        }
+
+        // 2. Memory tools follow the new domain's `enable_memory_tools`.
+        //    `memory_search`/`core_memory_edit`/`archival_memory_insert` are the
+        //    fixed infra names; every current domain defaults them ON.
+        if !pack.memory_profile.enable_memory_tools {
+            for name in [
+                "memory_search",
+                "core_memory_edit",
+                "archival_memory_insert",
+            ] {
+                let _ = self.tool_registry.unregister(name).await;
+            }
+        }
+
+        // 3. Register the new domain's tools.
+        for tool in &pack.tools {
+            let _ = self.tool_registry.register(tool.clone()).await;
+        }
+
+        // 4. Guardian: hot-swap the domain-derived policy/trusted-dirs and the
+        //    static exec-policy base rules.
+        if let Some(guardian) = &self.guardian {
+            let trusted_dirs = if pack.permission_profile.trusted_dirs.is_empty() {
+                Vec::new()
+            } else {
+                pack.permission_profile.trusted_dirs.clone()
+            };
+            guardian.set_domain_policy(pack.permission_profile.approval_policy, trusted_dirs);
+            if let Some(store) = guardian.exec_policy_store() {
+                let base = pack
+                    .permission_profile
+                    .exec_policy
+                    .as_ref()
+                    .map(|ep| ep.rules().to_vec())
+                    .unwrap_or_default();
+                store.replace_base(base).await;
+            }
+        }
+
+        // 5. Memory decay policy.
+        self.memory_manager
+            .set_decay_policy(Some(pack.memory_profile.decay.clone()))
+            .await;
+
+        // 6. Working-state compaction thresholds.
+        if let Some(store) = &self.working_state_store {
+            let c = &pack.memory_profile.working_state.compaction;
+            store.set_compaction(c.event_threshold, c.keep_recent);
+        }
+
+        // 7. Swap builtin skills: drop the old domain's builtin set, then
+        //    register the new domain's. General skills (skill-creator /
+        //    summarization / translation / creative-writing) are in both sets,
+        //    so they're re-added here; discovered (project/user) skills are not
+        //    in `old_skill_names` and stay put.
+        for name in &old_skill_names {
+            let _ = self.skill_registry.remove(name).await;
+        }
+        for part in pack.name.split('+') {
+            let skills = oneai_skill::builtin::skills_for_domain(part);
+            if !skills.is_empty() {
+                let _ = self.skill_registry.register_builtin(skills).await;
+            }
+        }
+
+        // 8. Flip the shared slot last.
+        *self.domain_pack.write().unwrap() = Some(Arc::new(pack));
+        Ok(())
     }
 
     /// Get the A2A client (for inter-agent communication).
@@ -3648,5 +3820,84 @@ mod tests {
         assert!(tools
             .iter()
             .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("calculator")));
+    }
+
+    // ─── Domain hot-switch ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_dynamic_resolver_no_domain_returns_use_tool_default() {
+        let slot: SharedDomainPack = Arc::new(std::sync::RwLock::new(None));
+        let resolver = DynamicDomainResolver::new(slot);
+        let action = resolver.resolve("shell", &serde_json::json!({}));
+        assert_eq!(action, PermissionAction::UseToolDefault);
+
+        // Exposure falls back to the tool's own exposure when no domain.
+        let calc = oneai_tool::CalculatorTool::new();
+        assert_eq!(
+            resolver.resolve_exposure("calculator", &calc),
+            calc.exposure()
+        );
+    }
+
+    #[test]
+    fn test_dynamic_resolver_with_domain_delegates_to_pack() {
+        let slot: SharedDomainPack = Arc::new(std::sync::RwLock::new(Some(Arc::new(
+            MergedDomainPack::merge(vec![oneai_domain::coding_pack(".")]),
+        ))));
+        let resolver = DynamicDomainResolver::new(slot);
+        // CodingPack auto-approves read_file.
+        let action = resolver.resolve("read_file", &serde_json::json!({}));
+        assert_eq!(action, PermissionAction::AutoApprove);
+    }
+
+    #[tokio::test]
+    async fn test_switch_domain_swaps_tools_and_slot() {
+        let app = AppBuilder::new()
+            .noop_interaction_gate()
+            .domain_pack(oneai_domain::coding_pack("."))
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // coding tools are present.
+        let before = app.tool_executor().list_tools().await;
+        assert!(before.contains(&"edit_file".to_string()));
+        assert!(!before.contains(&"render".to_string()));
+
+        // coding builtin skills are present.
+        let coding_skills = app.skill_registry.skill_names().await;
+        assert!(coding_skills.iter().any(|n| n == "code-review"));
+
+        // Switch to video_editing.
+        app.switch_domain(MergedDomainPack::merge(vec![
+            oneai_domain::video_editing_pack("."),
+        ]))
+        .await
+        .expect("switch should succeed");
+
+        let after = app.tool_executor().list_tools().await;
+        assert!(
+            !after.contains(&"edit_file".to_string()),
+            "coding tools linger"
+        );
+        assert!(after.contains(&"render".to_string()), "video tools missing");
+
+        // The slot reflects the new domain name.
+        assert_eq!(
+            app.domain_pack().map(|p| p.name.clone()),
+            Some("video_editing".to_string())
+        );
+
+        // coding builtin skills are gone, but the always-on general skills
+        // (skill-creator) survive the switch.
+        let video_skills = app.skill_registry.skill_names().await;
+        assert!(
+            !video_skills.iter().any(|n| n == "code-review"),
+            "coding skills linger after switch"
+        );
+        assert!(
+            video_skills.iter().any(|n| n == "skill-creator"),
+            "always-on skill-creator must survive the switch"
+        );
     }
 }

@@ -22,8 +22,8 @@ use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
     default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError,
     BackgroundTaskInfoDto, BackgroundTaskOpResult, ConfigFileView, DomainPackInfo, DomainPackList,
-    FileScenarioStore, ListenSpec, ProviderDetectQuery, ProviderDetectResult, ProviderEntryDto,
-    ProviderInfo, ProviderModelsQuery, ProviderModelsResult, ProviderOpResult,
+    DomainPackOpResult, FileScenarioStore, ListenSpec, ProviderDetectQuery, ProviderDetectResult,
+    ProviderEntryDto, ProviderInfo, ProviderModelsQuery, ProviderModelsResult, ProviderOpResult,
     SessionTrajectoryResult, SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield, InProcessBus};
@@ -470,8 +470,9 @@ impl oneai_app_server::HostAllowlistRpc for AppHostAllowlistRpc {
 struct AppProbeImpl {
     app: Arc<App>,
     /// Launch-time `--domain` pack name (cleaner than the merged-pack
-    /// concatenated name for display).
-    domain_pack_name: Option<String>,
+    /// concatenated name for display). Interior-mutable so `domainpack/switch`
+    /// can update it via `&self`.
+    domain_pack_name: std::sync::RwLock<Option<String>>,
     /// Launch-time provider config (env / `--model`) — kept for group-chat
     /// member injection + the config snapshot's provider fields.
     provider_config: Option<ModelConfig>,
@@ -599,7 +600,7 @@ impl AppProbe for AppProbeImpl {
         let permission_profile = self
             .app
             .domain_pack()
-            .map(|p: &Arc<MergedDomainPack>| p.permission_profile.name.clone());
+            .map(|p| p.permission_profile.name.clone());
         let (kind, model, base_url) = match &self.provider_config {
             Some(mc) => (
                 provider_kind_str(mc),
@@ -616,7 +617,7 @@ impl AppProbe for AppProbeImpl {
             None => None,
         };
         AppConfigSnapshot {
-            domain_pack: self.domain_pack_name.clone(),
+            domain_pack: self.domain_pack_name.read().unwrap().clone(),
             provider_kind: kind,
             provider_model: model,
             base_url,
@@ -746,8 +747,59 @@ impl AppProbe for AppProbeImpl {
             })
             .collect();
         DomainPackList {
-            active: self.domain_pack_name.clone(),
+            active: self.domain_pack_name.read().unwrap().clone(),
             available,
+        }
+    }
+
+    async fn switch_domainpack(&self, name: &str) -> DomainPackOpResult {
+        // 1. Resolve the pack name → a built DomainPack (builtin, then installed).
+        let pack = match crate::cmd_pack::get_builtin_pack(name, ".") {
+            Some(p) => p,
+            None => match PackRegistry::default_path().load_installed(name, ".") {
+                Ok(p) => p,
+                Err(_) => {
+                    return DomainPackOpResult {
+                        ok: false,
+                        active: self.domain_pack_name.read().unwrap().clone(),
+                        available: None,
+                        error: Some(format!("unknown domain pack: {name}")),
+                    }
+                }
+            },
+        };
+        // 2. Hot-swap the live app (tools/permission/guardian/memory/…).
+        if let Err(e) = self
+            .app
+            .switch_domain(MergedDomainPack::merge(vec![pack]))
+            .await
+        {
+            return DomainPackOpResult {
+                ok: false,
+                active: self.domain_pack_name.read().unwrap().clone(),
+                available: None,
+                error: Some(e),
+            };
+        }
+        // 3. Persist the default domain (launch default, mirror set_active_provider).
+        let mut cfg = super::config::OneaiConfig::load_or_default();
+        cfg.set_domain(name);
+        if let Err(e) = cfg.save() {
+            return DomainPackOpResult {
+                ok: false,
+                active: self.domain_pack_name.read().unwrap().clone(),
+                available: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        // 4. Update the display name + return the post-op list.
+        *self.domain_pack_name.write().unwrap() = Some(name.to_string());
+        let list = self.domainpacks().await;
+        DomainPackOpResult {
+            ok: true,
+            active: Some(name.to_string()),
+            available: Some(list.available),
+            error: None,
         }
     }
 
@@ -1326,7 +1378,7 @@ pub(crate) async fn build_engine_server(
         });
     let probe: SharedAppProbe = Arc::new(AppProbeImpl {
         app: app.clone(),
-        domain_pack_name: domain.map(|d| d.to_string()),
+        domain_pack_name: std::sync::RwLock::new(domain.map(|d| d.to_string())),
         provider_config: runtime_provider_config.clone(),
         pool: probe_pool,
     });

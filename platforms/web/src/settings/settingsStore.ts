@@ -13,6 +13,7 @@ import type {
   AppConfigSnapshot,
   ConfigFileView,
   DomainPackList,
+  DomainPackOpResult,
   ProviderDetectParams,
   ProviderDetectResult,
   ProviderEntryDto,
@@ -113,6 +114,33 @@ export class SettingsStore {
       this.rpc.call<unknown, ConfigFileView>('config/read', {}).catch(() => null),
     ])
     this.set({ config, providers, domainPacks, skills, configFile })
+  }
+
+  /** Hot-swap the active DomainPack by name — takes effect on the next turn and
+   *  persists to config.toml (launch default). Updates the local list from the
+   *  op result (mirror of `providerSetActive`). */
+  async domainpackSwitch(name: string): Promise<boolean> {
+    try {
+      const res = await this.rpc.call<{ name: string }, DomainPackOpResult>(
+        'domainpack/switch',
+        { name },
+      )
+      if (res.ok && res.available !== undefined) {
+        this.set({
+          domainPacks: { active: res.active ?? name, available: res.available },
+          config: this.state.config
+            ? { ...this.state.config, domain_pack: res.active ?? name }
+            : this.state.config,
+          lastError: null,
+        })
+        return true
+      }
+      this.set({ lastError: res.error ?? 'domain switch failed' })
+      return false
+    } catch (e) {
+      this.set({ lastError: errMsg(e, 'domainpack/switch') })
+      return false
+    }
   }
 
   /** Add a provider — writes to config.toml + adds it live (immediately

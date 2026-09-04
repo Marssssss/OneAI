@@ -554,6 +554,47 @@ impl MemoryProfile {
             .habit_fact_types(vec![FactType::new("user_tooling_pref")])
     }
 
+    /// The video-editing-domain default memory profile.
+    ///
+    /// Mirrors the "剪辑Agent设计方案" §4 layered-memory model: the *working*
+    /// tier (素材索引 / EDL / intermediate decisions) lives in-memory + the task
+    /// state file and dies with the task, so it is **not** an extraction schema.
+    /// The *long-term* tier is what survives here — user taste (画幅/时长/转场/
+    /// 配乐口味, 禁用元素) and reusable project templates (成功 EDL 结构 / 片头片尾 /
+    /// 固定 BGM). Taste is a cross-session habit; templates and defect lessons
+    /// are project-scoped. Decay is on (the "grow-with-you" domain accumulates
+    /// taste over many edits and must bound it); working state is `HomeDir` (no
+    /// code repo — the material/EDL substrate has no external git ground truth).
+    pub fn video_editing() -> Self {
+        Self::new("video_editing")
+            .extraction_schema(vec![
+                FactType::new("user_edit_pref"),
+                FactType::new("style_pref"),
+                FactType::new("project_template"),
+                FactType::new("defect_lesson"),
+            ])
+            .recall(RecallConfig {
+                strategy: RecallStrategy::Hybrid,
+                top_k: 5,
+                time_decay: true,
+                ..Default::default()
+            })
+            .core_budget_tokens(2048)
+            .enable_memory_tools(true)
+            .habit_fact_types(vec![
+                FactType::new("user_edit_pref"),
+                FactType::new("style_pref"),
+            ])
+            .working_state(WorkingStatePolicy::assistant())
+            .skill_lifecycle(SkillLifecyclePolicy::assistant())
+            // Video editing is a "grow-with-you" domain — decay so the taste
+            // base doesn't accumulate stale low-salience preferences forever.
+            .decay(DecayPolicy {
+                enabled: true,
+                ..DecayPolicy::default()
+            })
+    }
+
     /// The research-domain default memory profile.
     pub fn research() -> Self {
         Self::new("research")
@@ -800,6 +841,34 @@ mod tests {
             GroundTruthReconciliation::None
         );
         assert_eq!(p.working_state.storage_root, StorageRoot::HomeDir);
+    }
+
+    #[test]
+    fn test_video_editing_profile() {
+        let p = MemoryProfile::video_editing();
+        assert_eq!(p.name, "video_editing");
+        assert!(p.enable_memory_tools);
+        // Taste is a cross-session habit; templates/lessons are project-scoped.
+        assert!(p
+            .habit_fact_types
+            .contains(&FactType::new("user_edit_pref")));
+        assert!(p.habit_fact_types.contains(&FactType::new("style_pref")));
+        assert!(p
+            .extraction_schema
+            .contains(&FactType::new("project_template")));
+        assert!(p
+            .extraction_schema
+            .contains(&FactType::new("defect_lesson")));
+        assert!(!p
+            .habit_fact_types
+            .contains(&FactType::new("project_template")));
+        // No repo ground truth; home-dir working state; decay on (grow-with-you).
+        assert_eq!(p.working_state.storage_root, StorageRoot::HomeDir);
+        assert_eq!(
+            p.working_state.ground_truth_reconciliation,
+            GroundTruthReconciliation::None
+        );
+        assert!(p.decay.enabled);
     }
 
     #[test]

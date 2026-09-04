@@ -302,7 +302,7 @@ struct AppResources {
     /// Manually-activated skill (via `/skill <name>`). Shared mutable so the
     /// TUI can set it between runs and the freshly-built AgentLoop reads it.
     active_skill: Arc<tokio::sync::RwLock<Option<String>>>,
-    domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
+    domain_pack: crate::builder::SharedDomainPack,
     /// SQLite session store (for memory + conversation persistence).
     sqlite_store: Option<Arc<SqliteSessionStore>>,
     /// Usage tracker — propagated into the AgentLoop so the loop records per-call
@@ -826,38 +826,36 @@ impl AppSession {
         Ok(result)
     }
 
+    /// The currently-active domain pack (a clone of the shared slot).
+    ///
+    /// Centralizes the lock read so every per-turn consumer sees the same
+    /// hot-swappable snapshot.
+    fn current_domain(&self) -> Option<Arc<oneai_domain::MergedDomainPack>> {
+        self.app.domain_pack.read().unwrap().clone()
+    }
+
     /// Get all available predefined workflows from the domain pack.
     pub fn get_available_workflows(&self) -> Vec<WorkflowConfig> {
-        self.app
-            .domain_pack
-            .as_ref()
+        self.current_domain()
             .map(|dp| dp.workflows.clone())
             .unwrap_or_default()
     }
 
     /// Get a predefined workflow configuration by name.
     pub fn get_workflow_config(&self, name: &str) -> Option<WorkflowConfig> {
-        self.app
-            .domain_pack
-            .as_ref()
-            .and_then(|dp| dp.get_workflow_config(name))
-            .cloned()
+        self.current_domain()
+            .and_then(|dp| dp.get_workflow_config(name).cloned())
     }
 
     /// Get a predefined StateGraph by name.
     pub fn get_state_graph(&self, name: &str) -> Option<StateGraph> {
-        self.app
-            .domain_pack
-            .as_ref()
-            .and_then(|dp| dp.get_state_graph(name))
-            .cloned()
+        self.current_domain()
+            .and_then(|dp| dp.get_state_graph(name).cloned())
     }
 
     /// Get all available StateGraph names from the domain pack.
     pub fn get_state_graph_names(&self) -> Vec<String> {
-        self.app
-            .domain_pack
-            .as_ref()
+        self.current_domain()
             .map(|dp| dp.state_graph_names())
             .unwrap_or_default()
     }
@@ -1081,9 +1079,7 @@ impl AppSession {
         // full domain `RecallConfig` (weights, half-life, normalization) is
         // threaded in so three-factor scoring is domain-tunable.
         let recall_cfg = self
-            .app
-            .domain_pack
-            .as_ref()
+            .current_domain()
             .map(|d| d.memory_profile.recall.clone())
             .unwrap_or_default();
         let recalled_facts = self
@@ -1155,9 +1151,7 @@ impl AppSession {
                     .filter(|s| !s.is_empty())
                     .cloned();
                 let wants_git = self
-                    .app
-                    .domain_pack
-                    .as_ref()
+                    .current_domain()
                     .map(|d| {
                         d.memory_profile.working_state.ground_truth_reconciliation
                             == oneai_domain::memory_profile::GroundTruthReconciliation::Git
@@ -1185,7 +1179,7 @@ impl AppSession {
             };
 
         // Build context assembler (core source first, then domain sources).
-        let mut context_assembler = if let Some(domain) = &self.app.domain_pack {
+        let mut context_assembler = if let Some(domain) = self.current_domain() {
             let mut sources =
                 vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
             sources.extend(domain.context_sources.clone());
@@ -1261,7 +1255,7 @@ impl AppSession {
             .contains_key("core_memory_edit");
 
         // Build the AgentLoop from session resources
-        let agent_loop = if let Some(domain) = &self.app.domain_pack {
+        let agent_loop = if let Some(domain) = self.current_domain() {
             let mut config = AgentLoopConfig {
                 system_prompt: {
                     let base = if domain.system_prompt_template.is_empty() {
@@ -1870,7 +1864,7 @@ impl AppSession {
 
         // Build the compressor mirroring run_agent's wiring, but with a zero
         // threshold so /compact always compresses regardless of budget.
-        let compressor = if let Some(domain) = &self.app.domain_pack {
+        let compressor = if let Some(domain) = self.current_domain() {
             oneai_memory::ContextCompressor::with_template(
                 0,
                 keep_recent_turns,

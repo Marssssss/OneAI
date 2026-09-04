@@ -1,6 +1,5 @@
 // SettingsRoot — the settings modal. Three sections (left rail nav):
-// General / Models / Permissions. DomainPacks + Skills were moved OUT to
-// standalone modals (`/domainpack` · `/skills`) per the user's reorg.
+// General / Models / Domain. Skills remains a standalone modal (`/skills`).
 //
 // Models is the deepseek-harness-style provider manager: shows the config
 // file path (web can't reveal Finder — shows the path + a copy button + a
@@ -10,9 +9,9 @@
 // `~/.oneai/config.toml` AND mutate the live `ProviderPool` (a new provider is
 // immediately switchable from the composer's ModelSelect — no restart).
 //
-// Permissions is read-only (the active DomainPack's permission profile). When
-// `config/get` failed (e.g. a stale app-server binary returning method-not-found),
-// it shows the real error rather than a generic "offline".
+// Domain is the live DomainPack switcher: a dropdown over `domainpack/list`,
+// switching via `domainpack/switch` (hot-swap, no restart), plus the active
+// permission profile for context.
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -23,7 +22,7 @@ import type { SettingsStore } from './settingsStore'
 import { providerKindLabel, useSettings } from './settingsStore'
 import styles from './SettingsRoot.module.css'
 
-type Section = 'general' | 'models' | 'permissions' | 'network'
+type Section = 'general' | 'models' | 'domain' | 'network'
 
 /** §B5 — durable host allow/deny CRUD surface for the Settings modal. Backed
  * by the `host/*` JSON-RPC methods (the engine's `~/.oneai/oneai.db` durable
@@ -40,11 +39,9 @@ interface SettingsRootProps {
   store: SettingsStore
   theme: 'light' | 'dark'
   locale: 'zh' | 'en'
-  planMode: boolean
   connection: 'connecting' | 'open' | 'closed' | 'error'
   onToggleTheme: () => void
   onToggleLocale: () => void
-  onTogglePlan: () => void
   hostOps?: HostOps
   onClose: () => void
 }
@@ -53,11 +50,9 @@ export function SettingsRoot({
   store,
   theme,
   locale,
-  planMode,
   connection,
   onToggleTheme,
   onToggleLocale,
-  onTogglePlan,
   hostOps,
   onClose,
 }: SettingsRootProps): ReactNode {
@@ -73,7 +68,7 @@ export function SettingsRoot({
   const sections: { id: Section; label: string }[] = [
     { id: 'general', label: t('settings.general') },
     { id: 'models', label: t('settings.models') },
-    { id: 'permissions', label: t('settings.permissions') },
+    { id: 'domain', label: t('settings.domain') },
     ...(hostOps !== undefined ? [{ id: 'network' as const, label: t('settings.network') }] : []),
   ]
 
@@ -96,15 +91,13 @@ export function SettingsRoot({
             <GeneralSection
               theme={theme}
               locale={locale}
-              planMode={planMode}
               connection={connection}
               onToggleTheme={onToggleTheme}
               onToggleLocale={onToggleLocale}
-              onTogglePlan={onTogglePlan}
             />
           )}
           {section === 'models' && <ModelsSection store={store} snap={snap} />}
-          {section === 'permissions' && <PermissionsSection snap={snap} />}
+          {section === 'domain' && <DomainSection store={store} snap={snap} />}
           {section === 'network' && hostOps !== undefined && (
             <NetworkSection hostOps={hostOps} />
           )}
@@ -126,19 +119,15 @@ function Row({ label, children }: { label: string; children: ReactNode }): React
 function GeneralSection({
   theme,
   locale,
-  planMode,
   connection,
   onToggleTheme,
   onToggleLocale,
-  onTogglePlan,
 }: {
   theme: 'light' | 'dark'
   locale: 'zh' | 'en'
-  planMode: boolean
   connection: 'connecting' | 'open' | 'closed' | 'error'
   onToggleTheme: () => void
   onToggleLocale: () => void
-  onTogglePlan: () => void
 }): ReactNode {
   const { t } = useLocale()
   return (
@@ -152,12 +141,6 @@ function GeneralSection({
         <button className={styles.toggle} onClick={onToggleLocale}>
           {locale === 'zh' ? '中文' : 'English'}
         </button>
-      </Row>
-      <Row label={t('settings.planMode')}>
-        <button className={styles.toggle} onClick={onTogglePlan}>
-          {planMode ? t('settings.on') : t('settings.off')}
-        </button>
-        <span className={styles.hint}>{t('settings.planModeHint')}</span>
       </Row>
       <Row label={t('settings.thinkingEffort')}>
         <span className={styles.hint}>{t('settings.thinkingEffortMoved')}</span>
@@ -524,30 +507,71 @@ function ModelsSection({
   )
 }
 
-function PermissionsSection({ snap }: { snap: ReturnType<typeof useSettings> }): ReactNode {
+function DomainSection({
+  store,
+  snap,
+}: {
+  store: SettingsStore
+  snap: ReturnType<typeof useSettings>
+}): ReactNode {
   const { t } = useLocale()
-  const cfg = snap.config
-  if (cfg === null) {
-    // Show the real error if there is one (a stale binary returns
-    // method-not-found — the user sees what to fix), else the generic offline
-    // banner.
+  const [switching, setSwitching] = useState<string | null>(null)
+  const dp = snap.domainPacks
+
+  const switchTo = async (name: string) => {
+    if (name === dp?.active) return
+    setSwitching(name)
+    try {
+      await store.domainpackSwitch(name)
+    } finally {
+      setSwitching(null)
+    }
+  }
+
+  // A stale app-server (method-not-found on `domainpack/list`) or an offline
+  // probe shows the real error rather than a generic banner.
+  if (dp === null) {
     return (
       <div className={styles.empty}>
         {snap.lastError !== null ? snap.lastError : t('settings.offline')}
       </div>
     )
   }
+
+  const active = dp.active ?? ''
+  const current = dp.available.find((p) => p.name === active)
+
   return (
     <div className={styles.stack}>
-      <Row label={t('settings.permissionProfile')}>
-        <code className={styles.code}>{cfg.permission_profile ?? t('settings.none')}</code>
-      </Row>
       <Row label={t('settings.activeDomain')}>
-        <code className={styles.code}>{cfg.domain_pack ?? t('settings.none')}</code>
+        <select
+          className={styles.select}
+          aria-label={t('settings.activeDomain')}
+          value={active}
+          disabled={switching !== null}
+          onChange={(e) => {
+            if (e.target.value) void switchTo(e.target.value)
+          }}
+        >
+          {dp.available.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        {switching !== null && (
+          <span className={styles.hint}>{t('settings.switching')}</span>
+        )}
       </Row>
-      <Row label={t('settings.planMode')}>
-        <span className={styles.value}>{cfg.plan_mode ? t('settings.on') : t('settings.off')}</span>
+      {current?.description !== undefined && (
+        <div className={styles.packDesc}>{current.description}</div>
+      )}
+      <Row label={t('settings.permissionProfile')}>
+        <code className={styles.code}>
+          {snap.config?.permission_profile ?? t('settings.none')}
+        </code>
       </Row>
+      <div className={styles.hint}>{t('settings.restartHintDomain')}</div>
     </div>
   )
 }

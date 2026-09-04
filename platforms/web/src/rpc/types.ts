@@ -991,6 +991,15 @@ export interface DomainPackList {
   available: DomainPackInfo[]
 }
 
+/** Result of `domainpack/switch` — `ok:false` is a normal result (surfaced as
+ *  an error string), NOT a JSON-RPC error. */
+export interface DomainPackOpResult {
+  ok: boolean
+  active?: string
+  available?: DomainPackInfo[]
+  error?: string
+}
+
 export interface SkillInfo {
   name: string
   description?: string

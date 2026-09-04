@@ -354,6 +354,12 @@ impl OneaiConfig {
         }
     }
 
+    /// Set the default domain pack name (persisted to `domain.default_pack`).
+    /// Mirror of `set_active_provider` — the launch default for `--domain`.
+    pub fn set_domain(&mut self, name: &str) {
+        self.domain.default_pack = name.to_string();
+    }
+
     /// Build `(name, ModelConfig)` pairs for every entry — used by the
     /// app-server to construct a `ProviderPool` at launch. Env-var overrides
     /// (`ONEAI_API_KEY`/`ONEAI_BASE_URL`/`ONEAI_MODEL`) apply ONLY to a

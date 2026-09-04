@@ -99,6 +99,21 @@ pub struct DomainPackInfo {
     pub description: Option<String>,
 }
 
+/// Result of a `domainpack/switch` op. `ok:false` is a normal result (the UI
+/// surfaces the error — e.g. an unknown pack name), NOT a JSON-RPC error.
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainPackOpResult {
+    pub ok: bool,
+    /// The post-op active pack name, or null when no pack is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// The post-op available pack list (so the UI updates without a re-list).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<Vec<DomainPackInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One skill's descriptor + lifecycle metadata, merged.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SkillInfo {
@@ -290,6 +305,10 @@ pub trait AppProbe: Send + Sync {
     async fn providers(&self) -> Vec<ProviderInfo>;
     /// Available + active DomainPacks (read-only).
     async fn domainpacks(&self) -> DomainPackList;
+    /// Hot-swap the active DomainPack by name (takes effect next turn) and
+    /// persist it to `config.toml` `domain.default_pack`. Returns the post-op
+    /// active + available list. `ok:false` on an unknown pack name.
+    async fn switch_domainpack(&self, name: &str) -> DomainPackOpResult;
     /// All skills with lifecycle metadata (read-only).
     async fn skills(&self) -> Vec<SkillInfo>;
     /// Pin a skill (exempt from auto-retirement). Returns the post-op state.
@@ -375,6 +394,14 @@ impl AppProbe for NullAppProbe {
     }
     async fn domainpacks(&self) -> DomainPackList {
         DomainPackList::default()
+    }
+    async fn switch_domainpack(&self, _name: &str) -> DomainPackOpResult {
+        DomainPackOpResult {
+            ok: false,
+            active: None,
+            available: None,
+            error: Some("domainpack switch not supported by this probe".to_string()),
+        }
     }
     async fn skills(&self) -> Vec<SkillInfo> {
         Vec::new()

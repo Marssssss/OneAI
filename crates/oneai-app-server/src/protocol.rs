@@ -124,10 +124,10 @@ pub mod method {
     pub const SCENARIO_DELETE: &str = "scenario/delete";
     pub const SCENARIO_VALIDATE: &str = "scenario/validate";
 
-    // App probe — read-only config + skill lifecycle. Handled directly against
-    // the shared AppProbe, no bus/Directive. `domainpack/switch` and
-    // `provider/add` are deliberately absent (architecture has no hot-swap
-    // path — see probe.rs); a pack/provider change restarts the app-server.
+    // App probe — config + provider/domain lifecycle + skill lifecycle. Handled
+    // directly against the shared AppProbe, no bus/Directive. `provider/*` and
+    // `domainpack/switch` are live hot-swaps (see probe.rs); `domainpack/switch`
+    // swaps the active DomainPack at runtime + persists `domain.default_pack`.
     pub const CONFIG_GET: &str = "config/get";
     pub const PROVIDER_LIST: &str = "provider/list";
     pub const PROVIDER_ADD: &str = "provider/add";
@@ -143,6 +143,7 @@ pub mod method {
     /// (no API key required) — issue #41.
     pub const PROVIDER_DETECT: &str = "provider/detect";
     pub const DOMAINPACK_LIST: &str = "domainpack/list";
+    pub const DOMAINPACK_SWITCH: &str = "domainpack/switch";
     pub const THINKING_GET: &str = "thinking/get";
     pub const THINKING_SET: &str = "thinking/set";
     pub const SKILL_LIST: &str = "skill/list";
