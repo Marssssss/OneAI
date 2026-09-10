@@ -1,6 +1,6 @@
-# MVS1 容器化验证 Runbook（✅ 已验证通过 2026-09-09）
+# MVS1 容器化验证 Runbook（✅ 已验证通过 2026-09-09）+ MVS2 编排层（✅ 2026-09-10）
 
-对应 `docs/cloud-orchestrator-design.md` §6 MVS1；验证记录全文见该文档附录 A。
+对应 `docs/cloud-orchestrator-design.md` §6 MVS1/MVS2；验证记录全文见该文档附录 A（MVS1）与附录 B（MVS2）。
 
 **结论速览**：现有二进制零改动进容器 → ws 全链路（turn/工具/审批/流式）→
 `docker kill` 后新容器挂同卷完整恢复（session/list + load + 历史感知回答）。
@@ -119,3 +119,70 @@ docker volume rm oneai-sess1-state oneai-sess1-ws
 - [x] docker kill 后新容器挂同卷：session/list 可见 + session/load 回放 + 模型从恢复历史答出上一轮内容（零工具调用）
 - [x] 工作区文件跨容器保留（/workspace 卷）；会话事件日志在 /workspace/.oneai/events/
 - [x] R4 结论落档 + 引擎修复三件套绿（fmt/clippy/258 tests）
+
+---
+
+# MVS2 薄编排层（oneai-orchestrator，✅ 已验证通过 2026-09-10）
+
+MVS1 的手工 `docker run` 由 `oneai-orchestrator` crate 接管：一会话一容器的
+生命周期 FSM（D6）、路由表（内存 + `sessions.json` 原子持久化 + 启动对账）、
+WS 反向代理（D3 纯透传）、Bearer 认证（`oneai-http-auth`，D7）。
+**引擎与镜像零改动**——容器跑的还是 MVS1 的 `oneai-engine:mvs1`。
+
+## 7. 启动编排器
+
+```bash
+export ONEAI_ORCHESTRATOR_SECRET=<前端接入密钥>
+target/debug/oneai orchestrator serve \
+  --listen 127.0.0.1:9191 \
+  --provider-config ~/.oneai/config.toml   # 容器内引擎的 provider 配置（ro bind-mount）
+# 可选：~/.oneai/orchestrator.toml（字段见 crates/oneai-orchestrator/src/config.rs 顶部示例）
+# --image 默认 oneai-engine:mvs1；--idle-timeout 默认 1800s（0 禁用休眠）
+```
+
+## 8. 控制面 API（Bearer 认证）
+
+```bash
+H="Authorization: Bearer $ONEAI_ORCHESTRATOR_SECRET"
+curl -s -H "$H" -H 'Content-Type: application/json' \
+  -d '{"session_id":"demo1"}' http://127.0.0.1:9191/v1/sessions   # 创建（阻塞至容器就绪）
+curl -s -H "$H" http://127.0.0.1:9191/v1/sessions                 # 列表
+curl -s -H "$H" http://127.0.0.1:9191/v1/sessions/demo1           # 单会话状态
+curl -s -X DELETE -H "$H" http://127.0.0.1:9191/v1/sessions/demo1 # 销毁（容器+卷）
+curl -s http://127.0.0.1:9191/healthz                             # 无需认证
+```
+
+前端接入：`ws://127.0.0.1:9191/v1/sessions/<id>/ws?token=<secret>`（浏览器
+无法为 ws 握手设 header，故支持 `?token=`）。之后就是与 MVS1 完全相同的
+JSON-RPC 协议（session/create、turn/run、approval/respond……原样透传）。
+CLI 同款：`oneai orchestrator create/list/status/destroy`。
+
+会话状态机：`Creating→Running⇄Hibernating/Resuming`，容器死→`Crashed`
+（下次前端请求自动重拉新容器挂同卷）；idle 超时自动 `docker stop` 休眠
+（卷保留），请求到达自动唤醒。编排器重启后按容器实况对账路由表
+（活的重挂 Running，死的标 Crashed 等懒恢复）。
+
+## 9. MVS2 全量验收（一键）
+
+```bash
+./deploy/docker/mvs2_run.sh --sessions 10
+# 等价于：node deploy/docker/mvs2_verify.mjs --bin target/debug/oneai --sessions 10
+# 残留清理：target/debug/oneai orchestrator cleanup
+```
+
+脚本自包含（自起/自重重启/自关停编排器进程），验收矩阵见附录 B：
+10 并发会话容器、每会话经反代跑真实 turn、`docker kill` 后重连自动
+Resuming + 卷内文件与会话历史完整、编排器进程重启后 10/10 重挂、
+DELETE 后容器与卷零残留。**验证纪律同 MVS1**：以事件流与
+`docker exec` 卷内文件为准，不信模型口述。
+
+## 10. MVS2 安全边界（D7 的 MVS2 取舍）
+
+- 前端→编排器：`ONEAI_ORCHESTRATOR_SECRET` Bearer（未设则拒绝启动）。
+- 编排器→容器：容器端口只发布在 `127.0.0.1`（`-p 127.0.0.1:0:8787`，动态
+  端口），同网段其他容器不可达；colima 实测动态端口可被宿主机转发访问。
+- **每会话内部密钥推迟**：引擎 `/ws` 无认证钩子，加钩子违反「引擎零改动」
+  约束——待引擎提供可选 ws 认证后补（MVS3+）。生产部署 TLS 由前置反代
+  （Caddy/ALB）终止；容器永不直接暴露公网。
+- `sessions.json` 可能含注入容器的 env 值，已 chmod 600；生产走 Secret
+  Manager（D5/MVS4）。

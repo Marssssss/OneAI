@@ -157,6 +157,8 @@ flowchart TB
 | `oneai-mcp` | MCP ecosystem — host + plugin registry + config |
 | `oneai-gateway` | Message gateway — axum webhook + Feishu/WeChat/Loopback adapters |
 | `oneai-supervisor` | headless supervisor daemon — persistent instances + crash recovery + IPC |
+| `oneai-http-auth` | HTTP Bearer shared-secret primitives — constant-time compare + env loading + axum header verification (shared by a2a/scheduler/orchestrator) |
+| `oneai-orchestrator` | Cloud session orchestrator (MVS2) — one container per session: ContainerRunner/Docker + lifecycle FSM + reconciled routing table + WS reverse proxy |
 | `oneai-app` | Application integration layer (AppBuilder + default retrieval-stack wiring) |
 | `oneai-trace` | OpenInference-compatible trace logger + OTEL export |
 | `oneai-uniffi` | UniFFI binding defs + hand-written `extern "C"` facade |

@@ -32,6 +32,8 @@ members = [
     "crates/oneai-vector",
     "crates/oneai-gateway",
     "crates/oneai-evolve",
+    "crates/oneai-http-auth",
+    "crates/oneai-orchestrator",
     "xtask",
     "examples/cli",
 ]
@@ -73,6 +75,8 @@ default-members = [
     "crates/oneai-vector",
     "crates/oneai-gateway",
     "crates/oneai-evolve",
+    "crates/oneai-http-auth",
+    "crates/oneai-orchestrator",
     "examples/cli",
 ]
 
@@ -245,6 +249,8 @@ oneai-mcp = { path = "crates/oneai-mcp", version = "0.2.0" }
 oneai-vector = { path = "crates/oneai-vector", version = "0.2.0" }
 oneai-gateway = { path = "crates/oneai-gateway", version = "0.2.0" }
 oneai-evolve = { path = "crates/oneai-evolve", version = "0.2.0" }
+oneai-http-auth = { path = "crates/oneai-http-auth", version = "0.2.0" }
+oneai-orchestrator = { path = "crates/oneai-orchestrator", version = "0.2.0" }
 
 # WASM
 wasmtime = "45"

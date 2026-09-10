@@ -36,19 +36,17 @@ ignore = [
     # paste unmaintained. Transitive via `tokenizers` (BGE-M3 tokenization in
     # oneai-vector). `paste` is a build-time proc-macro helper, no runtime.
     { id = "RUSTSEC-2024-0436", reason = "tokenizers build-time proc-macro helper, no runtime; upstream pin" },
-    # crossbeam fmt::Pointer invalid-pointer deref. Transitive via tokenizers.
-    # Requires an already-invalid pointer to trigger; not reachable from
-    # untrusted input on the tokenizers embedding path.
-    { id = "RUSTSEC-2026-0204", reason = "tokenizers transitive; requires invalid pointer, not untrusted-input reachable" },
+    # wasmtime-wasi filesystem sandbox escape via trailing slashes/symlinks.
+    # Same exposure class as the former RUSTSEC-2026-0188 ignore: affects only
+    # the restricted-filesystem WASI path (`WasiConfig::restricted`), which is
+    # opt-in (default `disabled()`) — not reachable on the default config.
+    # Fix requires wasmtime 45→46/47 (two major versions); schedule the bump
+    # as its own change with oneai-wasm regression coverage.
+    { id = "RUSTSEC-2026-0269", reason = "restricted-WASI path opt-in (default disabled); wasmtime 45→47 major bump tracked separately" },
     # rmcp Streamable HTTP *server* DNS rebinding. OneAI's McpServerHost exposes
     # the stdio transport only (`run_stdio`); the vulnerable HTTP server bind
     # path is not wired. Re-evaluate when an HTTP MCP server is added (Phase 3.5).
     { id = "RUSTSEC-2026-0189", reason = "McpServerHost is stdio-only; vulnerable Streamable HTTP server transport not bound" },
-    # wasmtime-wasi FilePerms bypass via hard links/renames. Affects only the
-    # restricted-filesystem WASI path (`WasiConfig::restricted`), which is opt-in
-    # (default `disabled()`). Track upstream wasmtime fix; upgrade before
-    # shipping production WASI filesystem access.
-    { id = "RUSTSEC-2026-0188", reason = "restricted-WASI path opt-in (default disabled); track upstream wasmtime fix" },
     # wasmtime "Stores can mix up type indices between engines" (RUSTSEC-2026-0222 /
     # GHSA-hgjw-h833-99q9 / CVE-2026-58494). Surfaced 2026-08-02 (advisory-DB
     # gained it 2026-07-31). OneAI's WasmRuntime holds a single `Engine`

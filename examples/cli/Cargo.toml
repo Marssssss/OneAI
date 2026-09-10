@@ -55,6 +55,11 @@ oneai-wasm = { workspace = true }
 oneai-gateway = { workspace = true, features = ["feishu", "wechat"] }
 oneai-scheduler = { workspace = true }
 oneai-evolve = { workspace = true }
+oneai-orchestrator = { workspace = true }
+tokio-util = { workspace = true }
+# Orchestrator client subcommands (list/status/create/destroy) talk to the
+# control plane over HTTP; loopback-only → no_proxy.
+reqwest = { workspace = true }
 syntect = "5.2"
 pulldown-cmark = "0.11"
 unicode-width = "0.2"

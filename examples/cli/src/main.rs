@@ -80,6 +80,7 @@ mod cmd_gateway;
 mod cmd_init;
 mod cmd_mcp;
 mod cmd_memory;
+mod cmd_orchestrator;
 mod cmd_pack;
 mod cmd_provider;
 mod cmd_reload;
@@ -183,6 +184,12 @@ enum Commands {
     Supervisor {
         #[command(subcommand)]
         action: SupervisorAction,
+    },
+    /// Cloud session orchestrator — one container per session: lifecycle FSM,
+    /// routing table, WS reverse proxy (MVS2, docs/cloud-orchestrator-design.md)
+    Orchestrator {
+        #[command(subcommand)]
+        action: OrchestratorAction,
     },
     /// Serve the unified engine bus over IPC (sidecar — Directive writer +
     /// Yield reader socket frontend for macOS/Windows native apps). #24/#25 P3.
@@ -1000,6 +1007,60 @@ enum TerminalAction {
 }
 
 #[derive(Subcommand)]
+enum OrchestratorAction {
+    /// Start the orchestrator control plane (daemon; docker required)
+    Serve {
+        /// Listen address (default: 127.0.0.1:9191 or ~/.oneai/orchestrator.toml)
+        #[arg(long)]
+        listen: Option<String>,
+        /// Session container image (default: oneai-engine:mvs1)
+        #[arg(long)]
+        image: Option<String>,
+        /// Registry dir for sessions.json (default: ~/.oneai/orchestrator)
+        #[arg(long)]
+        registry: Option<String>,
+        /// Idle seconds before auto-hibernate (0 disables; default: 1800)
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+        /// Host config.toml bind-mounted read-only into every session
+        /// container (provider keys — the MVS1 D5 shortcut)
+        #[arg(long)]
+        provider_config: Option<String>,
+    },
+    /// Create a session on a running orchestrator (spawns its container)
+    Create {
+        /// Session id ([a-zA-Z0-9_-]+; random uuid when omitted)
+        #[arg(long)]
+        id: Option<String>,
+        /// Control-plane URL (default: http://127.0.0.1:9191)
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// List sessions on a running orchestrator
+    List {
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Show one session's full status JSON
+    Status {
+        /// Session id
+        id: String,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Destroy a session (removes container + volumes)
+    Destroy {
+        /// Session id
+        id: String,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Remove leftover oneai-orch-* containers/volumes via docker directly
+    /// (acceptance teardown / crash cleanup — no orchestrator needed)
+    Cleanup,
+}
+
+#[derive(Subcommand)]
 enum SupervisorAction {
     /// Start the headless supervisor daemon (serves the IPC socket)
     Serve {
@@ -1646,6 +1707,34 @@ fn main() {
                 message,
                 socket,
             } => cmd_supervisor::cmd_supervisor_rpc_stream(socket.as_deref(), &id, &message),
+        },
+        Some(Commands::Orchestrator { action }) => match action {
+            OrchestratorAction::Serve {
+                listen,
+                image,
+                registry,
+                idle_timeout,
+                provider_config,
+            } => cmd_orchestrator::cmd_orchestrator_serve(
+                listen.as_deref(),
+                image.as_deref(),
+                registry.as_deref(),
+                idle_timeout,
+                provider_config.as_deref(),
+            ),
+            OrchestratorAction::Create { id, url } => {
+                cmd_orchestrator::cmd_orchestrator_create(url.as_deref(), id.as_deref())
+            }
+            OrchestratorAction::List { url } => {
+                cmd_orchestrator::cmd_orchestrator_list(url.as_deref())
+            }
+            OrchestratorAction::Status { id, url } => {
+                cmd_orchestrator::cmd_orchestrator_status(url.as_deref(), &id)
+            }
+            OrchestratorAction::Destroy { id, url } => {
+                cmd_orchestrator::cmd_orchestrator_destroy(url.as_deref(), &id)
+            }
+            OrchestratorAction::Cleanup => cmd_orchestrator::cmd_orchestrator_cleanup(),
         },
         Some(Commands::Serve {
             socket,

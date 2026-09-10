@@ -47,37 +47,15 @@ pub const CRON_SECRET_ENV: &str = "ONEAI_CRON_SECRET";
 /// Read the bearer secret from env. `None` if unset → the receiver 503s
 /// (external triggering is disabled until the operator sets a secret).
 pub fn secret_from_env() -> Option<String> {
-    std::env::var(CRON_SECRET_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-/// Constant-time comparison so a bearer mismatch doesn't short-circuit and
-/// leak length/timing. `true` iff equal.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+    oneai_http_auth::secret_from_env(CRON_SECRET_ENV)
 }
 
 /// Verify the `Authorization: Bearer <secret>` header against `expected`.
+/// Thin delegation to the shared constant-time implementation in
+/// `oneai-http-auth` (the duplicated body formerly mirrored
+/// `oneai_a2a::server`).
 fn verify_bearer(headers: &HeaderMap, expected: &str) -> bool {
-    let Ok(Some(value)) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .map(|v| v.to_str())
-        .transpose()
-    else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    ct_eq(token.as_bytes(), expected.as_bytes())
+    oneai_http_auth::verify_bearer(headers, expected)
 }
 
 /// Inbound fire request body.
@@ -397,6 +375,7 @@ mod tests {
 
     #[test]
     fn ct_eq_basic() {
+        use oneai_http_auth::ct_eq;
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));

@@ -3794,6 +3794,7 @@ dependencies = [
  "futures",
  "oneai-core",
  "oneai-domain",
+ "oneai-http-auth",
  "oneai-tool",
  "oneai-trace",
  "reqwest",
@@ -3932,6 +3933,7 @@ dependencies = [
  "oneai-gateway",
  "oneai-mcp",
  "oneai-memory",
+ "oneai-orchestrator",
  "oneai-parser",
  "oneai-persistence",
  "oneai-provider",
@@ -3948,11 +3950,13 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "syntect",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -4077,6 +4081,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneai-http-auth"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "tracing",
+]
+
+[[package]]
 name = "oneai-mcp"
 version = "0.2.0"
 dependencies = [
@@ -4120,6 +4132,30 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "oneai-orchestrator"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "dirs 5.0.1",
+ "futures",
+ "oneai-http-auth",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "toml 0.8.23",
+ "tower",
  "tracing",
  "uuid",
 ]
@@ -4275,6 +4311,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "oneai-core",
+ "oneai-http-auth",
  "reqwest",
  "serde",
  "serde_json",

@@ -27,11 +27,13 @@ tower-http = { workspace = true, features = ["cors"], optional = true }
 # Outbound one-shot provisioning (POST registration to an external cron
 # service). Reuses the env-var proxy discipline.
 reqwest = { workspace = true, optional = true }
+# Shared bearer-secret primitives (constant-time compare + header verify).
+oneai-http-auth = { workspace = true, optional = true }
 
 [features]
 default = ["oneshot-http"]
 # axum `POST /cron/fire` receiving surface (shared-secret bearer).
-oneshot-http = ["dep:axum", "dep:tower", "dep:tower-http"]
+oneshot-http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:oneai-http-auth"]
 # Outbound `provision(job_id, fire_at, callback_url)` registration to an
 # external cron service (cron-job.org / GitHub Actions / systemd timer).
 oneshot-provision = ["dep:reqwest"]

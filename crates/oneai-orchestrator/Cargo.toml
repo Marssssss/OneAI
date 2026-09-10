@@ -1,0 +1,32 @@
+[package]
+name = "oneai-orchestrator"
+description = "OneAI Orchestrator — cloud session control plane: one container per session, lifecycle FSM, routing table, WS reverse proxy (MVS2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+oneai-http-auth = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }

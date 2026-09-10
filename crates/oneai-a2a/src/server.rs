@@ -135,7 +135,7 @@ impl A2AServerHost {
     }
 }
 
-// ─── Shared-secret Bearer auth (mirrors oneai_scheduler::oneshot) ──────────────
+// ─── Shared-secret Bearer auth (converged onto oneai-http-auth) ────────────────
 
 /// The bearer secret env var name.
 pub const A2A_SECRET_ENV: &str = "ONEAI_A2A_SECRET";
@@ -143,36 +143,15 @@ pub const A2A_SECRET_ENV: &str = "ONEAI_A2A_SECRET";
 /// Read the bearer secret from env. `None` if unset/empty → `serve` refuses
 /// to start (external triggering disabled until the operator sets a secret).
 pub fn secret_from_env() -> Option<String> {
-    std::env::var(A2A_SECRET_ENV).ok().filter(|s| !s.is_empty())
-}
-
-/// Constant-time comparison so a bearer mismatch doesn't short-circuit and
-/// leak length/timing. `true` iff equal. Mirrors `oneshot.rs::ct_eq`.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+    oneai_http_auth::secret_from_env(A2A_SECRET_ENV)
 }
 
 /// Verify the `Authorization: Bearer <secret>` header against `expected`.
-/// Mirrors `oneshot.rs::verify_bearer`.
+/// Thin delegation to the shared constant-time implementation in
+/// `oneai-http-auth` (the duplicated body formerly mirrored
+/// `oneai_scheduler::oneshot`).
 fn verify_bearer(headers: &HeaderMap, expected: &str) -> bool {
-    let Ok(Some(value)) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .map(|v| v.to_str())
-        .transpose()
-    else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    ct_eq(token.as_bytes(), expected.as_bytes())
+    oneai_http_auth::verify_bearer(headers, expected)
 }
 
 // ─── axum HTTP server ───────────────────────────────────────────────────────────
@@ -807,6 +786,7 @@ mod tests {
 
     #[test]
     fn test_ct_eq_constant_time() {
+        use oneai_http_auth::ct_eq;
         assert!(ct_eq(b"abc123", b"abc123"));
         assert!(!ct_eq(b"abc123", b"abc124"));
         assert!(!ct_eq(b"abc", b"abc123")); // length mismatch

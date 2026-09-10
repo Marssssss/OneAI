@@ -1,0 +1,11 @@
+[package]
+name = "oneai-http-auth"
+description = "OneAI HTTP auth — shared Bearer-secret primitives (constant-time compare, env loading, axum header verification)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+tracing = { workspace = true }

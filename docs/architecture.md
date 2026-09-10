@@ -157,6 +157,8 @@ flowchart TB
 | `oneai-mcp` | MCP 服务生态 — 宿主 + 插件注册 + 配置 |
 | `oneai-gateway` | 消息网关 — axum webhook + 飞书/企业微信/Loopback adapter |
 | `oneai-supervisor` | headless 监督 daemon — 持久实例 + 崩溃恢复 + IPC |
+| `oneai-http-auth` | HTTP Bearer 共享密钥原语 — 常数时间比较 + env 读取 + axum 头校验（a2a/scheduler/orchestrator 三方共用） |
+| `oneai-orchestrator` | 云端会话编排器（MVS2）— 一会话一容器：ContainerRunner/Docker + 生命周期 FSM + 路由表对账 + WS 反向代理 |
 | `oneai-app` | 应用集成层（AppBuilder + 默认检索栈接线） |
 | `oneai-trace` | OpenInference 兼容轨迹日志器 + OTEL 导出 |
 | `oneai-uniffi` | UniFFI 绑定定义 + 手写 `extern "C"` facade |

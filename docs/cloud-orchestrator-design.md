@@ -219,7 +219,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 产出：Dockerfile + 验证记录。**这一步不写编排器**，若发现引擎在容器内
 有阻断性问题（沙箱嵌套、路径假设），先修引擎侧。
 
-### MVS2 —— 薄编排层（新 crate `oneai-orchestrator`）
+### MVS2 —— 薄编排层（新 crate `oneai-orchestrator`）（✅ 已完成 2026-09-10，记录见附录 B）
 
 - `ContainerRunner` trait：`spawn(SessionSpec) -> ContainerHandle`、`stop`、
   `start`、`commit`、`destroy`、`health`；实现 `DockerRunner`（参考
@@ -292,7 +292,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 |---|---|---|
 | R1 | 每会话一容器的内存底座成本 | Rust 引擎空载占用小；idle 休眠（D6）+ commit 快照；实测数据 MVS1 补 |
 | R2 | WS 反代多一跳的延迟 | 同宿主机/同 AZ 内 <1ms 量级；交互式场景本来就走端侧，云端形态承接的是长时任务，延迟不敏感 |
-| R3 | 编排器单点 | MVS2 单副本 + JSONL 对账恢复（重启秒级重挂）；MVS4 多副本 + lease |
+| R3 | 编排器单点 | MVS2 单副本 + `sessions.json` 原子持久化对账恢复（重启秒级重挂，✅ 附录 B.2-D 实测 1.3s/10 会话）；MVS4 多副本 + lease |
 | R4 | 容器内嵌套沙箱（bwrap-in-docker）兼容性 | **✅ MVS1 已判：不可用**（Ubuntu 24.04 宿主系统级 AppArmor 限制非特权 userns，`--privileged`/unconfined 均无法恢复；VM 层 root 可用、非 root 不可用）。引擎已补 `is_available` 运行期探测自动降级 RegexBackend（附录 A.3）；容器本身是隔离边界（§8），生产纵深防御走 gVisor/kata runtimeClass（MVS4） |
 | Q1 | 端云冷迁移（导出/导入会话）要不要做 | 状态格式天然兼容（同 schema 卷），做「拷卷」即可；产品化另议 |
 | Q2 | 企业合规（SOC2/HIPAA）对云化的真实驱动强度 | 调研中该论断未过核验（证据不足），面向企业客户前需单独调研 |
@@ -382,3 +382,52 @@ docker 29.5.2；镜像 linux/arm64（494MB）；provider = 宿主机 config.toml
   （同 seccomp/apparmor/caps），探测结果可信。
 - **验证纪律**：模型会口述未发生的工具调用（实测把 read_file 结果说成
   「shell cat 成功」）——验收必须以引擎日志/事件流为准。
+
+## 附录 B：MVS2 验收记录（2026-09-10）
+
+环境：与附录 A 同机（macOS/arm64 + colima + docker 29.5.2）；镜像沿用
+`oneai-engine:mvs1`（**引擎与镜像零改动**）；provider = 宿主机
+config.toml 只读 bind-mount（`--provider-config`，真实 LLM 调用）。
+验收驱动：`deploy/docker/mvs2_verify.mjs`（自包含：自起/重启/关停编排器
+进程；一键 `./deploy/docker/mvs2_run.sh --sessions 10`）。
+
+### B.1 交付物
+
+| 件 | 位置 |
+|---|---|
+| `oneai-http-auth` crate | Bearer 三件套唯一实现（ct_eq/secret_from_env/verify_bearer + `BearerSecret` guard）；a2a/scheduler 已收敛为薄委托（公共 API 不变） |
+| `oneai-orchestrator` crate | `runner.rs`(ContainerRunner trait) · `docker.rs`(纯 argv + DockerRunner) · `fsm.rs`(D6 状态机) · `registry.rs`(路由表 CAS + sessions.json 原子持久化 + 启动对账) · `proxy.rs`(WS 双跳透传) · `idle.rs`(休眠 sweep) · `routes.rs`(5 端点) · `server.rs`(编排入口) |
+| CLI | `oneai orchestrator serve/create/list/status/destroy/cleanup` |
+| 验收件 | `mvs2_verify.mjs` + `mvs2_run.sh` + `tests/e2e_docker.rs`(`#[ignore]` 真 docker 冒烟) |
+| 测试 | 新增 60（orchestrator 54：36 单测 + 18 集成，含 FakeRunner 全 FSM 场景与真 WS 双跳回声链路；http-auth 6）；全 workspace 三件套绿 |
+
+### B.2 验收矩阵（16/16 全过，10 会话）
+
+| 项 | 结果 |
+|---|---|
+| A. 10 并发 `POST /v1/sessions` | ✅ 859ms 全部 201→Running（colima 动态端口发布 `-p 127.0.0.1:0:8787` 实测可被宿主机转发访问——R-D 解除）；未认证请求 401 |
+| B. 每会话经 WS 反代真实 turn | ✅ 9 轻量 turn + 1 写文件 turn（审批自动 Proceed），并发 3 共 8.4s；事件流见 `tool_calls`/`tool_result`（注意：kind 是复数 `tool_calls`，mvs1 脚本的单数计数是错的）；`docker exec cat` 卷内 proof 文件地面真值核对 |
+| C. `docker kill` 受害容器 → 前端重连 | ✅ 重连即自动检死→Resuming→新容器挂同卷：5.1s 重连成功；`docker exec` 证卷内文件跨容器存活；session/list 见杀前会话；恢复后引擎从历史正确答出 proof 内容（零工具） |
+| D. 编排器进程重启 | ✅ 1.3s healthz；路由表对账 10/10 重挂 Running（容器活着的保持 Running，**不是**全部标 Crashed——比 supervisor 的盲标更聪明）；WS 反代立即复用 |
+| E. `DELETE` ×10 | ✅ 容器与卷零残留（`docker ps -aq`/`volume ls` 双零） |
+
+### B.3 实现期发现与决策落地
+
+1. **并发持久化竞争（真 bug，验收首轮抓出）**：整文件 `write(tmp)→rename`
+   在并发迁移下共享同一 tmp 名 → rename 互抢 ENOENT。修复：persist 串行锁
+   + uuid 唯一 tmp 后缀；回归测试 10 并发 insert+persist。
+2. **检死时机**：MVS2 无后台健康轮询——崩溃检测放在 **WS 连接建立时**
+   （TCP 探活失败 → CAS Running→Crashed → 当场触发 resume），恰好匹配 D6
+   「下一次前端请求触发 Resuming」，零轮询成本。
+3. **D7 取舍（已确认）**：引擎 `/ws` 无认证钩子 + 引擎零改动约束 →
+   每会话内部密钥推迟；MVS2 缓解 = 容器端口只发布到 `127.0.0.1`。
+   前端→编排器 Bearer 全端点强制（ws 额外支持 `?token=`，浏览器握手
+   设不了 header）。
+4. **休眠 sweep**：idle 判定 = `active_conns==0 && 帧级 last_activity 超时`
+   （代理泵内 bump，引擎流量即心跳）；CAS 是权威判定，列表只是候选。
+   `idle_timeout_secs=0` 真禁用（CLI 语义一致）。
+5. **`BearerSecret::guard` 返回 `Option<Response>`** 而非 `Result`——
+   clippy `result_large_err`（axum Response ≥128B）。
+6. 编排器控制面延迟可忽略：创建（含 docker create+start+引擎端口就绪）
+   单会话 ~300ms（colima 热路径）；反代双跳 turn 与 MVS1 直连无可感知差异
+   （R2 符合预期）。
