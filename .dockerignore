@@ -1,0 +1,18 @@
+# Build context hygiene for deploy/docker/Dockerfile.
+# The image builds from source inside the container — the host's target/
+# (multi-GB), VCS metadata, and frontend node_modules must not enter the
+# context. platforms/web/dist IS needed (COPY'd into the runtime stage).
+target
+.git
+.github
+**/node_modules
+platforms/macos/build
+platforms/windows/**/bin
+platforms/windows/**/obj
+platforms/android/**/build
+platforms/harmony/**/build
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store

@@ -629,8 +629,46 @@ impl SandboxBackend for BubblewrapBackend {
         if !cfg!(target_os = "linux") {
             return false;
         }
-        std::path::Path::new("/usr/bin/bwrap").exists()
-            || std::path::Path::new("/usr/local/bin/bwrap").exists()
+        let bwrap = if Path::new("/usr/bin/bwrap").exists() {
+            "/usr/bin/bwrap"
+        } else if Path::new("/usr/local/bin/bwrap").exists() {
+            "/usr/local/bin/bwrap"
+        } else {
+            return false;
+        };
+        // Binary presence is necessary but NOT sufficient: bwrap needs working
+        // unprivileged namespaces at RUNTIME, and common environments ship the
+        // binary while blocking the syscalls — Ubuntu 23.10+/24.04 AppArmor
+        // `apparmor_restrict_unprivileged_userns=1` (denies non-root uid_map
+        // writes system-wide), docker default seccomp/apparmor profiles, and
+        // restricted kernels. A binary-only check made every wrapped command
+        // fail at execution ("loopback: Failed RTM_NEWADDR" / "setting up uid
+        // map: Permission denied") instead of letting
+        // `default_sandbox_backend` fall through to Docker/Regex (MVS1
+        // container validation, cloud-orchestrator-design R4). Probe once
+        // with the same flag shape `wrap_command` emits; cache the verdict
+        // (sync trait method, called per build/selection).
+        static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PROBE.get_or_init(|| {
+            std::process::Command::new(bwrap)
+                .args([
+                    "--unshare-all",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--dev",
+                    "/dev",
+                    "--proc",
+                    "/proc",
+                    "/bin/true",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
     }
 }
 
