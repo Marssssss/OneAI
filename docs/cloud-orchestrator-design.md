@@ -235,14 +235,23 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 验收：单宿主机 docker，10 个并发会话容器稳定跑；编排器重启后会话全部
 重挂；杀容器后前端重连自动 Resuming。
 
-### MVS3 —— 存储外部化 + 规模化恢复
+### MVS3 —— 存储外部化 + 规模化恢复（🔶 进行中：PgWorkingStateStore ✅ 2026-09-12）
 
-- `PgWorkingStateStore`（**优先**：事件日志是崩溃恢复的命脉，且
-  read-modify-write 的 `tasks.index.json` 在多写者下需要事务化）、
-  `PgMemoryStore`（`MemoryPersistence` 最重，建议拆 conversation/stm/ltm/facts
+- ✅ `PgWorkingStateStore`（**优先项已交付**：事件日志是崩溃恢复的命脉，且
+  read-modify-write 的 `tasks.index.json` 在多写者下需要事务化）——
+  `oneai-persistence/src/pg_working_state_store.rs`，feature `postgres` 默认关
+  （云镜像 `--features oneai-cli/postgres` 编入）；运行期 `ONEAI_PG_DSN` 选择，
+  接线集中 `examples/cli/src/working_state.rs`（web/app-server/serve/TUI/
+  `tasks *`/`export-hf` 全入口）+ `AppBuilder::working_state_store(Arc<dyn …>)`
+  泛型注入点。事件 JSONB 无损 + brief 同事务 UPSERT + per-task `FOR UPDATE`
+  串行化（多写者安全）；测试 `ONEAI_TEST_PG_DSN` env 门控（镜像文件后端 8 测
+  + 并发 2 测）。**部署**：`~/.oneai/orchestrator.toml` 配
+  `passthrough_env = ["ONEAI_PG_DSN"]`（编排器零代码改动；容器内访问宿主 Pg
+  用 `host.docker.internal`）。机制细节见 `docs/working-state-mechanism.md` §14。
+- ⏳ `PgMemoryStore`（`MemoryPersistence` 最重，建议拆 conversation/stm/ltm/facts
   四个子 store 分别选型；LTM 向量检索换 pgvector 替代 in-Rust brute-force
   cosine，`sqlite_store.rs:776-845`）、`PgUsageTracker` / `PgHostAllowlist`
-  （小表顺手）。统一引入连接池（deadpool-postgres；现状 rusqlite 全线无池化）。
+  （小表顺手；DSN 复用 `ONEAI_PG_DSN`，池化模式照抄 PgWorkingStateStore）。
 - `AppBuilder` 补 setter 缺口：`host_allowlist_store(...)`、通用
   `memory_persistence(...)`（当前只能经 `memory_manager()` 间接注入，
   `builder.rs:635,2092-2105`）。
@@ -265,7 +274,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 | Trait | 现有实现 | 云端缺口 |
 |---|---|---|
 | `MemoryPersistence`（core/traits.rs:1332） | 仅 `SqliteSessionStore` | `PgMemoryStore`（拆 4 子 store；pgvector） |
-| `WorkingStateStore`（core/traits.rs:763） | `FileWorkingStateStore`、`NoTaskStore` | `PgWorkingStateStore`（事件表 + index 表事务化）——**最优先** |
+| `WorkingStateStore`（core/traits.rs:763） | `FileWorkingStateStore`、`NoTaskStore` | ✅ `PgWorkingStateStore`（事件表 + brief 表事务化，feature `postgres`）——最优先项已交付 |
 | `SessionEventStore` | `FileSessionEventStore` | Pg 或对象存储 append-only |
 | `HostAllowlistStore`（core/traits.rs:703） | Sqlite / InMemory / Seeded | `PgHostAllowlist`（保留 Seeded 装饰器） |
 | `UsageTracker` | `SqliteUsageTracker`（同样无池化） | `PgUsageTracker` + 批量 flush |
@@ -305,8 +314,8 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 | 引擎（core/bus/agent/app） | **零改动**（N1/N2 的排除项）。例外：`oneai-tool` sandbox `is_available` 运行期探测（MVS1 产出的缺陷修复，与环境适配无关，任何 Linux 部署受益，见附录 A.3） |
 | `oneai-app-server` | 零改动（ws 监听、serve_web 均已存在） |
 | 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复） |
-| `oneai-persistence` | MVS3 加 Pg 后端（新文件，不动现有） |
-| `oneai-app` builder | MVS3 补 2 个 setter（`host_allowlist_store`/`memory_persistence`） |
+| `oneai-persistence` | MVS3 加 Pg 后端（✅ `pg_working_state_store.rs` 新文件，未动现有；⏳ Memory/Usage/HostAllowlist） |
+| `oneai-app` builder | ✅ MVS3 加 `working_state_store(Arc<dyn …>)` 泛型注入；⏳ 补 2 个 setter（`host_allowlist_store`/`memory_persistence`） |
 | `oneai-a2a` / `oneai-scheduler` | MVS2 把 Bearer 三件套改指向 `oneai-http-auth`（消重复） |
 | CLI | `oneai orchestrator` 子命令（MVS2） |
 | 部署件 | Dockerfile（MVS1）、镜像流水线（MVS4） |

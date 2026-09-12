@@ -1324,7 +1324,11 @@ pub(crate) async fn build_engine_server(
     } else {
         builder = builder.sqlite_persistence();
     }
-    builder = builder.working_state("./.oneai");
+    // Working-state backend (MVS3): file root is always set (session-event
+    // store + curator derive from it); `ONEAI_PG_DSN` (injected by the cloud
+    // orchestrator via passthrough_env) overrides the store with the shared
+    // Postgres. See crate::working_state.
+    builder = crate::working_state::apply_working_state(builder, "./.oneai").await;
 
     // Persisted thinking-effort store (web UI "思考程度" toggle) — shares
     // the SAME ~/.oneai/oneai.db (or ONEAI_DB_PATH) as the session store, so

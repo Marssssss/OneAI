@@ -47,7 +47,7 @@ OneAI 的工作状态管理是一个 **「事件溯源的 per-task 文件日志 
 | crate | 角色 | 关键文件 |
 |---|---|---|
 | `oneai-core` | L0 类型：`WorkingState` / `Step` / `Decision` / `Blocker` / `TaskEvent`；`WorkingStateStore` trait | `types.rs:914`, `traits.rs:386` |
-| `oneai-persistence` | 文件后端：`FileWorkingStateStore` + projector + compaction + archive | `working_state_store.rs:36` |
+| `oneai-persistence` | 文件后端：`FileWorkingStateStore` + projector + compaction + archive；Pg 后端（feature `postgres`）：`PgWorkingStateStore`（§14） | `working_state_store.rs:36`, `pg_working_state_store.rs` |
 | `oneai-agent` | 投影接线：`LoopState.working_state` + 控制工具 append 事件 + pinned 块渲染 | `agent_loop.rs`, `context_assembler.rs` |
 | `oneai-app` | 集成：`AppBuilder::working_state()` + 新 session 注入 `[Unfinished Work]` + resume rehydrate | `builder.rs`, `session.rs` |
 | `oneai-domain` | 声明式策略：`MemoryProfile.working_state: WorkingStatePolicy` + `RefreshPolicy::OnResume` | `memory_profile.rs`, `context_source.rs:50` |
@@ -205,6 +205,35 @@ OneAI 的工作状态管理是一个 **「事件溯源的 per-task 文件日志 
 - **原则派 + 投影可重建**：append-only 事件日志是 source of truth；内存 working state 是从事件 derive 的 projection，随时可 rebuild。读路径走内存缓存（不每次 replay），崩溃后用事件重建。
 
 参考来源：Claude Code session storage（JSONL append-only）、TASKS.md pattern（RALPH / agent-session-resume）、参考文档 §7.1 state derived from events、§8.1/8.2/8.4 失败模式、§10.2-10.3 working-state 文件启动注入。完整调研见 `docs/agent-working-state-and-cross-session-resume.md`。
+
+> §13 "DB 的索引查询优势只在跨 session 大规模搜索/多 agent 协调时显现" —— 云端编排器正是这个场景：MVS3 起提供 Postgres 后端（§14），本地单用户形态不变、仍是文件后端。
+
+---
+
+## 14. Postgres 后端（MVS3 存储外部化，feature `postgres`）
+
+云端一会话一容器形态下（`docs/cloud-orchestrator-design.md` §6 MVS3），N 个容器共享一个 Postgres 替代 N 个每会话卷：`PgWorkingStateStore`（`crates/oneai-persistence/src/pg_working_state_store.rs`）在**同一个 `WorkingStateStore` trait** 下提供事务化实现，引擎/AgentLoop 零改动。
+
+**Schema**（首次使用幂等自建，无迁移框架）：
+
+- `working_state_events(seq BIGSERIAL PK, id TEXT UNIQUE, task_id TEXT, event JSONB)` —— append-only 事件日志。整条 `TaskEvent` 存 JSONB（经 `$n::jsonb` 文本 cast 绑定），`schema_version`/payload 无损往返；`seq` 列给出契约要求的显式插入序。
+- `working_state_briefs(task_id PK, goal, status, open_step_count, open_blocker_count, user_id, project, last_event_ts)` —— 镜像 `TaskBrief` 的派生索引表，**与事件 INSERT 同事务** UPSERT（文件后端 `tasks.index.json` 的 read-modify-write 在多写者下会漂，这里事务化根除）。`file` 字段恒空。
+
+**契约对齐**（本文 §3/§4/§9 + `project()` 投影器直接复用，后端无关）：
+
+- 事件 INSERT-only；唯一"重写"是 compaction：单事务内 DELETE 全 task 行 + INSERT `Snapshot`+tail（新 seq 保持单调，逻辑等价、幂等）——对齐文件后端"重写整个 JSONL"。
+- `Snapshot` 是事件表里的一行，没有可漂移的并行状态表。
+- **多写者串行化**：`append_event`/`compact_if_needed` 事务先 `INSERT ... ON CONFLICT DO NOTHING` 确保 brief 行存在，再 `SELECT ... FOR UPDATE` 锁它 —— 同 task 并发 append 串行化（READ COMMITTED 下 brief 重导出必然看到全部已提交事件），不同 task 锁不同行、完全并行。
+- 崩溃安全：事务提交天然无半行（文件后端的 partial-line 容错在 Pg 无对应物，也不需要）。
+
+**有意偏差**：`archive_task` 只 append `TaskArchived` 事件 + brief 标 `archived`（`list_open_tasks` 排除），**不** gzip-删除日志——事件行保留可查（审计），§9 的"归档即压缩移出"是文件 substrate 的做法，DB 后端以状态位归档。
+
+**选型与接线**：
+
+- 驱动 `deadpool-postgres`（连接池；`NoTls`——目标同宿主/同 VPC Pg 或前置 TLS 终结）。feature `postgres` **默认关**（本地构建/crates.io 发布零负担），云镜像 `cargo build --features oneai-cli/postgres` 编入。
+- 运行期选择：env **`ONEAI_PG_DSN`** 非空且 feature 编入 → Pg 后端；否则文件后端（DSN 存在但连不上/未编入 → 响亮警告 + 诚实降级）。选择逻辑集中在 `examples/cli/src/working_state.rs`，覆盖 `oneai web`/app-server/serve/TUI/`tasks *`/`session export-hf --task` 全部入口；引擎侧注入点是 `AppBuilder::working_state_store(Arc<dyn WorkingStateStore>)`（优先于 `working_state(root)`；root 仍要设——session-event store/skill curator 从它派生）。
+- 云端注入：编排器 `~/.oneai/orchestrator.toml` 的 `passthrough_env = ["ONEAI_PG_DSN"]`（零代码改动），容器内访问宿主 Pg 用 `host.docker.internal`。
+- 测试：`crates/oneai-persistence/tests/pg_working_state.rs`，`ONEAI_TEST_PG_DSN` env 门控 + `#[ignore]`（CI 零 Pg 依赖），镜像文件后端 8 测 + 同 task 10 并发 append / 双 task 并行隔离两个多写者测试。
 
 ---
 

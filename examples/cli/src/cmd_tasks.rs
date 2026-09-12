@@ -11,27 +11,22 @@
 //! `oneai tasks archive <id>` — mark a task done/archived (gzips its log).
 //!
 //! The working-state root defaults to `./.oneai` (in-repo, git-trackable for
-//! coding domains); override with `--root`.
+//! coding domains); override with `--root`. When `ONEAI_PG_DSN` is set (and
+//! the binary has the `postgres` feature), all subcommands talk to the shared
+//! Postgres backend instead — see `crate::working_state` (MVS3).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use oneai_app::AppBuilder;
-use oneai_core::traits::WorkingStateStore;
-use oneai_persistence::FileWorkingStateStore;
 use oneai_tool::CalculatorTool;
 
 use crate::cmd_pack::get_builtin_pack;
 use crate::config::OneaiConfig;
+use crate::working_state::open_store;
 
 /// Default working-state root — in-repo so it's git-trackable.
-const DEFAULT_ROOT: &str = "./.oneai";
-
-/// Open the file working-state store at `root` (or the default).
-fn open_store(root: Option<&str>) -> Arc<dyn WorkingStateStore> {
-    let path = PathBuf::from(root.unwrap_or(DEFAULT_ROOT));
-    Arc::new(FileWorkingStateStore::new(path))
-}
+pub(crate) const DEFAULT_ROOT: &str = "./.oneai";
 
 /// The project scope = current working directory.
 fn project_scope() -> String {
@@ -43,11 +38,13 @@ fn project_scope() -> String {
 
 /// `oneai tasks list`
 pub fn cmd_tasks_list(user: Option<&str>, root: Option<&str>) {
-    let store = open_store(root);
     let project = project_scope();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let briefs = rt
-        .block_on(async { store.list_open_tasks(user.unwrap_or(""), &project).await })
+        .block_on(async {
+            let store = open_store(root).await;
+            store.list_open_tasks(user.unwrap_or(""), &project).await
+        })
         .unwrap_or_else(|e| {
             eprintln!("Error reading working-state index: {}", e);
             std::process::exit(1);
@@ -81,10 +78,12 @@ pub fn cmd_tasks_list(user: Option<&str>, root: Option<&str>) {
 
 /// `oneai tasks show <id>`
 pub fn cmd_tasks_show(id: &str, root: Option<&str>) {
-    let store = open_store(root);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let ws = rt
-        .block_on(async { store.get_task(id).await })
+        .block_on(async {
+            let store = open_store(root).await;
+            store.get_task(id).await
+        })
         .unwrap_or_else(|e| {
             eprintln!("Error reading task '{}': {}", id, e);
             std::process::exit(1);
@@ -140,9 +139,11 @@ pub fn cmd_tasks_show(id: &str, root: Option<&str>) {
 
 /// `oneai tasks archive <id>`
 pub fn cmd_tasks_archive(id: &str, root: Option<&str>) {
-    let store = open_store(root);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    if let Err(e) = rt.block_on(async { store.archive_task(id).await }) {
+    if let Err(e) = rt.block_on(async {
+        let store = open_store(root).await;
+        store.archive_task(id).await
+    }) {
         eprintln!("Error archiving task '{}': {}", id, e);
         std::process::exit(1);
     }
@@ -177,14 +178,17 @@ pub fn cmd_tasks_continue(
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = rt.block_on(async move {
         let provider = oneai_provider::ProviderFactory::create(model_config);
-        let mut builder = AppBuilder::new()
+        let builder = AppBuilder::new()
             .provider(Arc::from(provider))
             .noop_interaction_gate()
             .default_parser()
             .generation_config(config.generation.clone())
             .embedding_config(config.embedding.clone())
-            .sqlite_persistence()
-            .working_state(root_path.clone());
+            .sqlite_persistence();
+        // Working-state backend selection (MVS3) — shared Pg when
+        // ONEAI_PG_DSN is set, else the file store at root_path.
+        let mut builder =
+            crate::working_state::apply_working_state(builder, root_path.clone()).await;
         if let Some(uid) = user {
             builder = builder.user_id(uid);
         }

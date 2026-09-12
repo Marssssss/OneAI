@@ -170,7 +170,11 @@ pub fn run_tui(
         // Enable durable working-state persistence (cross-session task
         // continuation) + SQLite conversation persistence. The working-state
         // root is in-repo `.oneai/` so it's git-trackable for coding domains.
-        builder = builder.sqlite_persistence().working_state("./.oneai");
+        builder = builder.sqlite_persistence();
+        // Working-state backend selection (MVS3): file root by default
+        // (in-repo `.oneai/`, git-trackable for coding domains), shared
+        // Postgres when ONEAI_PG_DSN is set — see crate::working_state.
+        builder = crate::working_state::apply_working_state(builder, "./.oneai").await;
 
         // Wire the selected domain pack BEFORE build so the App picks up the
         // full coding-pack behavior — system-prompt template, compression

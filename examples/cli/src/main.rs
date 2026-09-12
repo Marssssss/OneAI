@@ -100,6 +100,7 @@ mod cmd_web;
 mod cmd_workflow;
 mod config;
 mod tui;
+mod working_state;
 
 use clap::{ArgAction, Parser, Subcommand};
 

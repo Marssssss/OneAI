@@ -8,7 +8,6 @@ use std::sync::OnceLock;
 
 use oneai_core::traits::MemoryPersistence;
 use oneai_core::{Message, TaskEvent};
-use oneai_persistence::working_state_store::FileWorkingStateStore;
 use oneai_persistence::SqliteSessionStore;
 use regex::Regex;
 use serde::Serialize;
@@ -290,8 +289,9 @@ struct ExportMeta {
 /// including content compressed away mid-run. Redacts high-entropy secrets
 /// (API keys / bearer tokens / key-value assignments) via regex so the record
 /// is safe to publish. Optionally attaches a task's raw working-state event
-/// log via `--task <id>` (read straight from the `FileWorkingStateStore`
-/// JSONL — the projection is not enough for a training/audit payload).
+/// log via `--task <id>` (read straight from the selected working-state
+/// backend — file JSONL or shared Postgres, MVS3 — because the projection is
+/// not enough for a training/audit payload).
 ///
 /// Does **not** upload anywhere — the product is a local `.jsonl` the user
 /// feeds to `huggingface-cli upload` themselves (keeps credentials out of the
@@ -335,10 +335,13 @@ pub fn cmd_session_export_hf(
     messages.extend(live.messages.iter().cloned());
     let message_count = messages.len();
 
-    // Optional working-state event log.
+    // Optional working-state event log. Honors the selected backend (MVS3):
+    // shared Postgres when ONEAI_PG_DSN is set, else the file JSONL.
     let working_state_events: Option<Vec<TaskEvent>> = if let Some(tid) = task {
-        let ws = FileWorkingStateStore::new(ws_root);
-        match rt.block_on(async { ws.read_events(tid).await }) {
+        match rt.block_on(crate::working_state::read_task_events(
+            ws_root.to_path_buf(),
+            tid,
+        )) {
             Ok(events) => Some(events),
             Err(e) => {
                 eprintln!("Warning: could not read working-state events for task '{}': {} — exporting conversation only.", tid, e);

@@ -13,6 +13,12 @@ categories = ["command-line-utilities", "development-tools"]
 name = "oneai"
 path = "src/main.rs"
 
+[features]
+default = []
+# Shared Postgres storage backend (MVS3) — the cloud engine image builds
+# with `--features oneai-cli/postgres`; runtime selects it via ONEAI_PG_DSN.
+postgres = ["oneai-persistence/postgres"]
+
 [dependencies]
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

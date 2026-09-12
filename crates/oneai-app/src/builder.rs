@@ -272,6 +272,12 @@ pub struct AppBuilder {
     /// decisions/blockers to per-task append-only event logs — enabling crash
     /// recovery and cross-session task continuation.
     working_state_root: Option<std::path::PathBuf>,
+    /// Explicit working-state store override (MVS3 storage externalization).
+    /// When `Some`, wins over `working_state_root` — the caller injects any
+    /// `WorkingStateStore` impl (e.g. `PgWorkingStateStore` for the shared
+    /// cloud Postgres). The domain pack's compaction thresholds are applied
+    /// to it via `set_compaction`, same as the file-backed path.
+    working_state_store_override: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
     /// Explicit session-event store override (issue #40 trajectory replay).
     /// When `None` and `working_state_root` is set, build() derives a
     /// `FileSessionEventStore` from the same root (`<root>/events/*.jsonl`).
@@ -386,6 +392,7 @@ impl AppBuilder {
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             reflection_cadence: None,
             working_state_root: None,
+            working_state_store_override: None,
             session_event_store: None,
             cron_scheduler: None,
             terminal_backend: None,
@@ -1553,6 +1560,29 @@ impl AppBuilder {
         self
     }
 
+    /// Inject an explicit `WorkingStateStore` (MVS3 storage externalization),
+    /// overriding the file-backed store [`working_state`](Self::working_state)
+    /// would otherwise build. Use this for the shared cloud Postgres backend
+    /// (`oneai_persistence::PgWorkingStateStore`, feature `postgres`) or any
+    /// custom impl — the CLI selects it at runtime when `ONEAI_PG_DSN` is set.
+    /// The domain pack's compaction thresholds are applied via
+    /// `set_compaction` (same as the file path + the hot-switch path).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let store = PgWorkingStateStore::connect(&dsn).await?;
+    /// let app = AppBuilder::new()
+    ///     .working_state_store(Arc::new(store))  // ← wins over working_state(root)
+    ///     .build()?;
+    /// ```
+    pub fn working_state_store(
+        mut self,
+        store: Arc<dyn oneai_core::traits::WorkingStateStore>,
+    ) -> Self {
+        self.working_state_store_override = Some(store);
+        self
+    }
+
     /// Override the session-event store (issue #40 trajectory replay).
     ///
     /// By default the store is derived from [`working_state`](Self::working_state)'s
@@ -2679,7 +2709,7 @@ impl AppBuilder {
         // per-domain, not hardcoded in the store. Precomputed from the
         // build-time snapshot; `switch_domain` updates it live via
         // `set_compaction`.
-        let working_state_store = self.working_state_root.as_ref().map(|root| {
+        let working_state_store = {
             let (event_threshold, keep_recent) = initial_domain
                 .as_ref()
                 .map(|d| {
@@ -2687,11 +2717,22 @@ impl AppBuilder {
                     (c.event_threshold, c.keep_recent)
                 })
                 .unwrap_or((200, 50));
-            std::sync::Arc::new(
-                oneai_persistence::FileWorkingStateStore::new(root.clone())
-                    .with_compaction(event_threshold, keep_recent),
-            ) as std::sync::Arc<dyn oneai_core::traits::WorkingStateStore>
-        });
+            match self.working_state_store_override.clone() {
+                // Explicit injection (e.g. PgWorkingStateStore) wins; apply
+                // the same declarative compaction policy the file path gets.
+                Some(store) => {
+                    store.set_compaction(event_threshold, keep_recent);
+                    Some(store)
+                }
+                None => self.working_state_root.as_ref().map(|root| {
+                    std::sync::Arc::new(
+                        oneai_persistence::FileWorkingStateStore::new(root.clone())
+                            .with_compaction(event_threshold, keep_recent),
+                    )
+                        as std::sync::Arc<dyn oneai_core::traits::WorkingStateStore>
+                }),
+            }
+        };
 
         // Session event log (issue #40 trajectory replay): explicit override
         // wins; otherwise derive a file store from the working-state root so

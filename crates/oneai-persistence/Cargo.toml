@@ -19,6 +19,19 @@ async-trait = { workspace = true }
 oneai-core = { workspace = true }
 rusqlite = { workspace = true }
 flate2 = { workspace = true }
+# Shared Postgres backend (MVS3) — optional; enabled via the `postgres`
+# feature (default off so local builds / crates.io releases stay light;
+# the cloud engine image builds with `--features oneai-cli/postgres`).
+deadpool-postgres = { workspace = true, optional = true }
+
+[features]
+default = []
+# PgWorkingStateStore — append-only event log + transactional brief index
+# in a shared Postgres (docs/working-state-mechanism.md).
+postgres = ["dep:deadpool-postgres"]
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests (tests/pg_working_state.rs) need the tokio macros +
+# spawn; the lib's own dependency is not visible to integration tests.
+tokio = { workspace = true }

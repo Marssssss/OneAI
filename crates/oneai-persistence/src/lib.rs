@@ -5,6 +5,9 @@
 //! New: SqliteUsageTracker for persistent token-usage tracking.
 //! New: FileWorkingStateStore — per-task append-only event log (the cross-session
 //!   working-state substrate, replacing the old progressive-checkpoint manager).
+//! New (feature `postgres`): PgWorkingStateStore — the same event log in a
+//!   shared Postgres with a transactional brief index (MVS3 cloud storage
+//!   externalization; runtime-selected via `ONEAI_PG_DSN`).
 
 //! # Stability
 //!
@@ -19,6 +22,8 @@
 
 pub mod checkpoint;
 pub mod host_allowlist;
+#[cfg(feature = "postgres")]
+pub mod pg_working_state_store;
 pub mod session_event_store;
 pub mod sqlite_store;
 pub mod state;
@@ -28,6 +33,8 @@ pub mod working_state_store;
 
 pub use checkpoint::*;
 pub use host_allowlist::*;
+#[cfg(feature = "postgres")]
+pub use pg_working_state_store::PgWorkingStateStore;
 pub use session_event_store::*;
 pub use sqlite_store::*;
 pub use state::*;

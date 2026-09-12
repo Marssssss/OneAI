@@ -170,7 +170,10 @@ pub fn cmd_serve(
         if let Some(uid) = user {
             builder = builder.user_id(uid);
         }
-        builder = builder.sqlite_persistence().working_state("./.oneai");
+        builder = builder.sqlite_persistence();
+        // Working-state backend selection (MVS3): file root by default,
+        // shared Postgres when ONEAI_PG_DSN is set — see crate::working_state.
+        builder = crate::working_state::apply_working_state(builder, "./.oneai").await;
 
         let domain_pack_name = domain.unwrap_or("coding");
         let domain_pack = get_builtin_pack(domain_pack_name, ".")
