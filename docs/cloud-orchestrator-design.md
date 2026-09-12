@@ -440,3 +440,48 @@ config.toml 只读 bind-mount（`--provider-config`，真实 LLM 调用）。
 6. 编排器控制面延迟可忽略：创建（含 docker create+start+引擎端口就绪）
    单会话 ~300ms（colima 热路径）；反代双跳 turn 与 MVS1 直连无可感知差异
    （R2 符合预期）。
+
+---
+
+## 附录 C：MVS3-A 验收记录（PgWorkingStateStore，2026-09-12）
+
+环境：与附录 A/B 同机（macOS/arm64 + colima + docker）；镜像
+`oneai-engine:mvs1` **带 `--features oneai-cli/postgres` 重建**（497MB）；
+Pg = `postgres:16` 一次性容器（`-p 5432:5432`，库 `oneai_mvs3`）；provider =
+宿主 config.toml 只读 bind-mount（真实 LLM 调用）。验收驱动：
+`deploy/docker/mvs3_verify.mjs`（一键 `./deploy/docker/mvs3_run.sh`）。
+
+### C.1 验收矩阵（14/14 全过）
+
+| 项 | 结果 |
+|---|---|
+| A. per-session env 注入 DSN 建会话 | ✅ 2×201 Running（~260ms）——`POST /v1/sessions` body `env` 字段即够，**编排器零代码改动**（passthrough_env 为部署期等价路径） |
+| B. 引擎后端选择 | ✅ 容器日志 `working-state: Postgres (shared)`；无 feature 缺失/降级警告 |
+| C. 宿主 psql 种子任务 → 容器内 `oneai tasks list` | ✅ JSONB 种子（TaskCreated+StepAdded+brief）被容器内 CLI 真反序列化列出——容器→宿主 Pg 读路径 + serde 线上格式地面真值 |
+| D. 新会话真实 turn 首轮 surface | ✅ 模型逐字答出种子 goal（`[Unfinished Work From Previous Sessions]` ← 引擎 `list_open_tasks` 走 Pg，5.1s/turn） |
+| E. **kill 容器 + 删光两卷** → 重连自动 Resuming | ✅ 3.2s 重连 Running；新容器 `tasks/` 零文件（空卷地面真值）；`tasks list` 仍见种子任务（**只可能来自 Pg**）；恢复后引擎 turn 再次 surface（10.1s） |
+| F. 清理 | ✅ DELETE×2 → 容器/卷零残留；种子行清库 |
+
+### C.2 实现期发现与决策落地
+
+1. **`$n::jsonb` 单 cast 陷阱**：Postgres 把参数类型解析成 jsonb，
+   tokio-postgres 的 `ToSql for String` 拒发（"error serializing
+   parameter"）——改 `$n::text::jsonb` 双 cast，免驱动 serde_json feature。
+2. **N 容器同库冷启动 DDL 竞态（验收前测试抓出，两轮）**：并发
+   `CREATE TABLE IF NOT EXISTS` 撞 pg_type 唯一键；`CREATE INDEX IF NOT
+   EXISTS` 命中已有索引仍拿表级 ShareLock，与其他容器 DML 互锁
+   （E40P01 deadlock）。修复：稳态 boot 先 `to_regclass` catalog 探测
+   （零关系锁跳过 DDL），冷库才在 advisory lock（key 0x4F4E4149）下建表，
+   锁内二次探测防重复 DDL。
+3. **`connect()` fail-fast 建表**：验收 C 阶段抓出"引擎已宣布选 Pg 但表
+   还不存在"（DDL 原为懒触发）——改 `connect()` 即时 `ensure_schema()`：
+   后端选中即表就绪，Pg 不可达/无 DDL 权限在启动当场响亮降级，不拖到
+   会话中途 append 才炸（事件日志是恢复命脉，迟发静默失败是最坏模式）。
+4. **colima 无 `host.docker.internal` 自动注入**（Docker Desktop 专有），
+   DockerRunner argv 又不带 `--add-host` → DSN 用 bridge 网关
+   `172.17.0.1`（`-p 5432:5432` 发布到 VM 全接口即可达）。README §12 已录。
+5. **多写者一致性设计**：`append_event`/`compact_if_needed` 事务先锁
+   brief 行（`INSERT … ON CONFLICT DO NOTHING` + `SELECT … FOR UPDATE`）
+   ——同 task 并发写串行化（READ COMMITTED 下 brief 重导出必见全部已提交
+   事件），不同 task 完全并行；集成测试 10 并发同 task append 零丢失、
+   brief 与日志严格一致。

@@ -128,7 +128,14 @@ impl PgWorkingStateStore {
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|e| OneAIError::Persistence(format!("Failed to build Pg pool: {}", e)))?;
-        Ok(Self::new(pool))
+        let store = Self::new(pool);
+        // Fail fast: apply the schema DDL NOW so "backend selected" means the
+        // tables exist (ops can query them immediately; an unreachable Pg or
+        // missing DDL permission surfaces at startup with a loud warning
+        // instead of mid-session on the first append — the event log is the
+        // crash-recovery lifeline, silent late failure is the worst mode).
+        store.ensure_schema().await?;
+        Ok(store)
     }
 
     /// Wrap an externally built pool (tests / embedding apps that own the
@@ -161,8 +168,10 @@ impl PgWorkingStateStore {
         &self.pool
     }
 
-    async fn client(&self) -> Result<deadpool_postgres::Client> {
-        // Apply DDL once before handing out the first connection.
+    /// Apply the schema DDL (idempotent, at most once per store instance;
+    /// `connect*` calls it eagerly, `new(pool)` users can call it manually —
+    /// otherwise it runs lazily before the first operation).
+    pub async fn ensure_schema(&self) -> Result<()> {
         self.schema_ready
             .get_or_try_init(|| async {
                 let c = self.pool.get().await.map_err(pool_err)?;
@@ -201,7 +210,13 @@ impl PgWorkingStateStore {
                 ddl.map_err(pg_err)?;
                 Ok::<(), OneAIError>(())
             })
-            .await?;
+            .await
+            .copied()
+    }
+
+    async fn client(&self) -> Result<deadpool_postgres::Client> {
+        // Lazy path for `new(pool)` users — a no-op once ensure_schema ran.
+        self.ensure_schema().await?;
         self.pool.get().await.map_err(pool_err)
     }
 

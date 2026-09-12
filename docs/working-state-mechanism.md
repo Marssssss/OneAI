@@ -214,7 +214,8 @@ OneAI 的工作状态管理是一个 **「事件溯源的 per-task 文件日志 
 
 云端一会话一容器形态下（`docs/cloud-orchestrator-design.md` §6 MVS3），N 个容器共享一个 Postgres 替代 N 个每会话卷：`PgWorkingStateStore`（`crates/oneai-persistence/src/pg_working_state_store.rs`）在**同一个 `WorkingStateStore` trait** 下提供事务化实现，引擎/AgentLoop 零改动。
 
-**Schema**（首次使用幂等自建，无迁移框架）：
+**Schema**（`connect()` 即时幂等自建 + fail-fast——启动即建表，Pg 不可达/无 DDL
+权限在选型当场响亮报错，不会拖到会话中途第一次 append 才炸；无迁移框架）：
 
 - `working_state_events(seq BIGSERIAL PK, id TEXT UNIQUE, task_id TEXT, event JSONB)` —— append-only 事件日志。整条 `TaskEvent` 存 JSONB（经 `$n::jsonb` 文本 cast 绑定），`schema_version`/payload 无损往返；`seq` 列给出契约要求的显式插入序。
 - `working_state_briefs(task_id PK, goal, status, open_step_count, open_blocker_count, user_id, project, last_event_ts)` —— 镜像 `TaskBrief` 的派生索引表，**与事件 INSERT 同事务** UPSERT（文件后端 `tasks.index.json` 的 read-modify-write 在多写者下会漂，这里事务化根除）。`file` 字段恒空。
@@ -225,6 +226,7 @@ OneAI 的工作状态管理是一个 **「事件溯源的 per-task 文件日志 
 - `Snapshot` 是事件表里的一行，没有可漂移的并行状态表。
 - **多写者串行化**：`append_event`/`compact_if_needed` 事务先 `INSERT ... ON CONFLICT DO NOTHING` 确保 brief 行存在，再 `SELECT ... FOR UPDATE` 锁它 —— 同 task 并发 append 串行化（READ COMMITTED 下 brief 重导出必然看到全部已提交事件），不同 task 锁不同行、完全并行。
 - 崩溃安全：事务提交天然无半行（文件后端的 partial-line 容错在 Pg 无对应物，也不需要）。
+- **N 容器同库冷启动安全**：稳态 boot 先 catalog 探测（`to_regclass`），schema 齐全直接跳过 DDL（零关系锁）；冷库才在 advisory lock 下建表——并发 `CREATE TABLE IF NOT EXISTS` 本身有 pg_type 竞态，且 `CREATE INDEX IF NOT EXISTS` 即使命中已有索引也拿表级 ShareLock，会与其他容器在跑的 DML 互锁（验收期实测 E40P01 死锁后修复）。
 
 **有意偏差**：`archive_task` 只 append `TaskArchived` 事件 + brief 标 `archived`（`list_open_tasks` 排除），**不** gzip-删除日志——事件行保留可查（审计），§9 的"归档即压缩移出"是文件 substrate 的做法，DB 后端以状态位归档。
 

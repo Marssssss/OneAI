@@ -186,3 +186,66 @@ DELETE 后容器与卷零残留。**验证纪律同 MVS1**：以事件流与
   （Caddy/ALB）终止；容器永不直接暴露公网。
 - `sessions.json` 可能含注入容器的 env 值，已 chmod 600；生产走 Secret
   Manager（D5/MVS4）。
+
+---
+
+# MVS3 存储外部化：PgWorkingStateStore（2026-09-12）
+
+working-state 事件日志（崩溃恢复命脉）从每会话卷外部化到共享 Postgres：
+容器/卷全丢也能恢复未完成任务；brief 索引与事件 INSERT 同事务（多写者
+安全）。机制见 `docs/working-state-mechanism.md` §14。
+
+## 11. 镜像重建（必须带 postgres feature）
+
+```bash
+docker build -f deploy/docker/Dockerfile -t oneai-engine:mvs1 .
+# Dockerfile 已改为 cargo build --features oneai-cli/postgres
+```
+
+## 12. 起共享 Pg（验收/开发用一次性容器）
+
+```bash
+docker run -d --name oneai-pg-test -p 5432:5432 \
+  -e POSTGRES_PASSWORD=oneai -e POSTGRES_DB=oneai_test postgres:16
+docker exec oneai-pg-test psql -U postgres -c "CREATE DATABASE oneai_mvs3;"
+```
+
+**DSN 主机名注意**：容器内访问宿主 Pg——Docker Desktop 用
+`host.docker.internal`；**colima 无自动注入**（DockerRunner argv 不带
+`--add-host`），用 bridge 网关 `172.17.0.1`：
+`postgres://postgres:oneai@172.17.0.1:5432/oneai_mvs3`。
+
+## 13. DSN 注入（编排器零代码改动，两条路）
+
+```toml
+# 路 A：~/.oneai/orchestrator.toml —— 编排器自身环境里有 ONEAI_PG_DSN 时
+passthrough_env = ["ONEAI_PG_DSN"]
+```
+
+路 B（验收脚本用）：`POST /v1/sessions` body 的 `env` 字段 per-session 注入
+`{"env": {"ONEAI_PG_DSN": "postgres://…"}}`。
+
+引擎容器启动日志出现 `working-state: Postgres (shared)` 即选中 Pg；DSN 设了
+但不可用 → 响亮警告 + 诚实降级文件后端（不会静默分叉）。
+
+## 14. MVS3 全量验收（一键）
+
+```bash
+./deploy/docker/mvs3_run.sh
+# 等价于：node deploy/docker/mvs3_verify.mjs --bin target/debug/oneai
+```
+
+验收矩阵（A-F）：per-session env 注入建会话 → 引擎日志证后端选择 → psql
+种子未完成任务 + 容器内 `oneai tasks list` 真读 Pg → 新会话真实 turn 首轮
+surface 种子任务（引擎 `list_open_tasks` 走 Pg）→ **kill 容器 + 删光两个卷**
+→ 重连自动 Resuming → 空卷新容器仍从 Pg 恢复未完成任务（MVS3 核心卖点）→
+DELETE 后容器/卷/种子行零残留。
+
+## 15. Pg 集成测试（开发侧）
+
+```bash
+ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
+  cargo test -p oneai-persistence --features postgres \
+  --test pg_working_state -- --ignored
+# 10 测：镜像文件后端 8 项 + 同任务 10 并发 append / 双任务并行隔离
+```
