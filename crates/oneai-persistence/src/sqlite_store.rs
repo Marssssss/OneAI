@@ -53,7 +53,7 @@ use rusqlite::OptionalExtension;
 /// Only non-empty-text `user` messages and assistant groups containing text
 /// are counted — matching the render filter that drops `system` / `tool` /
 /// empty rows.
-fn folded_display_count(msgs: &[oneai_core::Message]) -> usize {
+pub(crate) fn folded_display_count(msgs: &[oneai_core::Message]) -> usize {
     use oneai_core::Role;
     let mut count = 0usize;
     let mut group_open = false; // currently building an assistant bubble
@@ -477,12 +477,12 @@ fn deserialize_embedding(json: &str) -> Option<Vec<f32>> {
 }
 
 /// Serialize a HashMap<String, String> as JSON.
-fn serialize_metadata(metadata: &std::collections::HashMap<String, String>) -> String {
+pub(crate) fn serialize_metadata(metadata: &std::collections::HashMap<String, String>) -> String {
     serde_json::to_string(metadata).unwrap_or_default()
 }
 
 /// Deserialize a JSON string back to HashMap<String, String>.
-fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String> {
+pub(crate) fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String> {
     if json.is_empty() {
         return std::collections::HashMap::new();
     }
@@ -493,7 +493,7 @@ fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String>
 /// `metadata["title"]` override is present). Shared by `save_conversation`,
 /// which honors a rename override persisted in the DB before falling back to
 /// this.
-fn first_user_message_title(conversation: &Conversation, max: usize) -> Option<String> {
+pub(crate) fn first_user_message_title(conversation: &Conversation, max: usize) -> Option<String> {
     let first_user = conversation
         .messages
         .iter()
@@ -508,7 +508,7 @@ fn first_user_message_title(conversation: &Conversation, max: usize) -> Option<S
 
 /// Collapse any run of whitespace (incl. newlines) into a single space, then
 /// truncate to `max` chars on a char boundary (appending an ellipsis).
-fn normalize_title(text: &str, max: usize) -> String {
+pub(crate) fn normalize_title(text: &str, max: usize) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max {
         collapsed
@@ -1265,6 +1265,20 @@ impl MemoryPersistence for SqliteSessionStore {
 
         tracing::debug!("Deleted conversation '{}' and its STM entries", id);
         Ok(())
+    }
+
+    // Rename/archive: the inherent methods do a targeted metadata-only UPDATE
+    // (no message-blob rewrite, no race with a concurrent turn save). Expose
+    // them through the trait so `App` can route here via
+    // `Arc<dyn MemoryPersistence>` (MVS3-B) — the path-qualified call pins
+    // the inherent impl (no recursion).
+
+    async fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
+        SqliteSessionStore::rename_conversation(self, id, title).await
+    }
+
+    async fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        SqliteSessionStore::set_conversation_archived(self, id, archived).await
     }
 
     // ─── MemoryFact persistence ──────────────────────────────────────────────

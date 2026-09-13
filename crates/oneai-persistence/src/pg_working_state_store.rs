@@ -42,8 +42,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use deadpool_postgres::tokio_postgres::NoTls;
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::Pool;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::WorkingStateStore;
 use oneai_core::{
@@ -51,6 +50,10 @@ use oneai_core::{
     TASK_EVENT_SCHEMA_VERSION,
 };
 
+use crate::pg_common::{
+    build_pool, ensure_schema as common_ensure_schema, now_rfc3339, pg_err, pool_err,
+    ADVISORY_LOCK_BASE,
+};
 use crate::working_state_store::project;
 
 /// Catalog probe: TRUE when every object this store needs already exists.
@@ -111,23 +114,7 @@ impl PgWorkingStateStore {
 
     /// Like [`connect`](Self::connect) with an explicit pool size.
     pub async fn connect_with_pool_size(dsn: &str, max_size: usize) -> Result<Self> {
-        // deadpool-postgres re-exports its tokio-postgres; parse the DSN with
-        // the same `FromStr` impl libpq URLs use.
-        let pg_config: deadpool_postgres::tokio_postgres::Config = dsn.parse().map_err(|e| {
-            OneAIError::Persistence(format!("Invalid ONEAI_PG_DSN connection string: {}", e))
-        })?;
-        let manager = Manager::from_config(
-            pg_config,
-            NoTls,
-            ManagerConfig {
-                recycling_method: RecyclingMethod::Fast,
-            },
-        );
-        let pool = Pool::builder(manager)
-            .max_size(max_size)
-            .runtime(Runtime::Tokio1)
-            .build()
-            .map_err(|e| OneAIError::Persistence(format!("Failed to build Pg pool: {}", e)))?;
+        let pool = build_pool(dsn, max_size)?;
         let store = Self::new(pool);
         // Fail fast: apply the schema DDL NOW so "backend selected" means the
         // tables exist (ops can query them immediately; an unreachable Pg or
@@ -172,46 +159,17 @@ impl PgWorkingStateStore {
     /// `connect*` calls it eagerly, `new(pool)` users can call it manually —
     /// otherwise it runs lazily before the first operation).
     pub async fn ensure_schema(&self) -> Result<()> {
-        self.schema_ready
-            .get_or_try_init(|| async {
-                let c = self.pool.get().await.map_err(pool_err)?;
-                // Steady state: schema already there → skip DDL entirely
-                // (no relation locks; see SCHEMA_EXISTS_SQL).
-                let exists: bool = c
-                    .query_one(SCHEMA_EXISTS_SQL, &[])
-                    .await
-                    .map_err(pg_err)?
-                    .get(0);
-                if exists {
-                    return Ok::<(), OneAIError>(());
-                }
-                // Cold DB: serialize DDL across ALL instances/processes with
-                // an advisory lock — concurrent `CREATE TABLE IF NOT EXISTS`
-                // is itself racy in Postgres (duplicate pg_type insert).
-                // Fixed app-level lock key ("ONEAI" = 0x4F4E4149).
-                c.batch_execute("SELECT pg_advisory_lock(1330538825)")
-                    .await
-                    .map_err(pg_err)?;
-                // Re-check under the lock: another process may have just
-                // finished the DDL while we waited.
-                let exists: bool = c
-                    .query_one(SCHEMA_EXISTS_SQL, &[])
-                    .await
-                    .map_err(pg_err)?
-                    .get(0);
-                let ddl = if exists {
-                    Ok(())
-                } else {
-                    c.batch_execute(SCHEMA_DDL).await
-                };
-                let _ = c
-                    .batch_execute("SELECT pg_advisory_unlock(1330538825)")
-                    .await;
-                ddl.map_err(pg_err)?;
-                Ok::<(), OneAIError>(())
-            })
-            .await
-            .copied()
+        // Catalog-probe → advisory-lock → re-check → DDL; shared with the
+        // other Pg stores (see `pg_common`). This store owns the base lock
+        // key ("ONEAI" = 0x4F4E4149).
+        common_ensure_schema(
+            &self.pool,
+            &self.schema_ready,
+            ADVISORY_LOCK_BASE,
+            SCHEMA_EXISTS_SQL,
+            SCHEMA_DDL,
+        )
+        .await
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Client> {
@@ -229,30 +187,8 @@ impl PgWorkingStateStore {
 }
 
 // ─── Helpers shared by inherent + trait methods ─────────────────────────────
-
-fn pool_err(e: deadpool_postgres::PoolError) -> OneAIError {
-    OneAIError::Persistence(format!("Pg pool error: {}", e))
-}
-
-fn pg_err(e: deadpool_postgres::tokio_postgres::Error) -> OneAIError {
-    // Surface the server-side DbError detail (message + SQLSTATE) — the bare
-    // Display of a wrapped db error is just "db error", useless for triage.
-    if let Some(db) = e.as_db_error() {
-        return OneAIError::Persistence(format!(
-            "Pg error [{:?}]: {}{}",
-            db.code(),
-            db.message(),
-            db.detail()
-                .map(|d| format!(" — detail: {}", d))
-                .unwrap_or_default()
-        ));
-    }
-    OneAIError::Persistence(format!("Pg error: {}", e))
-}
-
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
+// (pool construction, ensure_schema flow, pool_err/pg_err/now_rfc3339 live in
+// `crate::pg_common` — shared with the MVS3-B Pg stores.)
 
 /// TaskStatus ↔ its serde (snake_case) string form — round-trips through
 /// serde so a future variant rename can't desync the SQL representation.

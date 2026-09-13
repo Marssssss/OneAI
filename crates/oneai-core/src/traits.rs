@@ -1402,6 +1402,56 @@ pub trait MemoryPersistence: Send + Sync {
     /// Delete a conversation and its associated STM entries by ID.
     async fn delete_conversation(&self, id: &str) -> Result<()>;
 
+    /// Rename a saved conversation's title. Persists the new title to both
+    /// the store's title slot and `metadata["title"]` — the override channel
+    /// a subsequent `save_conversation` honors (merged metadata wins over
+    /// re-derivation), so the rename survives the next turn's resave. An
+    /// empty/whitespace title is a no-op; a missing `id` is an error.
+    ///
+    /// The default impl is a generic load-modify-save. Backends with a
+    /// targeted metadata-only UPDATE (SQLite/Pg) override it — a full resave
+    /// rewrites the message blob and can clobber a concurrent turn's
+    /// in-flight save.
+    async fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Ok(()); // "keep current" — never write an empty title
+        }
+        let mut conv = match self.load_conversation(id).await? {
+            Some(c) => c,
+            None => {
+                return Err(crate::error::OneAIError::Persistence(format!(
+                    "session '{id}' not found"
+                )))
+            }
+        };
+        conv.metadata
+            .insert("title".to_string(), trimmed.to_string());
+        self.save_conversation(id, &conv).await
+    }
+
+    /// Toggle a saved conversation's archived flag (`metadata["archived"] =
+    /// "1"` when archiving, key removed when un-archiving). A missing `id` is
+    /// an error. Same default-impl / override guidance as
+    /// [`rename_conversation`](Self::rename_conversation).
+    async fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        let mut conv = match self.load_conversation(id).await? {
+            Some(c) => c,
+            None => {
+                return Err(crate::error::OneAIError::Persistence(format!(
+                    "session '{id}' not found"
+                )))
+            }
+        };
+        if archived {
+            conv.metadata
+                .insert("archived".to_string(), "1".to_string());
+        } else {
+            conv.metadata.remove("archived");
+        }
+        self.save_conversation(id, &conv).await
+    }
+
     // ─── MemoryFact persistence (core/archival tiers) ──────────────────────
     //
     // These back the DomainPack MemoryProfile layer's durable facts. Default

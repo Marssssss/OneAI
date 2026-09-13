@@ -23,6 +23,14 @@
 pub mod checkpoint;
 pub mod host_allowlist;
 #[cfg(feature = "postgres")]
+mod pg_common;
+#[cfg(feature = "postgres")]
+pub mod pg_host_allowlist;
+#[cfg(feature = "postgres")]
+pub mod pg_memory_store;
+#[cfg(feature = "postgres")]
+pub mod pg_usage_tracker;
+#[cfg(feature = "postgres")]
 pub mod pg_working_state_store;
 pub mod session_event_store;
 pub mod sqlite_store;
@@ -33,6 +41,12 @@ pub mod working_state_store;
 
 pub use checkpoint::*;
 pub use host_allowlist::*;
+#[cfg(feature = "postgres")]
+pub use pg_host_allowlist::PgHostAllowlist;
+#[cfg(feature = "postgres")]
+pub use pg_memory_store::PgMemoryStore;
+#[cfg(feature = "postgres")]
+pub use pg_usage_tracker::PgUsageTracker;
 #[cfg(feature = "postgres")]
 pub use pg_working_state_store::PgWorkingStateStore;
 pub use session_event_store::*;

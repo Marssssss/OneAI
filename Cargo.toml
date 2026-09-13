@@ -199,6 +199,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # columns are bound/read as `::text`-cast strings so the tokio-postgres
 # `with-serde_json-1` feature is not needed.
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
+# pgvector bindings (MVS3-B, PgMemoryStore LTM KNN) — `Vector` ToSql/FromSql
+# for the `vector` column type; feature targets tokio-postgres 0.7.
+pgvector = { version = "0.4", features = ["postgres"] }
+# Same crate deadpool-postgres re-exports; declared here only to enable the
+# chrono feature (TIMESTAMPTZ ↔ `chrono::DateTime<Utc>` bindings) via cargo
+# feature unification — no second copy in the tree.
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

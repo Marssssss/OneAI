@@ -23,12 +23,20 @@ flate2 = { workspace = true }
 # feature (default off so local builds / crates.io releases stay light;
 # the cloud engine image builds with `--features oneai-cli/postgres`).
 deadpool-postgres = { workspace = true, optional = true }
+# MVS3-B: PgMemoryStore LTM vector search (pgvector `vector` column + `<=>`
+# KNN) — hard dependency of the `postgres` feature (Pg server must provide
+# the extension; see pg_memory_store.rs module docs).
+pgvector = { workspace = true, optional = true }
+# Enables `with-chrono-0_4` on the tokio-postgres that deadpool-postgres
+# re-exports (TIMESTAMPTZ ↔ chrono bindings) via feature unification.
+tokio-postgres = { workspace = true, optional = true }
 
 [features]
 default = []
 # PgWorkingStateStore — append-only event log + transactional brief index
 # in a shared Postgres (docs/working-state-mechanism.md).
-postgres = ["dep:deadpool-postgres"]
+# MVS3-B adds PgMemoryStore (pgvector) / PgUsageTracker / PgHostAllowlist.
+postgres = ["dep:deadpool-postgres", "dep:pgvector", "dep:tokio-postgres"]
 
 [dev-dependencies]
 tempfile = "3"
