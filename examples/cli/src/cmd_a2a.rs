@@ -61,6 +61,11 @@ pub fn cmd_a2a_serve(domain: Option<&str>, port: u16) {
             .domain_pack(domain_pack)
             .sqlite_persistence(); // per-session A2A tasks resume the chat
 
+        // Memory/usage/host-allowlist backend selection (MVS3-B): shared
+        // Postgres when ONEAI_PG_DSN is set — see crate::pg_backends.
+        let (b, _) = crate::pg_backends::apply_pg_backends(builder).await;
+        builder = b;
+
         if let Some(mc) = &provider_config {
             let provider = oneai_provider::ProviderFactory::create(mc.clone());
             builder = builder.provider(Arc::from(provider));

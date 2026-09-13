@@ -3,6 +3,12 @@
 //!
 //! These commands operate on the SQLite session store to manage
 //! saved conversations and enable session resume.
+//!
+//! TODO(MVS3 follow-up): the admin subcommands (list/resume/delete/info/
+//! export-hf) still read the local SQLite directly — when `ONEAI_PG_DSN`
+//! moves memory to the shared Postgres, Pg-managed sessions are NOT visible
+//! to them. Acceptable for now (admin tooling is rare in cloud mode; the
+//! `decay` App below already honors the Pg selection).
 
 use std::sync::OnceLock;
 
@@ -189,13 +195,18 @@ pub async fn cmd_session_decay(
         crate::cmd_pack::get_builtin_pack(&domain_name, ".").unwrap_or_else(|| coding_pack("."));
     let uid = user.unwrap_or("default").to_string();
 
-    let app = AppBuilder::new()
+    let builder = AppBuilder::new()
         .noop_interaction_gate()
         .default_parser()
         .generation_config(config.generation.clone())
         .domain_pack(pack)
         .sqlite_persistence()
-        .user_id(uid.clone())
+        .user_id(uid.clone());
+    // Memory/usage/host-allowlist backend selection (MVS3-B): decay must run
+    // against the SAME store the sessions live in — shared Postgres when
+    // ONEAI_PG_DSN is set. See crate::pg_backends.
+    let (builder, _) = crate::pg_backends::apply_pg_backends(builder).await;
+    let app = builder
         .build()
         .await
         .expect("session decay App build failed");

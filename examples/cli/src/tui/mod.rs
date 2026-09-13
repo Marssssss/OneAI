@@ -171,6 +171,10 @@ pub fn run_tui(
         // continuation) + SQLite conversation persistence. The working-state
         // root is in-repo `.oneai/` so it's git-trackable for coding domains.
         builder = builder.sqlite_persistence();
+        // Memory/usage/host-allowlist backend selection (MVS3-B): shared
+        // Postgres when ONEAI_PG_DSN is set — see crate::pg_backends.
+        let (b, _) = crate::pg_backends::apply_pg_backends(builder).await;
+        builder = b;
         // Working-state backend selection (MVS3): file root by default
         // (in-repo `.oneai/`, git-trackable for coding domains), shared
         // Postgres when ONEAI_PG_DSN is set — see crate::working_state.

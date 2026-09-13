@@ -282,6 +282,18 @@ pub struct AppBuilder {
     /// When `None` and `working_state_root` is set, build() derives a
     /// `FileSessionEventStore` from the same root (`<root>/events/*.jsonl`).
     session_event_store: Option<Arc<dyn oneai_core::traits::SessionEventStore>>,
+    /// Explicit host allow/deny store override (MVS3-B storage
+    /// externalization). When `Some`, wins over the sqlite/InMemory
+    /// auto-selection at build time; still wrapped in `SeededHostAllowlist`
+    /// (seed pre-approval of package registries is backend-independent).
+    /// Use for the shared cloud Postgres backend
+    /// (`oneai_persistence::PgHostAllowlist`, feature `postgres`).
+    host_allowlist_store_override: Option<Arc<dyn oneai_tool::HostAllowlistStore>>,
+    /// Explicit memory-persistence override (MVS3-B). Held for `App` so the
+    /// conversation surface (`session/list|load|rename|archive|delete` RPCs)
+    /// reads/writes the same backend the MemoryManager persists turns to.
+    /// Set by [`memory_persistence`](Self::memory_persistence).
+    memory_persistence_override: Option<Arc<dyn MemoryPersistence>>,
     /// Optional durable cron scheduler (Phase 3.2). Held on `App` so future
     /// agent tools can query schedules; the CLI drives the lifecycle
     /// (`cron serve` / `supervisor serve --with-cron`). The trait seam lives
@@ -394,6 +406,8 @@ impl AppBuilder {
             working_state_root: None,
             working_state_store_override: None,
             session_event_store: None,
+            host_allowlist_store_override: None,
+            memory_persistence_override: None,
             cron_scheduler: None,
             terminal_backend: None,
             code_working_dir: None,
@@ -1536,6 +1550,47 @@ impl AppBuilder {
         self
     }
 
+    /// Inject an explicit `MemoryPersistence` backend (MVS3-B storage
+    /// externalization), **overriding** whatever [`sqlite_persistence`](Self::sqlite_persistence)
+    /// wired. Use this for the shared cloud Postgres backend
+    /// (`oneai_persistence::PgMemoryStore`, feature `postgres`) or any custom
+    /// impl — the CLI selects it at runtime when `ONEAI_PG_DSN` is set.
+    ///
+    /// Explicit-override semantics (same as
+    /// [`working_state_store`](Self::working_state_store)): the
+    /// `MemoryManager` is (re)built from this store unconditionally, so the
+    /// intended call order is `sqlite_persistence()` first (it still backs
+    /// feedback / thinking-effort / session metadata edits on the local
+    /// SQLite) and then `memory_persistence(pg_store)` to take over
+    /// STM/LTM/conversation/fact persistence. Like `sqlite_persistence`,
+    /// call it before [`with_memory_reflection`](Self::with_memory_reflection)
+    /// so the reflection loop sees the same manager.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let store = PgMemoryStore::connect(&dsn).await?;
+    /// let app = AppBuilder::new()
+    ///     .sqlite_persistence()                       // local aux state
+    ///     .memory_persistence(Arc::new(store))        // ← wins
+    ///     .build()?;
+    /// ```
+    pub fn memory_persistence(
+        mut self,
+        store: Arc<dyn oneai_core::traits::MemoryPersistence>,
+    ) -> Self {
+        let config = Self::memory_manager_config(self.core_memory_budget_tokens);
+        self.memory_manager = Some(Arc::new(MemoryManager::with_persistence(
+            config,
+            store.clone(),
+        )));
+        // Keep the Arc for `App`: the conversation-surface methods
+        // (list/rename/archive/delete/resume — the `session/*` RPCs) route
+        // through it so they read/write the SAME backend the MemoryManager
+        // saves turns to (without this they'd stay glued to `sqlite_store`).
+        self.memory_persistence_override = Some(store);
+        self
+    }
+
     // ─── Working State (cross-session task continuation) ─────────────────────────
 
     /// Enable durable working-state persistence rooted at `root`. When set,
@@ -1595,6 +1650,27 @@ impl AppBuilder {
         store: Arc<dyn oneai_core::traits::SessionEventStore>,
     ) -> Self {
         self.session_event_store = Some(store);
+        self
+    }
+
+    /// Inject an explicit `HostAllowlistStore` (MVS3-B storage
+    /// externalization), overriding the sqlite/InMemory auto-selection at
+    /// build time. Use this for the shared cloud Postgres backend
+    /// (`oneai_persistence::PgHostAllowlist`, feature `postgres`) — the CLI
+    /// selects it at runtime when `ONEAI_PG_DSN` is set, so hosts admitted in
+    /// one session container are honoured by every other container sharing
+    /// the DB. The store is still wrapped in `SeededHostAllowlist` (the
+    /// package-registry seed pre-approval is backend-independent).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let store = PgHostAllowlist::connect(&dsn).await?;
+    /// let app = AppBuilder::new()
+    ///     .host_allowlist_store(Arc::new(store))  // ← wins over sqlite/InMemory
+    ///     .build()?;
+    /// ```
+    pub fn host_allowlist_store(mut self, store: Arc<dyn oneai_tool::HostAllowlistStore>) -> Self {
+        self.host_allowlist_store_override = Some(store);
         self
     }
 
@@ -2113,7 +2189,14 @@ impl AppBuilder {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-            let allowlist = if self.network_proxy_enabled {
+            let allowlist = if let Some(override_store) = &self.host_allowlist_store_override {
+                // MVS3-B — explicit backend injected via
+                // `host_allowlist_store(...)` (e.g. `PgHostAllowlist` for the
+                // shared cloud Postgres: hosts admitted in one container are
+                // honoured by all). Still Seeded-wrapped like every other path.
+                std::sync::Arc::new(SeededHostAllowlist::new(override_store.clone()))
+                    as std::sync::Arc<dyn oneai_tool::HostAllowlistStore>
+            } else if self.network_proxy_enabled {
                 // #28 Stage 6 — when sqlite_persistence is configured, the host
                 // allow/deny store is the durable `SqliteHostAllowlist` (shares
                 // `~/.oneai/oneai.db`); a host admitted/blocked in one session
@@ -2855,6 +2938,7 @@ impl AppBuilder {
             a2a_server_host,
             data_layer_reloader: Some(data_layer_reloader),
             sqlite_store: self.sqlite_store,
+            memory_persistence: self.memory_persistence_override,
             embedding_service,
             usage_tracker,
             rate_limiter,
@@ -3034,7 +3118,15 @@ pub struct App {
     /// `build()`.
     pub data_layer_reloader: Option<Arc<dyn oneai_core::traits::DataLayerReloader>>,
     /// SQLite session store (for memory + conversation persistence).
+    /// Stays populated even when [`memory_persistence`](Self::memory_persistence)
+    /// is set — feedback / thinking-effort remain local-SQLite paths.
     pub sqlite_store: Option<Arc<SqliteSessionStore>>,
+    /// Explicit memory-persistence backend (MVS3-B storage externalization,
+    /// e.g. `PgMemoryStore` for the shared cloud Postgres). When `Some`, the
+    /// conversation-surface methods below route through it INSTEAD of
+    /// `sqlite_store` — the same backend the MemoryManager saves turns to, so
+    /// `session/list|load|rename|archive|delete` see Pg-managed conversations.
+    pub memory_persistence: Option<Arc<dyn MemoryPersistence>>,
     /// Embedding service (optional — for auto-embedding RAG and memory search).
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Usage tracker (optional — for tracking LLM inference token usage).
@@ -3117,19 +3209,38 @@ impl App {
     /// minted the id for a brand-new chat — subsequent `run_agent` calls will
     /// auto-save it under the same id).
     pub async fn create_session_with_id(&self, id: &str) -> AppSession {
-        let conversation = match &self.sqlite_store {
-            Some(store) => match store.load_conversation(id).await {
-                Ok(Some(conv)) => conv,
-                _ => Conversation::with_id(id.to_string()),
-            },
-            None => Conversation::with_id(id.to_string()),
+        // MVS3-B: an explicit memory-persistence backend (e.g. shared Pg)
+        // owns the conversation surface — resume must read the SAME store
+        // the MemoryManager saves turns to.
+        let loaded = if let Some(store) = &self.memory_persistence {
+            store.load_conversation(id).await
+        } else {
+            match &self.sqlite_store {
+                Some(store) => store.load_conversation(id).await,
+                None => Ok(None),
+            }
+        };
+        let conversation = match loaded {
+            Ok(Some(conv)) => conv,
+            _ => Conversation::with_id(id.to_string()),
         };
         AppSession::new_with_conversation(self, conversation)
+    }
+
+    /// Whether conversations persist through ANY durable backend (explicit
+    /// `memory_persistence` override or the local SQLite store). Gates the
+    /// per-turn auto-save in `AppSession` — without it, a Pg-only setup (no
+    /// `sqlite_persistence()`) would never save.
+    pub fn conversation_persistence_enabled(&self) -> bool {
+        self.memory_persistence.is_some() || self.sqlite_store.is_some()
     }
 
     /// List all saved conversations (metadata only — id, timestamps, message
     /// count). Returns an empty vec when SQLite persistence is not enabled.
     pub async fn list_conversations(&self) -> Vec<SessionInfo> {
+        if let Some(store) = &self.memory_persistence {
+            return store.list_conversations().await.unwrap_or_default();
+        }
         match &self.sqlite_store {
             Some(store) => store.list_conversations().await.unwrap_or_default(),
             None => Vec::new(),
@@ -3139,6 +3250,9 @@ impl App {
     /// Delete a saved conversation (and its STM entries) by id. No-op (Ok)
     /// when SQLite persistence is not enabled.
     pub async fn delete_conversation(&self, id: &str) -> Result<()> {
+        if let Some(store) = &self.memory_persistence {
+            return store.delete_conversation(id).await;
+        }
         match &self.sqlite_store {
             Some(store) => store.delete_conversation(id).await,
             None => Ok(()),
@@ -3151,6 +3265,9 @@ impl App {
     /// turn). An empty/whitespace title is a no-op. No-op (Ok) when SQLite
     /// persistence is not enabled; errors when no saved session matches `id`.
     pub async fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
+        if let Some(store) = &self.memory_persistence {
+            return store.rename_conversation(id, title).await;
+        }
         match &self.sqlite_store {
             Some(store) => store.rename_conversation(id, title).await,
             None => Ok(()),
@@ -3161,6 +3278,9 @@ impl App {
     /// fold into a collapsed sidebar group. No-op (Ok) when SQLite persistence
     /// is not enabled; errors when no saved session matches `id`.
     pub async fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        if let Some(store) = &self.memory_persistence {
+            return store.set_conversation_archived(id, archived).await;
+        }
         match &self.sqlite_store {
             Some(store) => store.set_conversation_archived(id, archived).await,
             None => Ok(()),

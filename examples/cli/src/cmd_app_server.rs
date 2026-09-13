@@ -1324,6 +1324,11 @@ pub(crate) async fn build_engine_server(
     } else {
         builder = builder.sqlite_persistence();
     }
+    // Memory/usage/host-allowlist backends (MVS3-B): `ONEAI_PG_DSN` (injected
+    // by the cloud orchestrator via passthrough_env) moves them to the shared
+    // Postgres; SQLite stays wired for feedback/thinking-effort. The returned
+    // RPC handle backs `host/*` when Pg is selected. See crate::pg_backends.
+    let (mut builder, pg_host_allowlist_rpc) = crate::pg_backends::apply_pg_backends(builder).await;
     // Working-state backend (MVS3): file root is always set (session-event
     // store + curator derive from it); `ONEAI_PG_DSN` (injected by the cloud
     // orchestrator via passthrough_env) overrides the store with the shared
@@ -1373,12 +1378,17 @@ pub(crate) async fn build_engine_server(
     // needed. When sqlite isn't configured the proxy runs an in-memory
     // allowlist (lost on exit, re-prompts next session), so the RPC returns
     // empty / no-ops (honest degradation — there's nothing durable to list).
-    let host_allowlist_rpc: oneai_app_server::SharedHostAllowlistRpc =
-        Arc::new(AppHostAllowlistRpc {
-            store: app
-                .sqlite_store
-                .as_ref()
-                .map(|s| oneai_persistence::SqliteHostAllowlist::from_store(s.as_ref())),
+    // MVS3-B: when `ONEAI_PG_DSN` selected the shared Pg backend, the RPC
+    // handle wraps the SAME `Arc<PgHostAllowlist>` injected into the builder
+    // (host admitted in one container is listed/honoured by all).
+    let host_allowlist_rpc: oneai_app_server::SharedHostAllowlistRpc = pg_host_allowlist_rpc
+        .unwrap_or_else(|| {
+            Arc::new(AppHostAllowlistRpc {
+                store: app
+                    .sqlite_store
+                    .as_ref()
+                    .map(|s| oneai_persistence::SqliteHostAllowlist::from_store(s.as_ref())),
+            })
         });
     let probe: SharedAppProbe = Arc::new(AppProbeImpl {
         app: app.clone(),

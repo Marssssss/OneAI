@@ -13,7 +13,6 @@ use oneai_core::{ContentBlock, ContextManager, Conversation, MemoryEntry, Messag
 
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
-use oneai_persistence::SqliteSessionStore;
 use oneai_rag::{assemble_context, DocumentIndex};
 use oneai_tool::ToolExecutor;
 use oneai_trace::{EventKind, SpanKind, SpanStatus, TraceContext};
@@ -303,8 +302,11 @@ struct AppResources {
     /// TUI can set it between runs and the freshly-built AgentLoop reads it.
     active_skill: Arc<tokio::sync::RwLock<Option<String>>>,
     domain_pack: crate::builder::SharedDomainPack,
-    /// SQLite session store (for memory + conversation persistence).
-    sqlite_store: Option<Arc<SqliteSessionStore>>,
+    /// Whether conversations persist through ANY durable backend (local
+    /// SQLite or an explicit MVS3-B `memory_persistence` override, e.g.
+    /// shared Pg) — captured from `App::conversation_persistence_enabled()`
+    /// at session creation. Gates the per-turn/compact auto-save.
+    conversation_persistence: bool,
     /// Usage tracker — propagated into the AgentLoop so the loop records per-call
     /// token usage. Without this the usage axis (api_calls/tokens) stays at 0.
     usage_tracker: Option<Arc<dyn oneai_core::UsageTracker>>,
@@ -420,7 +422,7 @@ impl AppSession {
                 skill_registry: app.skill_registry.clone(),
                 active_skill: app.active_skill.clone(),
                 domain_pack: app.domain_pack.clone(),
-                sqlite_store: app.sqlite_store.clone(),
+                conversation_persistence: app.conversation_persistence_enabled(),
                 usage_tracker: app.usage_tracker.clone(),
                 rate_limiter: app.rate_limiter.clone(),
                 circuit_breaker: app.circuit_breaker.clone(),
@@ -1713,10 +1715,11 @@ impl AppSession {
         // Merge the loop's conversation back into the session
         self.conversation = result.conversation.clone();
 
-        // ─── Auto-save session to SQLite ──────────────────────────────
-        // If SQLite persistence is enabled, save the conversation and STM
+        // ─── Auto-save session to the durable store ───────────────────
+        // If conversation persistence is enabled (local SQLite or an explicit
+        // MVS3-B backend, e.g. shared Pg), save the conversation and STM
         // after each agent run. This enables session resume on restart.
-        if let Some(_sqlite) = &self.app.sqlite_store {
+        if self.app.conversation_persistence {
             if let Err(e) = self
                 .app
                 .memory_manager
@@ -1912,7 +1915,7 @@ impl AppSession {
         self.conversation = result.compressed_conversation;
 
         // Persist the compacted conversation, mirroring run_agent's auto-save.
-        if self.app.sqlite_store.is_some() {
+        if self.app.conversation_persistence {
             if let Err(e) = self
                 .app
                 .memory_manager

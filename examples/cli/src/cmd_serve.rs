@@ -171,6 +171,10 @@ pub fn cmd_serve(
             builder = builder.user_id(uid);
         }
         builder = builder.sqlite_persistence();
+        // Memory/usage/host-allowlist backend selection (MVS3-B): shared
+        // Postgres when ONEAI_PG_DSN is set — see crate::pg_backends.
+        let (b, _) = crate::pg_backends::apply_pg_backends(builder).await;
+        builder = b;
         // Working-state backend selection (MVS3): file root by default,
         // shared Postgres when ONEAI_PG_DSN is set — see crate::working_state.
         builder = crate::working_state::apply_working_state(builder, "./.oneai").await;

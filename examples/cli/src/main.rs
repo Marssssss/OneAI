@@ -99,6 +99,7 @@ mod cmd_wasm;
 mod cmd_web;
 mod cmd_workflow;
 mod config;
+mod pg_backends;
 mod tui;
 mod working_state;
 

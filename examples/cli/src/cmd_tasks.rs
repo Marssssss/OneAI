@@ -185,6 +185,9 @@ pub fn cmd_tasks_continue(
             .generation_config(config.generation.clone())
             .embedding_config(config.embedding.clone())
             .sqlite_persistence();
+        // Memory/usage/host-allowlist backend selection (MVS3-B): shared
+        // Postgres when ONEAI_PG_DSN is set — see crate::pg_backends.
+        let (builder, _) = crate::pg_backends::apply_pg_backends(builder).await;
         // Working-state backend selection (MVS3) — shared Pg when
         // ONEAI_PG_DSN is set, else the file store at root_path.
         let mut builder =
