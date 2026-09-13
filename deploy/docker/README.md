@@ -272,3 +272,85 @@ ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
 # pg_usage_tracker   8 测：镜像 SqliteUsageTracker + is_estimated roundtrip
 # pg_host_allowlist  8 测：镜像 SqliteHostAllowlist（互斥/重开存活/list·remove）
 ```
+
+---
+
+# MVS3-C 收尾：session-events/feedback Pg + 深度休眠卷归档 + 瘦身/预热（2026-09-13）
+
+存储外化收口（trajectory 事件日志 + per-message feedback 进共享 Pg）；编排器
+二级深度休眠（冷会话卷归档后删容器删卷）；云镜像去 ONNX 链 + web dist shiki
+裁剪 + 引擎启动预热。
+
+## 16. 镜像瘦身（feature 组合变化）
+
+```bash
+# 云镜像（MVS3-C 起）：--no-default-features 关掉 oneai-cli 默认的
+# oneai-rag/fastembed —— ort-sys/libonnxruntime 整条静态链不进镜像；
+# 嵌入退化到 API provider（OPENAI/VOYAGE/ONEAI_EMBEDDING_* / Ollama）或
+# 关键词召回；配置显式选 fastembed 时引擎响亮告警并优雅降级。
+docker build -f deploy/docker/Dockerfile -t oneai-engine:mvs3c .
+# 端侧宿主二进制不受影响（default feature 含 fastembed，行为与既往一致）：
+cargo build -p oneai-cli --features postgres
+```
+
+- apt 不再装 bubblewrap（R4 已证容器内不可用；引擎 `is_available` 运行期
+  探测自动落 RegexBackend，装了也选不中）。
+- web dist 由 shiki 细粒度打包（12 语言 + 2 主题）从 27MB/627 文件缩到
+  ~7MB/5 文件；镜像 COPY 前先 `cd platforms/web && npm run build`。
+- 启动预热：引擎在监听 bind 前完成 `warm_model_context`（容器日志
+  `prewarm: model context ready`；30s 超时兜底不阻塞健康化）——编排器
+  TCP 探活通过即引擎就绪。
+
+## 17. 深度休眠卷归档（二级休眠）
+
+```toml
+# ~/.oneai/orchestrator.toml（或 CLI --deep-archive-timeout/--archive-dir）
+idle_timeout_secs = 1800          # 一级：docker stop，卷保留本地，秒级恢复
+deep_archive_timeout_secs = 86400 # 二级：Hibernating 再超此时长 → 归档+删卷删容器
+archive_dir = "/srv/oneai-archive"  # 卷归档存储根（可挂 NFS/云盘；S3 留 MVS4）
+```
+
+- 归档/恢复经一次性 `alpine:3.20` helper 容器 tar czf/xzf（离线环境须预拉
+  该镜像）；布局 `<archive_dir>/<session_id>/<volume>.tar.gz + manifest.json`。
+- **`archive_dir` 必须对 docker daemon 可见**（bind-mount 源）：Linux 宿主
+  任意路径；colima/Docker Desktop 的 VM 只挂载 `$HOME` 与 `/tmp`——macOS 的
+  `$TMPDIR`（`/var/folders/…`）**不可用**（daemon 以自动创建的空目录顶替
+  bind 源，tar 产物落进 VM 侧，宿主永远看不到；验收脚本对此有 canary 前置
+  检查）。导出 argv 在容器内 `mkdir -p` 会话子目录，不依赖宿主目录可见性。
+- **红线**：归档确认成功才 `destroy(remove_volumes=true)`；失败保持
+  Hibernating 卷不动、`last_error` 记诊断、下轮 sweep 重试。
+- resume 检测 `archived` 标记 → 恢复卷 → spawn → Running 后清标记删归档；
+  `oneai orchestrator list` 显示 `deep-archived (N volume(s), <时间>)`。
+- 所有权注意：tar 在 helper 容器内以 root 写盘——Linux 宿主非 root 编排器
+  可能无法 chmod/删除归档文件（导出后尽力 chmod 644）。启用深度归档时请以
+  root 跑编排器，或把 `archive_dir` 指到做 uid 映射的共享挂载（colima/macOS
+  与 NFS squash 挂载均可）。
+
+## 18. MVS3-C 全量验收（一键）
+
+```bash
+./deploy/docker/mvs3c_run.sh   # 构建 mvs3c 镜像 + 宿主二进制 + 跑 mvs3c_verify.mjs
+```
+
+C 轮验收矩阵（A-H）：建会话 → 引擎日志证**六后端**全选 Pg（+session-events/
++feedback）且出现 prewarm 行 → 真实 turn 记暗号 + `feedback/submit`×2 落
+`message_feedback_pg` + `session/trajectory` 落 `session_events_pg`（psql
+地面真值）→ 镜像尺寸断言 → **深度归档全生命周期**（第二编排器
+idle=5s/deep=5s：写 proof 文件 → 断连自动 Hibernating → 自动 deep-archive
+（容器+两卷从 docker 消失、tar.gz+manifest 落盘、status.archived 带
+manifest）→ WS 重连自动 restore+spawn → `docker exec cat` proof 逐字存活 →
+标记清除+归档删除 → turn 答出归档前暗号）→ **归档失败红线**（archive_dir
+置只读：保持 Hibernating 卷一个不少 + last_error 诊断；恢复可写下轮归档成功
+再 resume）→ S1 kill+删光两卷 → 仅凭 Pg 恢复会话列表 + feedback/trajectory
+跨卷死亡存活 + turn 答出暗号 → DELETE 全部零残留。
+
+## 19. Pg 集成测试（C 轮新增两个 store）
+
+```bash
+ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
+  cargo test -p oneai-persistence --features postgres \
+  --test pg_session_event_store --test pg_feedback_store -- --ignored
+# pg_session_event_store 5 测：字节级 round-trip / 会话隔离 / 空载 /
+#                        重连存活 / 10×5 并发零丢失（BIGSERIAL 全序）
+# pg_feedback_store      4 测：round-trip+scoping / 空载 / 重连存活 / 8 并发
+```

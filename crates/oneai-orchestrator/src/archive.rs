@@ -114,17 +114,22 @@ pub struct DeepArchive {
 // ─── Pure argv builders (no IO, golden-tested like docker.rs) ───────────────
 
 /// `docker run --rm -v <vol>:/data:ro -v <root>:/archive <helper>
-///  tar czf /archive/<rel_file> -C /data .`
+///  sh -c "mkdir -p /archive/<parent> && tar czf /archive/<rel_file> -C /data ."`
 ///
 /// `:ro` on the data mount — an export must never mutate the source volume.
-/// `<root>` is the store root bind-mounted as `/archive`, so the tar lands
-/// inside the container-visible path of `<rel_file>`.
+/// `<root>` is the store root bind-mounted as `/archive`. The session
+/// subdirectory is (re)created INSIDE the helper container: when the docker
+/// daemon runs in a VM (colima/Docker Desktop), a host-side `create_dir_all`
+/// is not necessarily visible through the bind mount, and busybox tar refuses
+/// to create leading directories of the output path (MVS3-C acceptance caught
+/// this: `tar: can't open '/archive/<sid>/…'`).
 pub fn build_volume_export_argv(
     docker_bin: &str,
     volume_name: &str,
     store_root: &Path,
     rel_file: &str,
 ) -> Vec<String> {
+    let parent = rel_file.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
     vec![
         docker_bin.into(),
         "run".into(),
@@ -134,12 +139,9 @@ pub fn build_volume_export_argv(
         "-v".into(),
         format!("{}:/archive", store_root.display()),
         ARCHIVE_HELPER_IMAGE.into(),
-        "tar".into(),
-        "czf".into(),
-        format!("/archive/{rel_file}"),
-        "-C".into(),
-        "/data".into(),
-        ".".into(),
+        "sh".into(),
+        "-c".into(),
+        format!("mkdir -p /archive/{parent} && tar czf /archive/{rel_file} -C /data ."),
     ]
 }
 
@@ -360,12 +362,9 @@ mod tests {
                 "-v",
                 "/srv/oneai-archive:/archive",
                 "alpine:3.20",
-                "tar",
-                "czf",
-                "/archive/s1/oneai-orch-s1-state.tar.gz",
-                "-C",
-                "/data",
-                ".",
+                "sh",
+                "-c",
+                "mkdir -p /archive/s1 && tar czf /archive/s1/oneai-orch-s1-state.tar.gz -C /data .",
             ]
         );
     }

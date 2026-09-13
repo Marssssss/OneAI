@@ -235,7 +235,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 验收：单宿主机 docker，10 个并发会话容器稳定跑；编排器重启后会话全部
 重挂；杀容器后前端重连自动 Resuming。
 
-### MVS3 —— 存储外部化 + 规模化恢复（🔶 进行中：A 轮 PgWorkingStateStore ✅ 2026-09-12；B 轮 Memory/Usage/HostAllowlist ✅ 2026-09-13）
+### MVS3 —— 存储外部化 + 规模化恢复（🔶 进行中：A 轮 PgWorkingStateStore ✅ 2026-09-12；B 轮 Memory/Usage/HostAllowlist ✅ 2026-09-13；C 轮 SessionEvent/Feedback/卷归档/瘦身 ✅ 2026-09-13）
 
 - ✅ `PgWorkingStateStore`（**优先项已交付**：事件日志是崩溃恢复的命脉，且
   read-modify-write 的 `tasks.index.json` 在多写者下需要事务化）——
@@ -273,8 +273,34 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 - ✅ `AppBuilder` 补 setter 缺口：`host_allowlist_store(...)`（override 优先，
   Seeded 包裹恒保留）、通用 `memory_persistence(...)`（无条件重建
   MemoryManager，显式 override 语义对齐 `working_state_store()`）。
-- ⏳ 休眠卷归档对象存储（冷会话成本）。
-- ⏳ 容器镜像瘦身 + 启动预热（引擎 warm-up 已有 `warm_model_context` 钩子）。
+- ✅ `PgSessionEventStore` + `PgFeedbackStore`（**C 轮已交付**，2026-09-13）——
+  `oneai-persistence/src/pg_{session_event_store,feedback_store}.rs`（锁 key
+  base+4/+5），存储外化最后两块：trajectory 事件日志（`session/trajectory`
+  RPC + web 泳道时间轴）与 per-message feedback（`feedback/*` RPC）跨容器/
+  跨卷死亡存活。事件 `line` 列用 TEXT 而非 JSONB——trait 契约是 opaque
+  string，TEXT 保证字节级 round-trip；feedback 走「固有 API + CLI
+  `PgFeedbackStoreRpc` adapter」（trait 在 app-server，复刻
+  `PgHostAllowlistRpc` 先例）。`apply_pg_backends` 扩三元组（7 调用点）。
+  同轮：`cmd_session list/resume/delete/info/export-hf` + `cmd_memory
+  search/list` 从硬连 SQLite 改走 `session_backend::open_memory_backend()`
+  （Pg 模式下云会话对管理命令可见）。
+- ✅ 休眠卷归档（**C 轮已交付**，2026-09-13）——编排器二级深度休眠：
+  `oneai-orchestrator/src/archive.rs`（`VolumeArchiveStore` trait +
+  `LocalDirArchiveStore`：`docker run --rm alpine:3.20 tar` 导出/导入卷到
+  `archive_dir`，零新依赖；S3 留 MVS4 按 trait 加）。`deep_archive_timeout_secs`
+  （0=禁用）超时后：归档确认成功 → CAS claim（`PersistedEntry.archived`
+  标记字段，**不加 FSM 状态**）→ `destroy(remove_volumes=true)`；resume 检测
+  标记 → restore 卷 → spawn → Running 后清标记删归档。红线：归档失败绝不
+  destroy，会话保持 Hibernating 卷不动、下轮重试。
+- ✅ 容器镜像瘦身 + 启动预热（**C 轮已交付**，2026-09-13）——①`oneai-rag`
+  的 fastembed/ort 可选化（feature `fastembed` 默认关；云镜像
+  `--no-default-features --features oneai-cli/postgres` 构建，整条 ONNX
+  静态链不进镜像；端侧 CLI default 保留，行为零变化；feature 关时显式配置
+  fastembed → 响亮告警 + 关键词召回降级）；②web dist shiki 细粒度打包
+  （`shiki/core` + 显式 12 语言 + 2 主题，dist 27MB/627 文件 → ~7MB/5 文件，
+  清单外语言维持 plain-`<pre>` 兜底）；③Dockerfile 去 bubblewrap（R4 已证
+  容器内不可用）；④启动预热：`build_engine_server` 在监听 bind 前调
+  `warm_model_context`（30s 超时兜底）——编排器 TCP 探活通过 = 引擎就绪。
 
 ### MVS4 —— 生产化
 
@@ -293,10 +319,10 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 |---|---|---|
 | `MemoryPersistence`（core/traits.rs:1332） | `SqliteSessionStore` | ✅ `PgMemoryStore`（B 轮：单表族 `_pg` 后缀而非 4 子 store——trait 是单一 17 方法接口，拆子 store 收益存疑，暂不拆；pgvector 服务端 KNN 已交付） |
 | `WorkingStateStore`（core/traits.rs:763） | `FileWorkingStateStore`、`NoTaskStore` | ✅ `PgWorkingStateStore`（事件表 + brief 表事务化，feature `postgres`）——最优先项已交付 |
-| `SessionEventStore` | `FileSessionEventStore` | ⏳ Pg 或对象存储 append-only |
+| `SessionEventStore` | `FileSessionEventStore` | ✅ `PgSessionEventStore`（C 轮；append-only BIGSERIAL，line 列 TEXT 保字节级 round-trip） |
 | `HostAllowlistStore`（core/traits.rs:703） | Sqlite / InMemory / Seeded | ✅ `PgHostAllowlist`（B 轮；Seeded 装饰器保留在 builder 层） |
 | `UsageTracker` | `SqliteUsageTracker`（同样无池化） | ✅ `PgUsageTracker`（B 轮；批量 flush 未做——写路径本就每 call 一行，池化后延迟可接受） |
-| `FeedbackStore`/`ConversationStore`（app-server 层） | InMemory + App wrapper | ⏳ Pg 直连实现，去 App 中转（feedback 暂留本地 SQLite，有意分界） |
+| `FeedbackStore`/`ConversationStore`（app-server 层） | InMemory + App wrapper | ✅ `PgFeedbackStore`（C 轮；固有 API + CLI adapter——trait 在 app-server，persistence 不可依赖；ConversationStore 经 B 轮 `App.memory_persistence` 覆写已通 Pg） |
 | `StatePersistence`（checkpoint, traits.rs:730） | 无生产实现 | ⏳ 编排器休眠快照元数据可用 |
 
 ## 8. 安全与隔离
@@ -568,3 +594,78 @@ provider = 宿主 config.toml 只读 bind-mount（真实 LLM 调用）。验收�
 8. **验收环境坑**：colima 稀疏盘镜像不自动缩——`docker builder prune` 后
    须 `colima ssh -- sudo fstrim -av` 才归还宿主空间（本轮实测 27GB 回收，
    否则宿主链接器 `errno=28` 磁盘满）。
+
+---
+
+## 附录 E：MVS3-C 验收记录（PgSessionEventStore/PgFeedbackStore + 深度休眠卷归档 + 瘦身/预热，2026-09-13）
+
+环境：与附录 C/D 同机（macOS/arm64 + colima + docker）；镜像
+**`oneai-engine:mvs3c`**（`--no-default-features --features oneai-cli/postgres`
+重建，无 ONNX 链 + shiki 裁剪后 dist + 无 bubblewrap，**111MB** = B 轮 497MB
+的 22%）；Pg = `pgvector/pgvector:pg16`（oneai-pg-test，库 oneai_mvs3）；
+provider = 宿主 config.toml 只读 bind-mount（真实 LLM 调用）。验收驱动：
+`deploy/docker/mvs3c_verify.mjs`（一键 `./deploy/docker/mvs3c_run.sh`）——
+双编排器实例（主实例 idle=3600 + 归档实例 idle=5s/deep=5s/archive_dir=
+`$HOME` 下临时目录，colima 挂载约束见 E.2-9）。
+
+### E.1 验收矩阵（32/32 全过；首轮 20/23——E/F 三项败于归档目录对 docker VM 不可见，E.2-9/10 修复后复跑全绿）
+
+| 项 | 结果 |
+|---|---|
+| A. per-session env 注入 DSN 建会话 | ✅ 201 Running（263ms，编排器持续零改动） |
+| B. 引擎后端选择 | ✅ **六行齐全**（working-state/memory/usage/host-allowlist/**session-events/feedback**: Postgres (shared)）+ 无回退告警 + **`prewarm: model context ready`**（预热在探活通过前完成） |
+| C. feedback/trajectory 落 Pg | ✅ 真实 turn 答暗号（2.3s）；feedback/submit×2（up+note）→ `message_feedback_pg` 2 行、feedback/list 回读一致（含中文备注）；session/trajectory 返回 7 事件 = `session_events_pg` 7 行（psql 地面真值） |
+| D. 镜像瘦身 | ✅ **111MB**（阈值 400MB；B 轮 497MB——ONNX 静态链 + dist 27MB→7MB + bubblewrap 全去掉） |
+| E. 深度归档全生命周期 | ✅ proof 文件写入卷 → 断连 30s 自动 Hibernating → 42s 自动 deep-archive：容器+两卷从 docker 消失、2×tar.gz+manifest.json 落盘（state 1579B / ws 152B）、status.archived 带 manifest → WS 重连 0.5s restore+spawn Running → `docker exec cat` proof **逐字存活**（只可能来自 tar 恢复）→ 标记清除+归档目录删除 → session/load + 真实 turn 答出归档前暗号（Pg 记忆 + 卷恢复双通道） |
+| F. 归档失败红线 | ✅ archive_dir 置 0555 → sweep 导出失败（EACCES）：保持 Hibernating、**两卷一个不少**、last_error 带 `deep-archive failed` 诊断；恢复 0755 → 下轮 sweep 归档成功 → 重连 resume 再次恢复 Running |
+| G. kill+删光两卷仅凭 Pg 恢复 | ✅ 3.2s 重连 Running；session/list（message_count=2）、**feedback/list（👍+中文备注跨卷死亡存活）**、**session/trajectory（7 事件跨卷死亡存活）**全部只可能来自 Pg；真实 turn 答出暗号 |
+| H. 清理 | ✅ DELETE×2 → 容器/卷零残留（含归档会话的合成 handle 清卷路径）；验收行清库 |
+
+集成测试（开发侧）：`pg_session_event_store` 5 + `pg_feedback_store` 4（新增），
+既有 39 Pg 测试回归全绿（合计 48）；orchestrator 71 测（+9 深度归档集成
++5 archive 单测 +3 config +1 fsm legacy 兼容）；全 workspace **2476 tests** /
+fmt / clippy / deny 绿。web：vitest 88/88、playwright 13/14（trajectory.spec
+的 SVG circle 点击拦截失败为 HEAD 既有问题，与本轮无关，已复核）。
+
+### E.2 实现期发现与决策落地
+
+1. **事件 `line` 列用 TEXT 而非 JSONB**（对计划的偏离，有意）：trait 契约是
+   「opaque JSON string」，TEXT 保证字节级 round-trip（JSONB 会归一 key 序/
+   拒收非 JSON 行）；运营侧 JSON 查询日后可加 generated jsonb 列 + GIN，
+   零载荷迁移。
+2. **深度归档不加 FSM 状态**：`PersistedEntry.archived` 标记字段（serde
+   default，旧 sessions.json 兼容测试固化）；Hibernating+archived=深度归档。
+   恢复入口按**标记**而非状态分派——restore 失败落 Crashed 后标记仍在，
+   下次请求仍会先 restore（绝不落到「空卷 spawn」把会话洗白）。
+3. **红线序列**：archive 确认成功 → `cas_set_archived` claim（并发 sweep
+   单次归档，集成测试固化）→ `destroy(true)`。claim 后 destroy 失败可恢复
+   （resume 的 spawn 容忍残留容器，restore 的 tar 覆写残留卷）。
+4. **归档所有权**：tar 在 alpine helper 容器内以 root 写 bind-mount——Linux
+   宿主非 root 编排器可能删不掉归档文件（尽力 chmod 644 已做）；README §17
+   记录部署约束（root 或 uid 映射挂载）。
+5. **feedback trait 分层**：`FeedbackStore` trait 在 oneai-app-server，
+   persistence 不可依赖 → `PgFeedbackStore` 固有 API + CLI
+   `PgFeedbackStoreRpc` adapter（复刻 PgHostAllowlistRpc）；`apply_pg_backends`
+   扩三元组，7 调用点同步。
+6. **fastembed 可选化影响面**（实测）：真实代码仅 oneai-rag 三文件
+   （embedding.rs/provider_adapter.rs/lib.rs）；core 的
+   `EmbeddingProvider::FastEmbed` 枚举变体不 gate（配置序列化兼容），feature
+   关时 resolve_one 响亮告警 + Ok(None) 关键词降级。AUTO_CHAIN 常量对改
+   `auto_chain()` 函数（ort×fastembed 四组合免爆炸）。
+7. **预热位置**：`build_engine_server` 内 create_session 后、返回（=bind）前
+   ——web 与 app-server 两入口共用；30s 超时兜底，坏 provider 不阻塞健康化。
+8. **shiki 细粒度打包**：`shiki/core` + `@shikijs/langs/*` 显式 12 语言 +
+   `@shikijs/themes` 2 主题 + oniguruma engine；`createHighlighter('shiki')`
+   全量入口会把 ~60 语法全部 dynamic-import 进 dist（`langs:` 选项只控制
+   预载不控制 tree-shake）——这是 27MB 的真正来源。dist → ~7MB/5 文件。
+9. **archive_dir 对 docker VM 的可见性（首轮验收 E/F 三项失败的根因，环境
+   约束非产品缺陷）**：colima VM 只挂载 `$HOME` 与 `/tmp`，macOS `$TMPDIR`
+   （`/var/folders/…`）作 bind-mount 源时 daemon 以自动创建的空目录顶替——
+   宿主 `create_dir_all` 的会话子目录在容器内不可见，busybox tar 又不创建
+   输出路径的前导目录（`can't open '/archive/<sid>/…'`）。验收脚本改在
+   `$HOME` 下建归档目录 + **canary 前置检查**（宿主写文件→容器内必须读到，
+   不可见直接 exit 2）；README §17 记录部署约束。
+10. **导出 argv 容器内自建子目录**：`build_volume_export_argv` 从裸 tar 改
+    `sh -c "mkdir -p /archive/<sid> && tar czf …"`——消除对宿主目录经
+    bind-mount 可见性的依赖（VM 型 daemon 的挂载传播时序也一并覆盖）；
+    失败红线语义不变（mkdir/tar 任一失败 → Err → 卷不动）。
