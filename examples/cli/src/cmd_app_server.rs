@@ -1340,11 +1340,13 @@ pub(crate) async fn build_engine_server(
     } else {
         builder = builder.sqlite_persistence();
     }
-    // Memory/usage/host-allowlist backends (MVS3-B): `ONEAI_PG_DSN` (injected
-    // by the cloud orchestrator via passthrough_env) moves them to the shared
-    // Postgres; SQLite stays wired for feedback/thinking-effort. The returned
-    // RPC handle backs `host/*` when Pg is selected. See crate::pg_backends.
-    let (mut builder, pg_host_allowlist_rpc) = crate::pg_backends::apply_pg_backends(builder).await;
+    // Memory/usage/host-allowlist/session-events/feedback backends (MVS3-B +
+    // MVS3-C): `ONEAI_PG_DSN` (injected by the cloud orchestrator via
+    // passthrough_env) moves them to the shared Postgres; SQLite stays wired
+    // for thinking-effort. The returned RPC handles back `host/*` +
+    // `feedback/*` when Pg is selected. See crate::pg_backends.
+    let (mut builder, pg_host_allowlist_rpc, pg_feedback_rpc) =
+        crate::pg_backends::apply_pg_backends(builder).await;
     // Working-state backend (MVS3): file root is always set (session-event
     // store + curator derive from it); `ONEAI_PG_DSN` (injected by the cloud
     // orchestrator via passthrough_env) overrides the store with the shared
@@ -1391,8 +1393,11 @@ pub(crate) async fn build_engine_server(
 
     let conversation_store: oneai_app_server::SharedConversationStore =
         Arc::new(AppConversationStore { app: app.clone() });
+    // `feedback/*` JSON-RPC: the shared-Pg handle when ONEAI_PG_DSN selected
+    // it (MVS3-C — reactions survive volume loss, shared across containers),
+    // else the local SQLite path via App (unchanged端侧 behavior).
     let feedback_store: oneai_app_server::SharedFeedbackStore =
-        Arc::new(AppFeedbackStore { app: app.clone() });
+        pg_feedback_rpc.unwrap_or_else(|| Arc::new(AppFeedbackStore { app: app.clone() }));
     // Backs `host/*` JSON-RPC. Mirrors the durable store the engine's
     // `NetworkProxy` consults (builder.rs wires `SqliteHostAllowlist` from
     // the SAME `app.sqlite_store` when sqlite is configured), so a host

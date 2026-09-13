@@ -1,29 +1,25 @@
 //! CLI commands for session management — list, resume, delete, info, and
 //! HuggingFace-dataset export.
 //!
-//! These commands operate on the SQLite session store to manage
-//! saved conversations and enable session resume.
-//!
-//! TODO(MVS3 follow-up): the admin subcommands (list/resume/delete/info/
-//! export-hf) still read the local SQLite directly — when `ONEAI_PG_DSN`
-//! moves memory to the shared Postgres, Pg-managed sessions are NOT visible
-//! to them. Acceptable for now (admin tooling is rare in cloud mode; the
-//! `decay` App below already honors the Pg selection).
+//! These commands operate on the selected memory backend (MVS3-C: shared
+//! Postgres when `ONEAI_PG_DSN` + `postgres` feature, else the local SQLite
+//! session store — see `crate::session_backend`), so Pg-managed cloud
+//! sessions are visible to admin tooling exactly like local ones.
 
 use std::sync::OnceLock;
 
-use oneai_core::traits::MemoryPersistence;
 use oneai_core::{Message, TaskEvent};
-use oneai_persistence::SqliteSessionStore;
 use regex::Regex;
 use serde::Serialize;
 
 /// List all saved sessions.
 pub fn cmd_session_list() {
-    let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let sessions = rt.block_on(async { store.list_conversations().await });
+    let sessions = rt.block_on(async {
+        let store = crate::session_backend::open_memory_backend().await;
+        store.list_conversations().await
+    });
 
     match sessions {
         Ok(sessions) => {
@@ -57,10 +53,12 @@ pub fn cmd_session_list() {
 
 /// Resume a saved session (interactive mode with prior conversation history).
 pub fn cmd_session_resume(session_id: &str) {
-    let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let conversation = rt.block_on(async { store.load_conversation(session_id).await });
+    let conversation = rt.block_on(async {
+        let store = crate::session_backend::open_memory_backend().await;
+        store.load_conversation(session_id).await
+    });
 
     match conversation {
         Ok(Some(conv)) => {
@@ -106,10 +104,12 @@ pub fn cmd_session_resume(session_id: &str) {
 
 /// Delete a saved session and its associated STM entries.
 pub fn cmd_session_delete(session_id: &str) {
-    let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let result = rt.block_on(async { store.delete_conversation(session_id).await });
+    let result = rt.block_on(async {
+        let store = crate::session_backend::open_memory_backend().await;
+        store.delete_conversation(session_id).await
+    });
 
     match result {
         Ok(()) => {
@@ -123,19 +123,20 @@ pub fn cmd_session_delete(session_id: &str) {
 
 /// Show detailed info about a saved session.
 pub fn cmd_session_info(session_id: &str) {
-    let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    // Load conversation
-    let conversation = rt.block_on(async { store.load_conversation(session_id).await });
+    // Load conversation + STM entries off the selected backend.
+    let (conversation, stm_entries) = rt.block_on(async {
+        let store = crate::session_backend::open_memory_backend().await;
+        let conv = store.load_conversation(session_id).await;
+        let stm = store.load_stm(session_id).await;
+        (conv, stm)
+    });
 
     match conversation {
         Ok(Some(conv)) => {
             println!("Session: {}", session_id);
             println!("Messages: {}", conv.messages.len());
-
-            // Load STM entries
-            let stm_entries = rt.block_on(async { store.load_stm(session_id).await });
 
             match stm_entries {
                 Ok(entries) => {
@@ -205,7 +206,7 @@ pub async fn cmd_session_decay(
     // Memory/usage/host-allowlist backend selection (MVS3-B): decay must run
     // against the SAME store the sessions live in — shared Postgres when
     // ONEAI_PG_DSN is set. See crate::pg_backends.
-    let (builder, _) = crate::pg_backends::apply_pg_backends(builder).await;
+    let (builder, _, _) = crate::pg_backends::apply_pg_backends(builder).await;
     let app = builder
         .build()
         .await
@@ -314,10 +315,10 @@ pub fn cmd_session_export_hf(
     ws_root: &std::path::Path,
     redact_ips: bool,
 ) {
-    let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
     let (live, snapshots) = rt.block_on(async {
+        let store = crate::session_backend::open_memory_backend().await;
         let live = store.load_conversation(session_id).await;
         let snaps = store.load_discarded_snapshots(session_id).await;
         (live, snaps)

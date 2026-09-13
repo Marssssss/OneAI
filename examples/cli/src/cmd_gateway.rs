@@ -283,7 +283,7 @@ impl AppFactory for GatewayAppFactory {
 
         // Memory/usage/host-allowlist backend selection (MVS3-B): shared
         // Postgres when ONEAI_PG_DSN is set — see crate::pg_backends.
-        let (b, _) = crate::pg_backends::apply_pg_backends(builder).await;
+        let (b, _, _) = crate::pg_backends::apply_pg_backends(builder).await;
         builder = b;
 
         if let Some(mc) = &self.model_config {

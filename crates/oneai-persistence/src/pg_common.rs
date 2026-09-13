@@ -1,7 +1,8 @@
 //! Shared plumbing for the Postgres-backed stores (feature `postgres`, MVS3).
 //!
 //! Every Pg store (`PgWorkingStateStore`, `PgMemoryStore`, `PgUsageTracker`,
-//! `PgHostAllowlist`) uses the same recipe:
+//! `PgHostAllowlist`, `PgSessionEventStore`, `PgFeedbackStore`) uses the same
+//! recipe:
 //!
 //! 1. [`build_pool`] — deadpool-postgres, `NoTls`, `RecyclingMethod::Fast`,
 //!    `Runtime::Tokio1`, default size 8.
@@ -26,13 +27,17 @@
 //! | 1330538826 | PgMemoryStore        |
 //! | 1330538827 | PgUsageTracker       |
 //! | 1330538828 | PgHostAllowlist      |
+//! | 1330538829 | PgSessionEventStore  |
+//! | 1330538830 | PgFeedbackStore      |
+//!
+//! Next free key: base+6 (1330538831).
 
 use deadpool_postgres::tokio_postgres::NoTls;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use oneai_core::error::{OneAIError, Result};
 
 /// Advisory-lock key base ("ONEAI" = 0x4F4E4149). `PgWorkingStateStore` uses
-/// the base itself; later stores use base+1/+2/+3 (see the registry above).
+/// the base itself; later stores use base+1..+5 (see the registry above).
 pub(crate) const ADVISORY_LOCK_BASE: i64 = 1330538825;
 
 /// Build the standard OneAI Pg pool from a libpq connection string (e.g.

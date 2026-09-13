@@ -7,7 +7,10 @@
 //!   working-state substrate, replacing the old progressive-checkpoint manager).
 //! New (feature `postgres`): PgWorkingStateStore — the same event log in a
 //!   shared Postgres with a transactional brief index (MVS3 cloud storage
-//!   externalization; runtime-selected via `ONEAI_PG_DSN`).
+//!   externalization; runtime-selected via `ONEAI_PG_DSN`). MVS3-B added
+//!   PgMemoryStore/PgUsageTracker/PgHostAllowlist; MVS3-C added
+//!   PgSessionEventStore (trajectory log) + PgFeedbackStore (per-message
+//!   feedback) — storage externalization is complete.
 
 //! # Stability
 //!
@@ -25,9 +28,13 @@ pub mod host_allowlist;
 #[cfg(feature = "postgres")]
 mod pg_common;
 #[cfg(feature = "postgres")]
+pub mod pg_feedback_store;
+#[cfg(feature = "postgres")]
 pub mod pg_host_allowlist;
 #[cfg(feature = "postgres")]
 pub mod pg_memory_store;
+#[cfg(feature = "postgres")]
+pub mod pg_session_event_store;
 #[cfg(feature = "postgres")]
 pub mod pg_usage_tracker;
 #[cfg(feature = "postgres")]
@@ -42,9 +49,13 @@ pub mod working_state_store;
 pub use checkpoint::*;
 pub use host_allowlist::*;
 #[cfg(feature = "postgres")]
+pub use pg_feedback_store::PgFeedbackStore;
+#[cfg(feature = "postgres")]
 pub use pg_host_allowlist::PgHostAllowlist;
 #[cfg(feature = "postgres")]
 pub use pg_memory_store::PgMemoryStore;
+#[cfg(feature = "postgres")]
+pub use pg_session_event_store::PgSessionEventStore;
 #[cfg(feature = "postgres")]
 pub use pg_usage_tracker::PgUsageTracker;
 #[cfg(feature = "postgres")]

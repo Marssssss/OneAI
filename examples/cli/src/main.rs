@@ -100,6 +100,7 @@ mod cmd_web;
 mod cmd_workflow;
 mod config;
 mod pg_backends;
+mod session_backend;
 mod tui;
 mod working_state;
 
