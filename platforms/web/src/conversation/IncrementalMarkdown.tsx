@@ -24,7 +24,27 @@ import type { ElementType, ReactNode } from 'react'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfm } from 'micromark-extension-gfm'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
-import { createHighlighter, type Highlighter } from 'shiki'
+// Fine-grained shiki bundle (MVS3-C 镜像瘦身): the main 'shiki' entry
+// dynamic-imports ALL ~60 grammars + themes (multi-MB of unused chunks in
+// dist). `shiki/core` + explicit per-lang/per-theme imports tree-shake to
+// exactly the allowlist below; unlisted fence langs keep the existing
+// plain-<pre> fallback (see `supported` in CodeBlock).
+import { createHighlighterCore, type HighlighterCore } from 'shiki/core'
+import { createOnigurumaEngine } from 'shiki/engine/oniguruma'
+import langBash from '@shikijs/langs/bash'
+import langCss from '@shikijs/langs/css'
+import langDiff from '@shikijs/langs/diff'
+import langHtml from '@shikijs/langs/html'
+import langJavascript from '@shikijs/langs/javascript'
+import langJson from '@shikijs/langs/json'
+import langMarkdown from '@shikijs/langs/markdown'
+import langPython from '@shikijs/langs/python'
+import langRust from '@shikijs/langs/rust'
+import langToml from '@shikijs/langs/toml'
+import langTypescript from '@shikijs/langs/typescript'
+import langYaml from '@shikijs/langs/yaml'
+import themeGithubDark from '@shikijs/themes/github-dark'
+import themeGithubLight from '@shikijs/themes/github-light'
 
 // mdast is structurally typed here (a loose shape) so we don't take a hard
 // dependency on `@types/mdast`; the fields the walker reads are the only ones
@@ -41,15 +61,51 @@ interface MdNode {
   [k: string]: unknown
 }
 
-const SHIKI_LANGS = ['typescript', 'bash', 'json', 'python', 'rust', 'html', 'css', 'javascript'] as const
-const SHIKI_THEMES = ['github-dark', 'github-light'] as const
+// Allowlist = ids + registered aliases of the loaded grammars (aliases come
+// from each grammar's metadata, so 'ts'/'py'/'sh'/… resolve via codeToHtml).
+const SHIKI_LANGS = [
+  'typescript',
+  'ts',
+  'javascript',
+  'js',
+  'json',
+  'python',
+  'py',
+  'rust',
+  'html',
+  'css',
+  'bash',
+  'sh',
+  'shell',
+  'zsh',
+  'yaml',
+  'yml',
+  'toml',
+  'diff',
+  'markdown',
+  'md',
+] as const
 
-let highlighterPromise: Promise<Highlighter> | null = null
-function getHighlighter(): Promise<Highlighter> {
+let highlighterPromise: Promise<HighlighterCore> | null = null
+function getHighlighter(): Promise<HighlighterCore> {
   if (highlighterPromise === null) {
-    highlighterPromise = createHighlighter({
-      langs: [...SHIKI_LANGS],
-      themes: [...SHIKI_THEMES],
+    highlighterPromise = createHighlighterCore({
+      themes: [themeGithubDark, themeGithubLight],
+      langs: [
+        langTypescript,
+        langJavascript,
+        langJson,
+        langPython,
+        langRust,
+        langHtml,
+        langCss,
+        langBash,
+        langYaml,
+        langToml,
+        langDiff,
+        langMarkdown,
+      ],
+      engine: createOnigurumaEngine(import('shiki/wasm')),
     })
   }
   return highlighterPromise
@@ -220,7 +276,7 @@ function CodeBlock({
   theme: 'light' | 'dark'
 }): ReactNode {
   const [html, setHtml] = useState<string | null>(null)
-  const hlRef = useRef<Highlighter | null>(null)
+  const hlRef = useRef<HighlighterCore | null>(null)
   const supported = (SHIKI_LANGS as readonly string[]).includes(lang) ? lang : ''
 
   useEffect(() => {

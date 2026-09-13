@@ -1260,6 +1260,22 @@ pub(crate) struct EngineServer {
 /// for the startup banner). The pump is spawned detached — the tokio runtime
 /// owns it for the process lifetime (the returned `EngineServer` keeps the
 /// stores/probe, which hold `Arc<App>` clones, alive).
+/// MVS3-C 启动预热（`build_engine_server` 专用）：绑定监听前把模型上下文
+/// 探测做完（`AppSession::warm_model_context`，L2 probe + 缓存），让编排器
+/// 的 TCP 探活通过 == 引擎就绪。30s 超时兜底：provider 不可达/慢时不阻塞
+/// 启动（预热是纯优化，每轮路径本来就会再 warm）。
+pub(crate) async fn prewarm_session(session: &AppSession) {
+    const PREWARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    match tokio::time::timeout(PREWARM_TIMEOUT, session.warm_model_context()).await {
+        Ok(()) => eprintln!("   prewarm: model context ready"),
+        Err(_) => eprintln!(
+            "Warning: prewarm timed out after {}s — continuing without a warm model context \
+             (the per-turn path retries)",
+            PREWARM_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 pub(crate) async fn build_engine_server(
     config: &OneaiConfig,
     provider_config: Option<ModelConfig>,
@@ -1360,6 +1376,13 @@ pub(crate) async fn build_engine_server(
     // Builtin skills + skill tools are wired by `AppBuilder::build()` (#38).
 
     let session = app.create_session();
+
+    // MVS3-C 启动预热：模型上下文探测（L2）提前到监听端口 bind 之前——编排器
+    // 的 TCP 探活通过即代表引擎就绪，首轮 turn 不再付冷启动税。warm 本身
+    // best-effort（无 provider 时 no-op、探测失败静默落内置表）；30s 超时兜底
+    // 保证 provider 不可达时容器仍能健康化（每轮路径还会重试）。
+    prewarm_session(&session).await;
+
     let app = Arc::new(app);
     let bus = app
         .engine_bus
