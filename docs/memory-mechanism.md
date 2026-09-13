@@ -241,6 +241,22 @@ agent 的 `memory_search` 工具（`memory_tools.rs:66`）先走 archival 三因
 
 `AppBuilder::sqlite_persistence()` / `sqlite_persistence_at(path)`（`builder.rs:1319/1351`）一行开启；`embedding_service()`（`builder.rs:736`）接语义召回。`MemoryManager` 用 builder 方法按需组合：`new` / `with_embedding` / `with_compressor_and_reflection` / `with_persistence` / `with_all_features`（`manager.rs:99-247`）。
 
+### 8.1 持久化后端选择：SQLite vs 共享 Postgres（MVS3-B，2026-09-13）
+
+云端编排器形态（一会话一容器，`docs/cloud-orchestrator-design.md` §6）下，记忆/会话若困在容器卷里，删卷即失忆、跨容器无法共享。`PgMemoryStore`（`pg_memory_store.rs`，feature `postgres` 默认关）在同一 `MemoryPersistence` trait 下提供共享 Postgres 后端：
+
+| 维度 | `SqliteSessionStore` | `PgMemoryStore` |
+|---|---|---|
+| 选择方式 | 默认（`sqlite_persistence()`） | 运行期 `ONEAI_PG_DSN`（CLI 全入口，`examples/cli/src/pg_backends.rs`）；连接失败**响亮告警回退 SQLite** |
+| LTM 向量检索 | in-Rust brute-force cosine（embedding_json TEXT 全量拉回） | **pgvector 服务端精确 KNN**（`ORDER BY embedding <=> $1`；无维度 `vector` 列支持混合嵌入模型，`vector_dims` 过滤隔离异模型行）；pgvector 为**硬依赖**——服务器缺扩展则 connect 失败 |
+| 时间戳 | RFC3339 TEXT | TIMESTAMPTZ（chrono 直绑）；两后端**互斥**，无跨读 |
+| 并发 | WAL + busy_timeout | deadpool 池 + 事务（STM 清写原子换、rename 定向 UPDATE） |
+| 表名 | `conversations`/`stm_entries`/`ltm_entries`/`memories` | 同名 + `_pg` 后缀（防御性共存） |
+
+语义逐字镜像项：`save_conversation` 的 metadata 合并（rename/archive 覆写键不被 turn 尾回存冲掉）、discarded 快照 `{session_id}::discarded::{uuid}` 前缀约定与折叠计数（issue #14/#17）、facts `ON CONFLICT(user_id,subject,predicate)` upsert 版本递增（Mem0 不变量）。`search_ltm_keyword` 用 `ILIKE` 补齐 SQLite `LIKE` 的 ASCII 大小写不敏感语义。
+
+配套改动：trait 增补 `rename_conversation`/`set_conversation_archived` 默认方法（定向 metadata UPDATE 覆写，不重写消息 blob）；`AppBuilder::memory_persistence(Arc<dyn …>)` 注入后，`App` 的会话面（`session/list|load|rename|archive|delete` RPC 与 turn 尾自动落盘）与 `MemoryManager` 走**同一后端**。feedback / thinking-effort 仍留本地 SQLite（有意分界）。同 DSN 还选中 `PgUsageTracker`（补 `is_estimated` 真列）与 `PgHostAllowlist`（白名单跨容器共享）。
+
 ---
 
 ## 9. DomainPack 第 7 层 MemoryProfile：声明式记忆策略

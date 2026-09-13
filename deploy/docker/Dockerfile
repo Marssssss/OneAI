@@ -64,11 +64,14 @@ ENV NK_TARGET_NEONSDOT=0
 
 # 缓存挂载：cargo registry + target 跨构建复用（首次构建仍为全量，
 # fastembed/ort-sys 会在构建期下载 linux 版 libonnxruntime blob，需网络）。
-# --features postgres（MVS3 存储外部化）：编入 PgWorkingStateStore。运行期
+# --features postgres（MVS3 存储外部化）：编入 PgWorkingStateStore +
+# MVS3-B 的 PgMemoryStore(pgvector)/PgUsageTracker/PgHostAllowlist。运行期
 # 设 ONEAI_PG_DSN（编排器 orchestrator.toml 的 passthrough_env 注入；容器内
 # 访问宿主 Pg 用 host.docker.internal 而非 127.0.0.1）即把 working-state
-# 事件日志写进共享 Postgres（事务化 brief 索引，容器/卷全丢也能恢复未完成
-# 任务）；不设 DSN 则维持文件后端，行为与 MVS1/2 完全一致。
+# 事件日志、记忆/会话、用量、域名白名单全部写进共享 Postgres（容器/卷全丢
+# 也能恢复；白名单跨容器共享）；Pg 服务器须为 pgvector 镜像（memory 硬依赖
+# CREATE EXTENSION vector，缺失则该 store 响亮告警并单独回退 SQLite）。
+# 不设 DSN 则维持文件/SQLite 后端，行为与 MVS1/2 完全一致。
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release -p oneai-cli --features oneai-cli/postgres && \

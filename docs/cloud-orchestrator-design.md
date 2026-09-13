@@ -235,7 +235,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 验收：单宿主机 docker，10 个并发会话容器稳定跑；编排器重启后会话全部
 重挂；杀容器后前端重连自动 Resuming。
 
-### MVS3 —— 存储外部化 + 规模化恢复（🔶 进行中：PgWorkingStateStore ✅ 2026-09-12）
+### MVS3 —— 存储外部化 + 规模化恢复（🔶 进行中：A 轮 PgWorkingStateStore ✅ 2026-09-12；B 轮 Memory/Usage/HostAllowlist ✅ 2026-09-13）
 
 - ✅ `PgWorkingStateStore`（**优先项已交付**：事件日志是崩溃恢复的命脉，且
   read-modify-write 的 `tasks.index.json` 在多写者下需要事务化）——
@@ -248,15 +248,33 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
   + 并发 2 测）。**部署**：`~/.oneai/orchestrator.toml` 配
   `passthrough_env = ["ONEAI_PG_DSN"]`（编排器零代码改动；容器内访问宿主 Pg
   用 `host.docker.internal`）。机制细节见 `docs/working-state-mechanism.md` §14。
-- ⏳ `PgMemoryStore`（`MemoryPersistence` 最重，建议拆 conversation/stm/ltm/facts
-  四个子 store 分别选型；LTM 向量检索换 pgvector 替代 in-Rust brute-force
-  cosine，`sqlite_store.rs:776-845`）、`PgUsageTracker` / `PgHostAllowlist`
-  （小表顺手；DSN 复用 `ONEAI_PG_DSN`，池化模式照抄 PgWorkingStateStore）。
-- `AppBuilder` 补 setter 缺口：`host_allowlist_store(...)`、通用
-  `memory_persistence(...)`（当前只能经 `memory_manager()` 间接注入，
-  `builder.rs:635,2092-2105`）。
-- 休眠卷归档对象存储（冷会话成本）。
-- 容器镜像瘦身 + 启动预热（引擎 warm-up 已有 `warm_model_context` 钩子）。
+- ✅ `PgMemoryStore` + `PgUsageTracker` + `PgHostAllowlist`（**B 轮已交付**，
+  2026-09-13）——`oneai-persistence/src/pg_{memory_store,usage_tracker,host_allowlist}.rs`，
+  同 feature `postgres`、同 `ONEAI_PG_DSN` 选择、池化/advisory-lock/fail-fast
+  建表模式抽进 `pg_common.rs` 四 store 共用（锁 key 注册表见其模块文档；
+  `_pg` 后缀表与 SQLite 表防御性共存）。要点：
+  - **pgvector 硬依赖**（用户决策）：LTM 向量检索换服务端精确 KNN
+    （`ORDER BY embedding <=> $1`，无维度 `vector` 列支持混合嵌入模型；
+    `vector_dims` 过滤隔离异模型行），替代 in-Rust brute-force cosine；
+    `CREATE EXTENSION vector` 失败 → connect 报错 → CLI 选择层响亮告警回退
+    SQLite（各 store 独立降级，互不拖累）。Pg 服务器须用 pgvector 镜像。
+  - `MemoryPersistence` 17 方法全实现（含 metadata 合并 rename 保护、
+    discarded 快照前缀约定、facts ON CONFLICT upsert 版本递增）；trait 增补
+    `rename_conversation`/`set_conversation_archived` 默认方法（core 侧加法
+    改动），SQLite/Pg 各自覆写为定向 metadata UPDATE（不重写消息 blob）。
+  - **App 会话面路由**：`App` 持 `memory_persistence` 覆写（builder setter
+    留存 Arc），`session/list|load|rename|archive|delete` RPC 与 turn 尾自动
+    落盘全走同一后端——否则 Pg 模式下 webUI 会话列表读本地 SQLite 恒空。
+    feedback / thinking-effort 仍留本地 SQLite（有意分界，见 pg_backends.rs）。
+  - `PgUsageTracker` 补 `is_estimated` 真列（SQLite 表缺，round-trip 丢旗标）。
+  - `PgHostAllowlist` 互斥语义事务化（admit 清 deny 行同 tx）；固有 CRUD 面
+    镜像 SQLite 版，web `host/*` RPC 经新 `PgHostAllowlistRpc` adapter 接同一
+    `Arc`（与引擎代理共池共表，跨容器共享白名单）。
+- ✅ `AppBuilder` 补 setter 缺口：`host_allowlist_store(...)`（override 优先，
+  Seeded 包裹恒保留）、通用 `memory_persistence(...)`（无条件重建
+  MemoryManager，显式 override 语义对齐 `working_state_store()`）。
+- ⏳ 休眠卷归档对象存储（冷会话成本）。
+- ⏳ 容器镜像瘦身 + 启动预热（引擎 warm-up 已有 `warm_model_context` 钩子）。
 
 ### MVS4 —— 生产化
 
@@ -273,13 +291,13 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 
 | Trait | 现有实现 | 云端缺口 |
 |---|---|---|
-| `MemoryPersistence`（core/traits.rs:1332） | 仅 `SqliteSessionStore` | `PgMemoryStore`（拆 4 子 store；pgvector） |
+| `MemoryPersistence`（core/traits.rs:1332） | `SqliteSessionStore` | ✅ `PgMemoryStore`（B 轮：单表族 `_pg` 后缀而非 4 子 store——trait 是单一 17 方法接口，拆子 store 收益存疑，暂不拆；pgvector 服务端 KNN 已交付） |
 | `WorkingStateStore`（core/traits.rs:763） | `FileWorkingStateStore`、`NoTaskStore` | ✅ `PgWorkingStateStore`（事件表 + brief 表事务化，feature `postgres`）——最优先项已交付 |
-| `SessionEventStore` | `FileSessionEventStore` | Pg 或对象存储 append-only |
-| `HostAllowlistStore`（core/traits.rs:703） | Sqlite / InMemory / Seeded | `PgHostAllowlist`（保留 Seeded 装饰器） |
-| `UsageTracker` | `SqliteUsageTracker`（同样无池化） | `PgUsageTracker` + 批量 flush |
-| `FeedbackStore`/`ConversationStore`（app-server 层） | InMemory + App wrapper | Pg 直连实现，去 App 中转 |
-| `StatePersistence`（checkpoint, traits.rs:730） | 无生产实现 | 编排器休眠快照元数据可用 |
+| `SessionEventStore` | `FileSessionEventStore` | ⏳ Pg 或对象存储 append-only |
+| `HostAllowlistStore`（core/traits.rs:703） | Sqlite / InMemory / Seeded | ✅ `PgHostAllowlist`（B 轮；Seeded 装饰器保留在 builder 层） |
+| `UsageTracker` | `SqliteUsageTracker`（同样无池化） | ✅ `PgUsageTracker`（B 轮；批量 flush 未做——写路径本就每 call 一行，池化后延迟可接受） |
+| `FeedbackStore`/`ConversationStore`（app-server 层） | InMemory + App wrapper | ⏳ Pg 直连实现，去 App 中转（feedback 暂留本地 SQLite，有意分界） |
+| `StatePersistence`（checkpoint, traits.rs:730） | 无生产实现 | ⏳ 编排器休眠快照元数据可用 |
 
 ## 8. 安全与隔离
 
@@ -311,11 +329,11 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 
 | 层 | 改动 |
 |---|---|
-| 引擎（core/bus/agent/app） | **零改动**（N1/N2 的排除项）。例外：`oneai-tool` sandbox `is_available` 运行期探测（MVS1 产出的缺陷修复，与环境适配无关，任何 Linux 部署受益，见附录 A.3） |
+| 引擎（core/bus/agent/app） | **零改动**（N1/N2 的排除项）。例外：`oneai-tool` sandbox `is_available` 运行期探测（MVS1 产出的缺陷修复，与环境适配无关，任何 Linux 部署受益，见附录 A.3）；`oneai-core` `MemoryPersistence` B 轮**加法**增补 `rename_conversation`/`set_conversation_archived` 默认方法（会话元数据编辑进 trait，Pg/SQLite 各自定向 UPDATE 覆写——既有实现零破坏） |
 | `oneai-app-server` | 零改动（ws 监听、serve_web 均已存在） |
 | 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复） |
-| `oneai-persistence` | MVS3 加 Pg 后端（✅ `pg_working_state_store.rs` 新文件，未动现有；⏳ Memory/Usage/HostAllowlist） |
-| `oneai-app` builder | ✅ MVS3 加 `working_state_store(Arc<dyn …>)` 泛型注入；⏳ 补 2 个 setter（`host_allowlist_store`/`memory_persistence`） |
+| `oneai-persistence` | ✅ MVS3 加 Pg 后端（`pg_working_state_store.rs` + B 轮 `pg_memory_store.rs`/`pg_usage_tracker.rs`/`pg_host_allowlist.rs` + 共用 `pg_common.rs`，均为新文件；SQLite 侧仅 helper 提为 pub(crate) + trait 覆写委托） |
+| `oneai-app` builder | ✅ MVS3 加 `working_state_store(Arc<dyn …>)` 泛型注入；✅ B 轮补 2 setter（`host_allowlist_store`/`memory_persistence`）+ `App.memory_persistence` 会话面路由（list/load/rename/archive/delete + turn 尾自动落盘 gate） |
 | `oneai-a2a` / `oneai-scheduler` | MVS2 把 Bearer 三件套改指向 `oneai-http-auth`（消重复） |
 | CLI | `oneai orchestrator` 子命令（MVS2） |
 | 部署件 | Dockerfile（MVS1）、镜像流水线（MVS4） |
@@ -485,3 +503,68 @@ Pg = `postgres:16` 一次性容器（`-p 5432:5432`，库 `oneai_mvs3`）；prov
    ——同 task 并发写串行化（READ COMMITTED 下 brief 重导出必见全部已提交
    事件），不同 task 完全并行；集成测试 10 并发同 task append 零丢失、
    brief 与日志严格一致。
+
+---
+
+## 附录 D：MVS3-B 验收记录（PgMemoryStore/PgUsageTracker/PgHostAllowlist，2026-09-13）
+
+环境：与附录 C 同机（macOS/arm64 + colima + docker）；镜像
+`oneai-engine:mvs1` 用含 MVS3-B 代码的源码重建（497MB）；Pg =
+**`pgvector/pgvector:pg16`** 一次性容器（`-p 5432:5432`，库 `oneai_mvs3`；
+MVS3-B 起 pgvector 为 memory 硬依赖，`mvs3*_run.sh` 已加镜像守卫）；
+provider = 宿主 config.toml 只读 bind-mount（真实 LLM 调用）。验收驱动：
+`deploy/docker/mvs3b_verify.mjs`（一键 `./deploy/docker/mvs3b_run.sh`）。
+
+### D.1 验收矩阵（23/23 全过）
+
+| 项 | 结果 |
+|---|---|
+| A. per-session env 注入 DSN 建会话 | ✅ 2×201 Running（289ms，同 A 轮——编排器持续零改动） |
+| B. 引擎后端选择 | ✅ 容器日志**四行齐全**：`working-state/memory/usage/host-allowlist: Postgres (shared)`；无回退告警 |
+| C. 真实 turn + Pg 地面真值 | ✅ 固定会话 id 真实 LLM turn 复述暗号（2.0s）；psql 证 `conversations_pg` 落行、`usage_records_pg` 落真实 token；`session/list` 走 Pg 覆写路径列出会话；`session/rename` → `conversations_pg.title`+`metadata.title` 定向 UPDATE 同步 |
+| D. 白名单跨容器共享 | ✅ 容器1 `host/allow` → `host_allowlist_pg` 落行 → **容器2** `host/list` 直接可见（零卷共享，Pg 唯一真相源，77ms）；`host/deny` 同事务清 admit 行（互斥语义） |
+| E. **kill 容器 + 删光两卷** → 记忆跨容器死亡存活 | ✅ 3.2s 重连 Running；新容器本地 SQLite 零痕迹（地面真值）；`session/list` 仅凭 Pg 恢复会话；`session/load` 回放 + 真实 turn 逐字答出暗号（5.3s——**记忆只可能来自 Pg**）；usage 台账继续累计；C 阶段 rename 存活 |
+| F. 无 pgvector 优雅降级 | ✅ 宿主侧指向临时 `postgres:16`（无 pgvector，端口 5433）：`PgMemoryStore connect failed … extension "vector" is not available` 响亮告警 + 回退 SQLite memory；**其余三 store 照常选 Pg**（独立降级，互不拖累，2.3s） |
+| G. 清理 | ✅ DELETE×2 → 容器/卷零残留；验收行清库 |
+
+集成测试（开发侧）：39 测全绿——`pg_memory_store` 13（镜像 SqliteSessionStore
+单测 + pgvector KNN 相似度/维度隔离/空查询 + 并发 + 重连存活）、
+`pg_usage_tracker` 8（镜像 + `is_estimated` roundtrip）、`pg_host_allowlist` 8
+（镜像互斥/重开存活/list·remove）；`ONEAI_TEST_PG_DSN` env 门控 + `#[ignore]`。
+
+### D.2 实现期发现与决策落地
+
+1. **App 会话面路由缺口（实现期发现，计划外必修项）**：`App` 的
+   `list/rename/archive/delete/create_session_with_id`（即 webUI
+   `session/*` RPC 的全部落点）原**硬连 `sqlite_store` 具体类型**——Pg 记忆
+   模式下 turn 尾经 MemoryManager 落 Pg，而会话列表读本地 SQLite → 云端
+   webUI 列表恒空、resume/rename 全断。修复：`AppBuilder::memory_persistence`
+   留存 Arc → `App.memory_persistence` 覆写会话面五方法；turn 尾/compact 自动
+   落盘 gate 改 `conversation_persistence_enabled()`（sqlite OR 覆写）。
+2. **rename/archive 进 trait**：`MemoryPersistence` 加法增补
+   `rename_conversation`/`set_conversation_archived` 默认方法（泛型
+   load-modify-save），SQLite/Pg 各自覆写为**定向 metadata UPDATE**（不重写
+   消息 blob——避免与并发 turn 回存互踩；`SqliteSessionStore` 固有方法经
+   路径限定委托，无递归）。
+3. **pgvector 无维度 `vector` 列 + `vector_dims` 过滤**：混合嵌入模型共库
+   （维度异构）时 `<=>` 遇异维行会**报错**（非返回 0）——`WHERE
+   vector_dims(embedding) = vector_dims($1)` 先行过滤（WHERE 逐行先于
+   ORDER BY 求值，安全），语义对齐 SQLite 后端"维度不匹配 → 0 分 → 滤除"。
+   KNN 相似度 = `1.0 - (embedding <=> $1)`；`score > 0` 过滤与 NaN（零向量）
+   排尾行为均对齐 brute-force 版。
+4. **`UsageRecord` 是 `#[non_exhaustive]`**：crate 外不能结构体字面量构造
+   ——经 `with_timestamp`+`with_cache_tokens` 重建再字段赋值 `is_estimated`
+   （Pg 表补了 SQLite 缺的 `is_estimated` 真列，旗标不再 round-trip 丢失）。
+5. **`ILIKE` 补齐 `LIKE` 语义**：Postgres `LIKE` 大小写敏感而 SQLite `LIKE`
+   ASCII 不敏感——`search_ltm_keyword` 用 `ILIKE`（含 metadata_json::text）
+   恢复 parity。
+6. **advisory lock key 注册表**：四 store 各占一键
+   （1330538825/26/27/28，`pg_common.rs` 模块文档），冷启动 DDL 互不串行；
+   `CREATE EXTENSION vector` 在 memory store 锁内执行（扩展库级共享，锁已
+   串行化全部 DDL）。
+7. **验收脚本 F 轮竞态（首轮 22/23 的唯一失败项，非产品缺陷）**：等待循环
+   在 memory 告警出现瞬间杀进程，`usage/host-allowlist` 选择行还没打完——
+   改为等**整个启动选择序列**（告警+三行标记）齐活再杀。复跑 23/23。
+8. **验收环境坑**：colima 稀疏盘镜像不自动缩——`docker builder prune` 后
+   须 `colima ssh -- sudo fstrim -av` 才归还宿主空间（本轮实测 27GB 回收，
+   否则宿主链接器 `errno=28` 磁盘满）。

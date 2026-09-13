@@ -204,9 +204,13 @@ docker build -f deploy/docker/Dockerfile -t oneai-engine:mvs1 .
 
 ## 12. 起共享 Pg（验收/开发用一次性容器）
 
+**MVS3-B 起必须用 pgvector 镜像**：`PgMemoryStore` 硬依赖
+`CREATE EXTENSION vector`（LTM 服务端 KNN），普通 `postgres:16` 上 connect
+失败 → 引擎告警并回退 SQLite memory（其余三 store 不受影响，各自独立降级）。
+
 ```bash
 docker run -d --name oneai-pg-test -p 5432:5432 \
-  -e POSTGRES_PASSWORD=oneai -e POSTGRES_DB=oneai_test postgres:16
+  -e POSTGRES_PASSWORD=oneai -e POSTGRES_DB=oneai_test pgvector/pgvector:pg16
 docker exec oneai-pg-test psql -U postgres -c "CREATE DATABASE oneai_mvs3;"
 ```
 
@@ -226,26 +230,45 @@ passthrough_env = ["ONEAI_PG_DSN"]
 `{"env": {"ONEAI_PG_DSN": "postgres://…"}}`。
 
 引擎容器启动日志出现 `working-state: Postgres (shared)` 即选中 Pg；DSN 设了
-但不可用 → 响亮警告 + 诚实降级文件后端（不会静默分叉）。
+但不可用 → 响亮警告 + 诚实降级文件后端（不会静默分叉）。MVS3-B 三 store
+（memory/usage/host-allowlist）同理，各打一行选择日志、各自独立降级：
+`memory: Postgres (shared)` / `usage: Postgres (shared)` /
+`host-allowlist: Postgres (shared)`。
 
-## 14. MVS3 全量验收（一键）
+## 14. MVS3 全量验收（一键，两轮）
 
 ```bash
-./deploy/docker/mvs3_run.sh
-# 等价于：node deploy/docker/mvs3_verify.mjs --bin target/debug/oneai
+./deploy/docker/mvs3_run.sh    # A 轮：PgWorkingStateStore（任务恢复）
+./deploy/docker/mvs3b_run.sh   # B 轮：Memory/Usage/HostAllowlist（记忆恢复）
+# 等价于：node deploy/docker/mvs3_verify.mjs  --bin target/debug/oneai
+#         node deploy/docker/mvs3b_verify.mjs --bin target/debug/oneai
 ```
 
-验收矩阵（A-F）：per-session env 注入建会话 → 引擎日志证后端选择 → psql
+A 轮验收矩阵（A-F）：per-session env 注入建会话 → 引擎日志证后端选择 → psql
 种子未完成任务 + 容器内 `oneai tasks list` 真读 Pg → 新会话真实 turn 首轮
 surface 种子任务（引擎 `list_open_tasks` 走 Pg）→ **kill 容器 + 删光两个卷**
 → 重连自动 Resuming → 空卷新容器仍从 Pg 恢复未完成任务（MVS3 核心卖点）→
 DELETE 后容器/卷/种子行零残留。
+
+B 轮验收矩阵（A-G）：建会话 → 引擎日志证**四后端**全选 Pg → 固定会话 id 真实
+turn 记暗号 + psql 地面真值（conversations_pg/usage_records_pg 落行、
+session/list·session/rename 走 Pg）→ 容器1 `host/allow` 容器2 `host/list`
+可见（白名单跨容器共享）+ deny 互斥 → **kill 容器 + 删光两个卷** → 空卷新容器
+session/list·session/load 从 Pg 恢复会话，真实 turn 答出暗号（记忆跨容器死亡
+存活），usage 继续累计，rename 存活 → 宿主侧指向**无 pgvector** 的 postgres:16
+（临时容器，端口 5433）：memory 响亮告警回退 SQLite、其余三 store 照常选 Pg
+（独立降级）→ DELETE 后容器/卷/验收行零残留。
 
 ## 15. Pg 集成测试（开发侧）
 
 ```bash
 ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
   cargo test -p oneai-persistence --features postgres \
-  --test pg_working_state -- --ignored
-# 10 测：镜像文件后端 8 项 + 同任务 10 并发 append / 双任务并行隔离
+  --test pg_working_state --test pg_memory_store \
+  --test pg_usage_tracker --test pg_host_allowlist -- --ignored
+# pg_working_state  10 测：镜像文件后端 8 项 + 同任务 10 并发 / 双任务并行
+# pg_memory_store   13 测：镜像 SqliteSessionStore（STM/LTM/会话/丢弃快照/
+#                   facts）+ pgvector KNN 相似度/维度隔离 + 并发 + 重连存活
+# pg_usage_tracker   8 测：镜像 SqliteUsageTracker + is_estimated roundtrip
+# pg_host_allowlist  8 测：镜像 SqliteHostAllowlist（互斥/重开存活/list·remove）
 ```
