@@ -104,7 +104,12 @@ pub fn cmd_embed_list() {
     );
     println!("  voyage        — voyage-3 (1024-dim) / voyage-3-lite (512-dim); VOYAGE_API_KEY");
     println!("  ollama        — nomic-embed-text default; local, no key; probes localhost:11434");
-    println!("  fastembed     — local ONNX, no key; auto-chain last resort (one-time ~22MB download, then offline)");
+    // 帮助文案跟随构建 feature：云镜像（--no-default-features）不含 fastembed。
+    if cfg!(feature = "fastembed") {
+        println!("  fastembed     — local ONNX, no key; auto-chain last resort (one-time ~22MB download, then offline)");
+    } else {
+        println!("  fastembed     — (not in this build: compiled without the `fastembed` feature)");
+    }
     println!("  openai-compat — OpenAI-compatible relay; needs ONEAI_EMBEDDING_API_KEY + base_url");
     println!();
     println!("  Embedding keys are independent of the LLM provider key (LLM has no embed method).");
@@ -114,8 +119,12 @@ pub fn cmd_embed_list() {
     println!("    2. voyage         (VOYAGE_API_KEY)");
     println!("    3. openai         (OPENAI_API_KEY, official api.openai.com)");
     println!("    4. ollama         (localhost:11434 reachable + embedding model installed)");
-    println!("    5. fastembed      (local ONNX, no key; one-time download then offline)");
-    println!("    6. (none)         → memory recall falls back to keyword matching");
+    if cfg!(feature = "fastembed") {
+        println!("    5. fastembed      (local ONNX, no key; one-time download then offline)");
+        println!("    6. (none)         → memory recall falls back to keyword matching");
+    } else {
+        println!("    5. (none)         → memory recall falls back to keyword matching");
+    }
     println!();
     println!("  Models are free-form strings (--model text-embedding-3-small);");
     println!("  unknown names are runtime-dimension-probed.");

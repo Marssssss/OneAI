@@ -7,7 +7,8 @@
 //! - **OpenAIEmbeddingService**: Via OpenAI's text-embedding API (cloud, high quality)
 //! - **VoyageEmbeddingService**: Via the Voyage AI embedding API (cloud, `VOYAGE_API_KEY`)
 //! - **OllamaEmbeddingService**: Via Ollama's embedding API (local, no API key needed)
-//! - **FastEmbedService**: Local ONNX model via fastembed crate (stub)
+//! - **FastEmbedService**: Local ONNX model via fastembed crate (feature
+//!   `fastembed`, off by default — cloud images build without the ONNX link)
 //!
 //! The EmbeddingServiceRegistry manages service lifecycle, caching, and fallback.
 //! Provider auto-detection + build-time/runtime fallback live in
@@ -563,7 +564,7 @@ impl EmbeddingService for OllamaEmbeddingService {
     }
 }
 
-// ─── FastEmbedService ───────────────────────────────────────────────────────
+// ─── FastEmbedService (`fastembed` feature only) ────────────────────────────
 
 /// FastEmbed embedding service — local ONNX model via fastembed crate.
 ///
@@ -574,11 +575,9 @@ impl EmbeddingService for OllamaEmbeddingService {
 /// - Fast inference (~50ms per embedding on desktop)
 /// - Small model size (~22MB for AllMiniLML6V2)
 ///
-/// **Note**: Full implementation requires the `fastembed` crate dependency.
-/// Currently provides a stub that returns deterministic test embeddings
-/// for development/testing. When fastembed is added as a dependency,
-/// the `embed()` and `embed_batch()` methods will use real ONNX inference.
-/// FastEmbed embedding service — local ONNX model via the `fastembed` crate.
+/// Gated behind this crate's `fastembed` feature (off by default so cloud
+/// images skip the ONNX static link — see Cargo.toml); 端侧 builds enable it
+/// via `oneai-cli`'s default feature.
 ///
 /// **Zero-config, offline-capable**: no API key, no network at steady state
 /// (the model is downloaded from HuggingFace on first use and cached). This is
@@ -588,6 +587,7 @@ impl EmbeddingService for OllamaEmbeddingService {
 /// Model files are downloaded lazily on the first `embed()` call (construction
 /// is free); if the one-time download fails (offline, disk), `embed()` returns
 /// an error that `MemoryManager`'s fail-safe catches → keyword-recall fallback.
+#[cfg(feature = "fastembed")]
 pub struct FastEmbedService {
     /// The embedding model name (mapped to a `fastembed::EmbeddingModel`).
     model: EmbeddingModel,
@@ -597,6 +597,7 @@ pub struct FastEmbedService {
     inner: std::sync::Mutex<Option<fastembed::TextEmbedding>>,
 }
 
+#[cfg(feature = "fastembed")]
 impl FastEmbedService {
     /// Create a FastEmbedService with the default model (AllMiniLML6V2, 384-dim).
     pub fn new() -> Self {
@@ -736,12 +737,14 @@ impl FastEmbedService {
     }
 }
 
+#[cfg(feature = "fastembed")]
 impl Default for FastEmbedService {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "fastembed")]
 #[async_trait]
 impl EmbeddingService for FastEmbedService {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -1225,10 +1228,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fastembed")]
     fn test_resolve_auto_no_keys_falls_back_to_fastembed() {
         // Auto with no keys/ollama → FastEmbed local ONNX (real semantic recall),
         // NOT None — so keyless users still get semantic memory/RAG.
         assert!(resolve(&EmbeddingConfig::default()).is_some());
+    }
+
+    #[test]
+    #[cfg(not(feature = "fastembed"))]
+    fn test_resolve_auto_no_keys_no_fastembed_returns_none() {
+        // Without the `fastembed` feature the auto-chain has no keyless rung:
+        // no keys/ollama → Ok(None) → keyword recall (graceful, not an error).
+        assert!(resolve(&EmbeddingConfig::default()).is_none());
     }
 
     #[test]
@@ -1313,6 +1325,7 @@ mod tests {
     // Marked `#[ignore]` so the suite stays green without network; run with
     // `cargo test -p oneai-rag -- --ignored` once the model is available.
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_embed() {
@@ -1324,6 +1337,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_embed_batch() {
@@ -1334,6 +1348,7 @@ mod tests {
         assert_eq!(embeddings[0].len(), 384);
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_deterministic() {
@@ -1343,6 +1358,7 @@ mod tests {
         assert_eq!(emb1, emb2);
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_different_texts() {
@@ -1352,6 +1368,7 @@ mod tests {
         assert_ne!(emb1, emb2);
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_health_check() {
@@ -1359,6 +1376,7 @@ mod tests {
         service.health_check().await.unwrap();
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the AllMiniLML6V2 model (one-time HF download)"]
     async fn test_fastembed_service_actual_dimension() {
@@ -1366,6 +1384,7 @@ mod tests {
         assert_eq!(service.actual_dimension().await.unwrap(), 384);
     }
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     #[ignore = "needs the BGE-base model (one-time HF download)"]
     async fn test_fastembed_service_with_model() {
@@ -1568,6 +1587,7 @@ mod tests {
 
     // ─── FastEmbed real-inference tests (require a one-time model download) ──
 
+    #[cfg(feature = "fastembed")]
     #[tokio::test]
     async fn test_fastembed_embeds_real_vector() {
         // Triggers the one-time AllMiniLML6V2 download (~22MB) on first run;

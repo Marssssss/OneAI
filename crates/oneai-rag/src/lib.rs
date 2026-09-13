@@ -30,8 +30,10 @@ pub use embedding::*;
 pub use index::*;
 #[cfg(feature = "ort")]
 pub use provider_adapter::BgeM3Adapter;
+#[cfg(feature = "fastembed")]
+pub use provider_adapter::FastEmbedAdapter;
 pub use provider_adapter::{
     Availability, EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResolver, EnvProbe,
-    FastEmbedAdapter, OllamaAdapter, OpenAiAdapter, OpenAiCompatAdapter, VoyageAdapter,
+    OllamaAdapter, OpenAiAdapter, OpenAiCompatAdapter, VoyageAdapter,
 };
 pub use retrieval::*;

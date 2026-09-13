@@ -14,7 +14,11 @@ name = "oneai"
 path = "src/main.rs"
 
 [features]
-default = []
+# 端侧默认带本地 ONNX 嵌入（fastembed，keyless 语义召回的最后一级）。
+# 云镜像用 `--no-default-features --features oneai-cli/postgres` 构建，
+# 整个 ONNX 静态链不进二进制（MVS3-C 镜像瘦身），嵌入退化到 API/关键词。
+default = ["fastembed"]
+fastembed = ["oneai-rag/fastembed"]
 # Shared Postgres storage backend (MVS3) — the cloud engine image builds
 # with `--features oneai-cli/postgres`; runtime selects it via ONEAI_PG_DSN.
 postgres = ["oneai-persistence/postgres"]

@@ -27,8 +27,10 @@ use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{EmbeddingProvider, EmbeddingService};
 use oneai_core::{EmbeddingConfig, EmbeddingModel};
 
+#[cfg(feature = "fastembed")]
+use crate::embedding::FastEmbedService;
 use crate::embedding::{
-    EmbeddingServiceRegistry, FastEmbedService, OllamaEmbeddingService, OpenAIEmbeddingService,
+    EmbeddingServiceRegistry, OllamaEmbeddingService, OpenAIEmbeddingService,
     VoyageEmbeddingService,
 };
 
@@ -254,7 +256,8 @@ pub struct OpenAiAdapter;
 pub struct VoyageAdapter;
 /// Ollama local embedding API.
 pub struct OllamaAdapter;
-/// FastEmbed local ONNX.
+/// FastEmbed local ONNX (`fastembed` feature only — off in cloud builds).
+#[cfg(feature = "fastembed")]
 pub struct FastEmbedAdapter;
 /// Local BGE-M3 ONNX embedder (1024-dim, CJK-strong; `ort` feature only).
 #[cfg(feature = "ort")]
@@ -384,6 +387,7 @@ impl EmbeddingProviderAdapter for OllamaAdapter {
     }
 }
 
+#[cfg(feature = "fastembed")]
 impl EmbeddingProviderAdapter for FastEmbedAdapter {
     fn id(&self) -> EmbeddingProvider {
         EmbeddingProvider::FastEmbed
@@ -548,6 +552,7 @@ impl EmbeddingProviderRegistry {
         adapters.insert(EmbeddingProvider::Ollama, Box::new(OllamaAdapter));
         #[cfg(feature = "ort")]
         adapters.insert(EmbeddingProvider::BgeM3, Box::new(BgeM3Adapter));
+        #[cfg(feature = "fastembed")]
         adapters.insert(EmbeddingProvider::FastEmbed, Box::new(FastEmbedAdapter));
         adapters.insert(
             EmbeddingProvider::OpenAiCompat,
@@ -575,25 +580,24 @@ fn builtin_registry() -> &'static EmbeddingProviderRegistry {
 /// Order rationale: explicit embedding relay > Voyage (independent key) >
 /// OpenAI official (key may double as chat key, so ranked after Voyage) >
 /// Ollama (local) > BGE-M3 (local ONNX, CJK-strong — under `ort` only) >
-/// FastEmbed (offline last-resort, lazy download).
-#[cfg(not(feature = "ort"))]
-const AUTO_CHAIN: &[EmbeddingProvider] = &[
-    EmbeddingProvider::OpenAiCompat,
-    EmbeddingProvider::Voyage,
-    EmbeddingProvider::OpenAi,
-    EmbeddingProvider::Ollama,
-    EmbeddingProvider::FastEmbed,
-];
-
-#[cfg(feature = "ort")]
-const AUTO_CHAIN: &[EmbeddingProvider] = &[
-    EmbeddingProvider::OpenAiCompat,
-    EmbeddingProvider::Voyage,
-    EmbeddingProvider::OpenAi,
-    EmbeddingProvider::Ollama,
-    EmbeddingProvider::BgeM3,
-    EmbeddingProvider::FastEmbed,
-];
+/// FastEmbed (offline last-resort, lazy download — under `fastembed` only;
+/// cloud images build without it, so the chain simply ends one rung earlier
+/// and keyless deployments fall back to keyword recall).
+fn auto_chain() -> Vec<EmbeddingProvider> {
+    // ort/fastembed 两个 feature 全关时没有可 push 的尾项。
+    #[allow(unused_mut)]
+    let mut chain = vec![
+        EmbeddingProvider::OpenAiCompat,
+        EmbeddingProvider::Voyage,
+        EmbeddingProvider::OpenAi,
+        EmbeddingProvider::Ollama,
+    ];
+    #[cfg(feature = "ort")]
+    chain.push(EmbeddingProvider::BgeM3);
+    #[cfg(feature = "fastembed")]
+    chain.push(EmbeddingProvider::FastEmbed);
+    chain
+}
 
 /// Zero-config embedding resolver: turns an [`EmbeddingConfig`] into a
 /// fallback-aware [`EmbeddingServiceRegistry`] (or `None`).
@@ -641,7 +645,7 @@ impl EmbeddingResolver {
         Option<Arc<dyn EmbeddingService>>,
     )> {
         let mut created: Vec<Arc<dyn EmbeddingService>> = Vec::new();
-        for &p in AUTO_CHAIN {
+        for p in auto_chain() {
             let adapter = match reg.get(p) {
                 Some(a) => a,
                 None => continue,
@@ -694,6 +698,17 @@ impl EmbeddingResolver {
         probe: &EnvProbe,
         reg: &EmbeddingProviderRegistry,
     ) -> Result<Option<Arc<dyn EmbeddingService>>> {
+        // An explicitly configured provider that this build didn't compile in
+        // (cloud images omit `fastembed`) degrades like any unavailable
+        // provider — loud warning + keyword recall — never a hard error.
+        #[cfg(not(feature = "fastembed"))]
+        if provider == EmbeddingProvider::FastEmbed {
+            tracing::warn!(
+                "embedding provider `fastembed` was requested but this build was compiled \
+                 without the `fastembed` feature — recall falls back to keyword matching"
+            );
+            return Ok(None);
+        }
         let adapter = reg.get(provider).ok_or_else(|| {
             OneAIError::Embedding(format!("unknown embedding provider: {provider}"))
         })?;
@@ -769,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fastembed")]
     fn fastembed_included_in_auto() {
         // FastEmbed (local ONNX) is keyless + offline-capable after a one-time
         // download, so it is the auto-chain's last-resort: no-key users still
@@ -781,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fastembed")]
     fn auto_falls_back_to_fastembed_when_no_keys() {
         // Auto with no keys/ollama → FastEmbed (real local ONNX), NOT None.
         let probe = EnvProbe::empty();
@@ -788,6 +805,44 @@ mod tests {
             EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
         let reg = resolved.expect("auto should resolve to FastEmbed as last resort");
         assert_eq!(reg.model().as_str(), "all-MiniLM-L6-v2");
+    }
+
+    #[test]
+    #[cfg(not(feature = "fastembed"))]
+    fn auto_without_fastembed_returns_none_when_no_keys() {
+        // Cloud builds (no `fastembed`): keyless auto-detection has no local
+        // rung left → Ok(None) → keyword recall. Graceful, never an error.
+        let probe = EnvProbe::empty();
+        let resolved =
+            EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    #[cfg(not(feature = "fastembed"))]
+    fn explicit_fastembed_without_feature_degrades_to_none() {
+        // Config explicitly asks for fastembed but the build lacks it →
+        // loud warn + Ok(None) (keyword recall), NOT a hard error.
+        let mut cfg = EmbeddingConfig::default();
+        cfg.provider = EmbeddingProvider::FastEmbed;
+        let resolved = EmbeddingResolver::resolve_with(&cfg, &EnvProbe::empty()).unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn auto_chain_tail_follows_features() {
+        let chain = auto_chain();
+        // Head rungs are unconditional.
+        assert_eq!(chain[0], EmbeddingProvider::OpenAiCompat);
+        assert!(chain.contains(&EmbeddingProvider::Ollama));
+        assert_eq!(
+            chain.contains(&EmbeddingProvider::FastEmbed),
+            cfg!(feature = "fastembed")
+        );
+        assert_eq!(
+            chain.contains(&EmbeddingProvider::BgeM3),
+            cfg!(feature = "ort")
+        );
     }
 
     #[test]

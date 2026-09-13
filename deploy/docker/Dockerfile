@@ -29,10 +29,11 @@
 #   生产纵深防御走 gVisor/kata runtimeClass（设计文档 §9 R4 / MVS4）。
 # - 非 root 运行（USER oneai）：状态卷挂 /home/oneai/.oneai。
 
-# trixie (Debian 13, GCC 14)：ort-sys（经 fastembed 引入）链接的 pyke 预编译
-# ONNX 静态库需要 `__cxa_call_terminate`（GCC 13+ libstdc++ 符号），bookworm
-# (GCC 12) 链接必失败（MVS1 实测）。运行时阶段同步用 trixie-slim 保证
-# libstdc++ ABI 满足。
+# trixie (Debian 13, GCC 14)：历史上 ort-sys（经 fastembed 引入）链接的 pyke
+# 预编译 ONNX 静态库需要 `__cxa_call_terminate`（GCC 13+ libstdc++ 符号），
+# bookworm (GCC 12) 链接必失败（MVS1 实测）。MVS3-C 起云构建
+# --no-default-features 不再链 ONNX，但保留 trixie 基线（默认 feature 构建
+# 仍需要它；运行时阶段同步用 trixie-slim 保证 libstdc++ ABI 满足）。
 FROM rust:1-trixie AS builder
 
 # crates 国内镜像（rsproxy sparse index）+ git 依赖走 CLI。
@@ -62,10 +63,14 @@ COPY . .
 # 不受影响。x86_64 构建不受影响。
 ENV NK_TARGET_NEONSDOT=0
 
-# 缓存挂载：cargo registry + target 跨构建复用（首次构建仍为全量，
-# fastembed/ort-sys 会在构建期下载 linux 版 libonnxruntime blob，需网络）。
+# 缓存挂载：cargo registry + target 跨构建复用（首次构建仍为全量）。
+# --no-default-features（MVS3-C 镜像瘦身）：关掉 oneai-cli 默认的
+# oneai-rag/fastembed——云镜像不链 ONNX 静态库（ort-sys/libonnxruntime 整条
+# 下载+链接消失，builder 也不再需要该网络兜底），嵌入退化到 API provider
+# 或关键词召回；配置显式选 fastembed 时引擎响亮告警并优雅降级。
 # --features postgres（MVS3 存储外部化）：编入 PgWorkingStateStore +
-# MVS3-B 的 PgMemoryStore(pgvector)/PgUsageTracker/PgHostAllowlist。运行期
+# MVS3-B 的 PgMemoryStore(pgvector)/PgUsageTracker/PgHostAllowlist +
+# MVS3-C 的 PgSessionEventStore/PgFeedbackStore。运行期
 # 设 ONEAI_PG_DSN（编排器 orchestrator.toml 的 passthrough_env 注入；容器内
 # 访问宿主 Pg 用 host.docker.internal 而非 127.0.0.1）即把 working-state
 # 事件日志、记忆/会话、用量、域名白名单全部写进共享 Postgres（容器/卷全丢
@@ -74,16 +79,20 @@ ENV NK_TARGET_NEONSDOT=0
 # 不设 DSN 则维持文件/SQLite 后端，行为与 MVS1/2 完全一致。
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p oneai-cli --features oneai-cli/postgres && \
+    cargo build --release -p oneai-cli --no-default-features \
+        --features oneai-cli/postgres && \
     install -m 0755 target/release/oneai /oneai
 
 # ─── 运行时 ──────────────────────────────────────────────────────────────────
 
 FROM debian:trixie-slim AS runtime
 
+# 不装 bubblewrap（MVS3-C 移除）：R4 已证 bwrap 全沙箱在容器内不可用
+# （Ubuntu 24.04 宿主 AppArmor 系统级拦截非特权 userns），引擎的
+# is_available 运行期探测本就选中不了它——装它只增加体积与攻击面。
+# shell 防护 = RegexBackend + Guardian/ExecPolicy；容器本身是隔离边界（§8）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        bubblewrap \
         python3 \
         git \
         curl \

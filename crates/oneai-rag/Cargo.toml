@@ -19,7 +19,7 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 oneai-core = { workspace = true }
 oneai-vector = { workspace = true }
-fastembed = { workspace = true }
+fastembed = { workspace = true, optional = true }
 
 [features]
 # Local ONNX embedder/reranker via oneai-vector's `ort` stack (BGE-M3 +
@@ -28,3 +28,11 @@ fastembed = { workspace = true }
 # When enabled, `BgeM3Adapter` is registered ahead of `FastEmbedAdapter` in
 # the auto-chain (CJK-strong, pairs with tantivy-jieba BM25).
 ort = ["oneai-vector/ort"]
+# Local ONNX embedding via the `fastembed` crate (`FastEmbedService` +
+# `FastEmbedAdapter`, the auto-chain's keyless last resort). Off by default
+# so headless/cloud builds (MVS3-C image slimming) skip the ONNX runtime
+# static link entirely;端侧 builds opt in via `oneai-cli`'s default feature.
+# When disabled, an explicit `EmbeddingProvider::FastEmbed` config degrades
+# gracefully to keyword recall (loud warning, never a hard failure), and the
+# auto-chain simply ends one rung earlier.
+fastembed = ["dep:fastembed"]
