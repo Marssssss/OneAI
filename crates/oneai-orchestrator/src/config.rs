@@ -19,6 +19,12 @@
 //! # spawned container (values resolved at spawn time).
 //! passthrough_env = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
 //! docker_bin = "docker"
+//! # MVS3-C deep hibernation: a Hibernating session idle for this many extra
+//! # seconds has its volumes archived (tar.gz) under archive_dir, then the
+//! # container + local volumes are destroyed; resume restores them. 0/unset
+//! # = disabled. Needs the throwaway helper image (alpine:3.20) pullable.
+//! deep_archive_timeout_secs = 86400
+//! archive_dir = "/srv/oneai-archive"
 //! ```
 
 use std::path::PathBuf;
@@ -79,6 +85,18 @@ pub struct OrchestratorConfig {
     /// Docker CLI binary. Default `docker`.
     #[serde(default = "default_docker_bin")]
     pub docker_bin: String,
+    /// Seconds a *Hibernating* session (already `docker stop`ped by the idle
+    /// sweep) stays untouched before its volumes are deep-archived to
+    /// `archive_dir` and the container+volumes are destroyed (MVS3-C).
+    /// `0` = disabled (the default — deep archive is opt-in, mirroring the
+    /// `idle_timeout_secs == 0` semantics). Requires `archive_dir`.
+    #[serde(default)]
+    pub deep_archive_timeout_secs: u64,
+    /// Root directory of the volume archive store
+    /// (`archive::LocalDirArchiveStore`; point at an NFS/cloud-disk mount
+    /// for real cold storage). Required when `deep_archive_timeout_secs > 0`.
+    #[serde(default)]
+    pub archive_dir: Option<PathBuf>,
 }
 
 fn default_listen() -> String {
@@ -123,6 +141,8 @@ impl Default for OrchestratorConfig {
             provider_config: None,
             passthrough_env: Vec::new(),
             docker_bin: default_docker_bin(),
+            deep_archive_timeout_secs: 0,
+            archive_dir: None,
         }
     }
 }
@@ -158,6 +178,8 @@ impl OrchestratorConfig {
         image: Option<&str>,
         registry_dir: Option<&str>,
         idle_timeout_secs: Option<u64>,
+        deep_archive_timeout_secs: Option<u64>,
+        archive_dir: Option<&str>,
     ) -> Self {
         if let Some(v) = listen {
             self.listen = v.to_string();
@@ -171,7 +193,36 @@ impl OrchestratorConfig {
         if let Some(v) = idle_timeout_secs {
             self.idle_timeout_secs = v;
         }
+        if let Some(v) = deep_archive_timeout_secs {
+            self.deep_archive_timeout_secs = v;
+        }
+        if let Some(v) = archive_dir {
+            self.archive_dir = Some(PathBuf::from(v));
+        }
         self
+    }
+
+    /// Cross-field validation. Called by `OrchestratorState::new` so every
+    /// construction path (file, defaults, CLI overrides) is covered.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if self.deep_archive_timeout_secs > 0 {
+            if self.archive_dir.is_none() {
+                return Err(crate::error::OrchestratorError::Config(
+                    "deep_archive_timeout_secs > 0 requires archive_dir \
+                     (the volume-archive store root, e.g. /srv/oneai-archive)"
+                        .into(),
+                ));
+            }
+            if self.idle_timeout_secs == 0 {
+                return Err(crate::error::OrchestratorError::Config(
+                    "deep_archive_timeout_secs > 0 requires idle_timeout_secs > 0 \
+                     (deep archive is the SECOND hibernation tier — nothing ever \
+                     reaches it when the idle sweep is disabled)"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Resolve the env pairs to inject into a session container: every name
@@ -199,6 +250,46 @@ mod tests {
         assert_eq!(c.resume_timeout_secs, DEFAULT_RESUME_TIMEOUT_SECS);
         assert_eq!(c.container_bind_host, "127.0.0.1");
         assert!(c.registry_dir.ends_with(".oneai/orchestrator"));
+        // Deep archive is opt-in: disabled + no dir by default, and the
+        // default config passes validation.
+        assert_eq!(c.deep_archive_timeout_secs, 0);
+        assert!(c.archive_dir.is_none());
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn deep_archive_validation() {
+        // timeout > 0 without a dir → actionable config error.
+        let c = OrchestratorConfig {
+            deep_archive_timeout_secs: 60,
+            ..OrchestratorConfig::default()
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("archive_dir"), "{err}");
+        // Both set → ok.
+        let c = OrchestratorConfig {
+            archive_dir: Some(PathBuf::from("/srv/oneai-archive")),
+            ..c
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn toml_parse_deep_archive_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchestrator.toml");
+        std::fs::write(
+            &path,
+            r#"
+            deep_archive_timeout_secs = 3600
+            archive_dir = "/srv/oneai-archive"
+            "#,
+        )
+        .unwrap();
+        let c = OrchestratorConfig::load_from(&path).unwrap();
+        assert_eq!(c.deep_archive_timeout_secs, 3600);
+        assert_eq!(c.archive_dir, Some(PathBuf::from("/srv/oneai-archive")));
+        assert!(c.validate().is_ok());
     }
 
     #[test]
@@ -238,11 +329,16 @@ mod tests {
             Some("img:latest"),
             Some("/tmp/reg"),
             Some(5),
+            Some(90),
+            Some("/tmp/arch"),
         );
         assert_eq!(c.listen, "127.0.0.1:1234");
         assert_eq!(c.image, "img:latest");
         assert_eq!(c.registry_dir, PathBuf::from("/tmp/reg"));
         assert_eq!(c.idle_timeout_secs, 5);
+        assert_eq!(c.deep_archive_timeout_secs, 90);
+        assert_eq!(c.archive_dir, Some(PathBuf::from("/tmp/arch")));
+        assert!(c.validate().is_ok());
     }
 
     #[test]

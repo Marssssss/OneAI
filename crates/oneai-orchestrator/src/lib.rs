@@ -23,6 +23,10 @@
 //!   orchestrator.
 //! - **Hibernation** (`idle.rs`): idle sweep stops sessions with no attached
 //!   connections past `idle_timeout_secs`; the next request resumes them.
+//!   Second tier (MVS3-C, `archive.rs`): sessions hibernating past
+//!   `deep_archive_timeout_secs` have their volumes archived (tar.gz via a
+//!   throwaway helper container) into `archive_dir`, then the container +
+//!   local volumes are destroyed; resume restores the volumes before spawn.
 //!
 //! # Security posture (MVS2)
 //!
@@ -32,6 +36,7 @@
 //! engine grows an optional ws auth hook (engine zero-change constraint).
 //! TLS is terminated by a fronting reverse proxy (Caddy/ALB) per design §4.
 
+pub mod archive;
 pub mod config;
 pub mod docker;
 pub mod error;
@@ -43,6 +48,9 @@ pub mod routes;
 pub mod runner;
 pub mod server;
 
+pub use archive::{
+    ArchiveManifest, DeepArchive, LocalDirArchiveStore, VolumeArchive, VolumeArchiveStore,
+};
 pub use config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
 pub use docker::DockerRunner;
 pub use error::{OrchestratorError, Result};

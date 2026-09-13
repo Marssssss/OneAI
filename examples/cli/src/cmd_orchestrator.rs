@@ -23,13 +23,21 @@ pub fn cmd_orchestrator_serve(
     registry: Option<&str>,
     idle_timeout: Option<u64>,
     provider_config: Option<&str>,
+    deep_archive_timeout: Option<u64>,
+    archive_dir: Option<&str>,
 ) {
     println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2)");
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async move {
-        let mut config = OrchestratorConfig::load_default()?
-            .with_overrides(listen, image, registry, idle_timeout);
+        let mut config = OrchestratorConfig::load_default()?.with_overrides(
+            listen,
+            image,
+            registry,
+            idle_timeout,
+            deep_archive_timeout,
+            archive_dir,
+        );
         if let Some(p) = provider_config {
             config.provider_config = Some(std::path::PathBuf::from(p));
         }
@@ -43,6 +51,22 @@ pub fn cmd_orchestrator_serve(
                 "disabled".to_string()
             } else {
                 config.idle_timeout_secs.to_string()
+            }
+        );
+        println!(
+            "   Deep archive: {}",
+            if config.deep_archive_timeout_secs == 0 {
+                "disabled".to_string()
+            } else {
+                format!(
+                    "after {}s hibernating → {}",
+                    config.deep_archive_timeout_secs,
+                    config
+                        .archive_dir
+                        .as_ref()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|| "?".into())
+                )
             }
         );
         if let Some(p) = &config.provider_config {
@@ -185,6 +209,14 @@ pub fn cmd_orchestrator_list(url: Option<&str>) {
                     s["container_name"].as_str().unwrap_or("-"),
                     s["updated_at"].as_str().unwrap_or("?"),
                 );
+                if s["archived"].is_object() {
+                    let at = s["archived"]["archived_at"].as_str().unwrap_or("?");
+                    let vols = s["archived"]["volumes"]
+                        .as_array()
+                        .map(|v| v.len())
+                        .unwrap_or(0);
+                    println!("    └─ deep-archived ({vols} volume(s), {at})");
+                }
                 if let Some(err) = s["last_error"].as_str() {
                     println!("    └─ {err}");
                 }

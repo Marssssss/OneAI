@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
+use crate::archive::{DeepArchive, LocalDirArchiveStore, VolumeArchiveStore};
 use crate::config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
 use crate::error::{OrchestratorError, Result};
 use crate::fsm::{SessionEntry, SessionSnapshot, SessionState};
@@ -26,16 +27,47 @@ pub struct OrchestratorState {
     pub runner: Arc<dyn ContainerRunner>,
     /// Frontend → orchestrator bearer secret (D7).
     pub bearer: oneai_http_auth::BearerSecret,
+    /// Deep-archive volume store (MVS3-C); `None` when deep hibernation is
+    /// disabled (`deep_archive_timeout_secs == 0`).
+    pub archive_store: Option<Arc<dyn VolumeArchiveStore>>,
 }
 
 impl OrchestratorState {
     /// Build state from config + runner, loading and reconciling the
     /// persisted routing table (D3: alive containers are re-mounted, dead
-    /// ones marked Crashed for lazy resume).
+    /// ones marked Crashed for lazy resume). The archive store follows the
+    /// config (`archive_dir` → `LocalDirArchiveStore`).
     pub async fn new(
         config: OrchestratorConfig,
         runner: Arc<dyn ContainerRunner>,
     ) -> Result<Arc<Self>> {
+        config.validate()?;
+        // Deep-archive store (MVS3-C): opt-in via config; the marker on
+        // persisted entries decides whether a resume needs a restore.
+        let archive_store: Option<Arc<dyn VolumeArchiveStore>> =
+            match (config.deep_archive_timeout_secs, &config.archive_dir) {
+                (timeout, Some(dir)) if timeout > 0 => {
+                    tracing::info!(
+                        dir = %dir.display(),
+                        timeout_secs = timeout,
+                        "deep volume archive enabled (LocalDirArchiveStore)"
+                    );
+                    Some(Arc::new(LocalDirArchiveStore::new(dir.clone())))
+                }
+                _ => None,
+            };
+        Self::with_archive_store(config, runner, archive_store).await
+    }
+
+    /// Like [`new`](Self::new) with an explicitly provided archive store —
+    /// the injection point for custom `VolumeArchiveStore` backends (MVS4
+    /// S3/GCS) and for tests. `config.archive_dir` is only used by `new`.
+    pub async fn with_archive_store(
+        config: OrchestratorConfig,
+        runner: Arc<dyn ContainerRunner>,
+        archive_store: Option<Arc<dyn VolumeArchiveStore>>,
+    ) -> Result<Arc<Self>> {
+        config.validate()?;
         let bearer =
             oneai_http_auth::BearerSecret::from_env(ORCHESTRATOR_SECRET_ENV).ok_or_else(|| {
                 OrchestratorError::Config(format!(
@@ -50,6 +82,7 @@ impl OrchestratorState {
             table,
             runner,
             bearer,
+            archive_store,
         }))
     }
 
@@ -212,8 +245,56 @@ impl OrchestratorState {
             return Ok(());
         };
 
+        // Deep-archived session (MVS3-C): its volumes live ONLY in the
+        // archive store — restore them before any container op. The marker
+        // is cleared only after the session is fully back to Running, so a
+        // mid-way failure retries the restore on the next request (the
+        // archive is the source of truth until then). Restore is keyed on
+        // the marker, not on `from` — a session that CRASHED right after a
+        // restore-spawn keeps its marker until its first successful resume.
+        if let Some(manifest) = &entry.archived {
+            let Some(store) = &self.archive_store else {
+                let msg = "session is deep-archived but no archive store is configured \
+                           (archive_dir/deep_archive_timeout_secs changed since archival?)"
+                    .to_string();
+                let _ = self
+                    .table
+                    .cas_transition(
+                        id,
+                        SessionState::Resuming,
+                        SessionState::Crashed,
+                        None,
+                        Some(msg.clone()),
+                    )
+                    .await;
+                return Err(OrchestratorError::Runner(msg));
+            };
+            if let Err(e) = store.restore(manifest, &self.config.docker_bin).await {
+                let msg = format!("archive restore failed: {e}");
+                tracing::error!(session = %id, error = %e, "deep-archive restore failed");
+                let _ = self
+                    .table
+                    .cas_transition(
+                        id,
+                        SessionState::Resuming,
+                        SessionState::Crashed,
+                        None,
+                        Some(msg.clone()),
+                    )
+                    .await;
+                return Err(OrchestratorError::Runner(msg));
+            }
+            tracing::info!(
+                session = %id,
+                volumes = manifest.volumes.len(),
+                "volumes restored from deep archive"
+            );
+        }
+
         let result = match from {
             // Hibernate path: same container, docker start, port re-inspect.
+            // A deep-archived entry has no handle (container destroyed) →
+            // spawn fresh on the just-restored volumes.
             SessionState::Hibernating => match &entry.handle {
                 Some(h) => self.runner.start(h).await,
                 None => self.runner.spawn(&entry.spec).await,
@@ -236,6 +317,21 @@ impl OrchestratorState {
                             None,
                         )
                         .await;
+                    if entry.archived.is_some() {
+                        // Volumes are live locally again — release the
+                        // marker, then drop the archive files (a failed
+                        // cleanup is harmless: the next deep-archive pass
+                        // overwrites the same deterministic layout).
+                        let _ = self.table.cas_set_archived(id, None).await;
+                        if let Some(store) = &self.archive_store {
+                            if let Err(e) = store.remove(id).await {
+                                tracing::warn!(
+                                    session = %id, error = %e,
+                                    "archive cleanup after resume failed (harmless)"
+                                );
+                            }
+                        }
+                    }
                     tracing::info!(session = %id, from = ?from, "session resumed");
                     Ok(())
                 }
@@ -330,6 +426,22 @@ impl OrchestratorState {
         if let Some(handle) = &entry.handle {
             // Tolerate a dead/absent container.
             let _ = self.runner.destroy(handle, true).await;
+        } else {
+            // No live handle (deep-archived, or crashed mid-spawn): still
+            // sweep any canonically-named leftovers — `destroy` derives the
+            // volume names from the container name and tolerates absence.
+            let synthetic = ContainerHandle {
+                container_id: String::new(),
+                container_name: entry.spec.container_name(),
+                host_port: 0,
+            };
+            let _ = self.runner.destroy(&synthetic, true).await;
+        }
+        // A deep-archived session's archive files die with the session.
+        if let Some(store) = &self.archive_store {
+            if let Err(e) = store.remove(id).await {
+                tracing::warn!(session = %id, error = %e, "archive removal on destroy failed");
+            }
         }
         self.table.remove(id).await?;
         tracing::info!(session = %id, "session destroyed (container + volumes removed)");
@@ -412,12 +524,20 @@ pub async fn run(
             OrchestratorError::Config(format!("listen {}: {e}", state.config.listen))
         })?;
 
-    // Idle-hibernation sweep (D6). `idle_timeout_secs == 0` disables it
-    // (the CLI advertises "disabled" for 0 — honor that).
+    // Idle-hibernation sweep (D6) + deep-archive second tier (MVS3-C).
+    // `idle_timeout_secs == 0` disables the whole sweep (the CLI advertises
+    // "disabled" for 0 — honor that; deep archive is unreachable without
+    // hibernation anyway — config.validate() rejects that combination).
+    let deep_archive = state.archive_store.as_ref().map(|store| DeepArchive {
+        store: store.clone(),
+        timeout: Duration::from_secs(state.config.deep_archive_timeout_secs),
+        docker_bin: state.config.docker_bin.clone(),
+    });
     let _sweep = (state.config.idle_timeout_secs > 0).then(|| {
         spawn_idle_sweep(
             state.table.clone(),
             state.runner.clone(),
+            deep_archive,
             Duration::from_secs(state.config.idle_timeout_secs),
             crate::idle::DEFAULT_SWEEP_TICK,
             cancel.clone(),

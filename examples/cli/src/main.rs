@@ -1029,6 +1029,14 @@ enum OrchestratorAction {
         /// container (provider keys — the MVS1 D5 shortcut)
         #[arg(long)]
         provider_config: Option<String>,
+        /// Extra seconds a Hibernating session stays local before its
+        /// volumes are archived to --archive-dir and container+volumes are
+        /// destroyed (MVS3-C deep hibernation; 0 disables — the default)
+        #[arg(long)]
+        deep_archive_timeout: Option<u64>,
+        /// Volume-archive store root (required with --deep-archive-timeout > 0)
+        #[arg(long)]
+        archive_dir: Option<String>,
     },
     /// Create a session on a running orchestrator (spawns its container)
     Create {
@@ -1718,12 +1726,16 @@ fn main() {
                 registry,
                 idle_timeout,
                 provider_config,
+                deep_archive_timeout,
+                archive_dir,
             } => cmd_orchestrator::cmd_orchestrator_serve(
                 listen.as_deref(),
                 image.as_deref(),
                 registry.as_deref(),
                 idle_timeout,
                 provider_config.as_deref(),
+                deep_archive_timeout,
+                archive_dir.as_deref(),
             ),
             OrchestratorAction::Create { id, url } => {
                 cmd_orchestrator::cmd_orchestrator_create(url.as_deref(), id.as_deref())

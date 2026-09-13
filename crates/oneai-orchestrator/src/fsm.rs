@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::archive::ArchiveManifest;
 use crate::error::{OrchestratorError, Result};
 use crate::runner::{ContainerHandle, SessionSpec};
 
@@ -93,6 +94,13 @@ pub struct SessionEntry {
     pub last_error: Option<String>,
     /// Timestamp of the last state change.
     pub updated_at: DateTime<Utc>,
+    /// Deep-archive marker (MVS3-C): `Some` while this session's volumes
+    /// live ONLY in the archive store (container + local volumes destroyed).
+    /// A `Hibernating` entry with `archived.is_some()` resumes through
+    /// volume restore → spawn; the marker is cleared once the session is
+    /// back to Running. `None` on every entry written before MVS3-C (serde
+    /// default) — legacy `sessions.json` files load unchanged.
+    pub archived: Option<ArchiveManifest>,
     /// Unix millis of the last proxied WS frame (idle sweep input).
     pub last_activity_ms: AtomicU64,
     /// Currently attached WS proxy connections (idle sweep veto).
@@ -112,6 +120,7 @@ impl SessionEntry {
             state: SessionState::Creating,
             last_error: None,
             updated_at: Utc::now(),
+            archived: None,
             last_activity_ms: AtomicU64::new(now_millis()),
             active_conns: AtomicUsize::new(0),
             ready_notify: Arc::new(Notify::new()),
@@ -143,6 +152,7 @@ impl SessionEntry {
             container_name: self.handle.as_ref().map(|h| h.container_name.clone()),
             active_conns: self.active_conns.load(std::sync::atomic::Ordering::Relaxed),
             idle_ms: self.idle_ms(),
+            archived: self.archived.clone(),
         }
     }
 }
@@ -163,6 +173,7 @@ impl Clone for SessionEntry {
             state: self.state,
             last_error: self.last_error.clone(),
             updated_at: self.updated_at,
+            archived: self.archived.clone(),
             last_activity_ms: AtomicU64::new(
                 self.last_activity_ms
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -187,6 +198,10 @@ pub struct SessionSnapshot {
     pub container_name: Option<String>,
     pub active_conns: usize,
     pub idle_ms: u64,
+    /// Deep-archive manifest when the session's volumes live only in the
+    /// archive store (MVS3-C); `None` for normally-hibernating sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchiveManifest>,
 }
 
 /// On-disk persisted form of a session entry (registry file).
@@ -197,6 +212,10 @@ pub struct PersistedEntry {
     pub state: SessionState,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// Deep-archive marker (MVS3-C). `#[serde(default)]` so pre-MVS3-C
+    /// `sessions.json` files deserialize as "not archived".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchiveManifest>,
 }
 
 impl SessionEntry {
@@ -208,6 +227,7 @@ impl SessionEntry {
             state: self.state,
             last_error: self.last_error.clone(),
             updated_at: self.updated_at,
+            archived: self.archived.clone(),
         }
     }
 
@@ -219,6 +239,7 @@ impl SessionEntry {
             state: p.state,
             last_error: p.last_error,
             updated_at: p.updated_at,
+            archived: p.archived,
             last_activity_ms: AtomicU64::new(now_millis()),
             active_conns: AtomicUsize::new(0),
             ready_notify: Arc::new(Notify::new()),
@@ -303,6 +324,37 @@ mod tests {
         assert!(Arc::ptr_eq(&e.ready_notify, &c.ready_notify));
         assert_eq!(c.active_conns.load(std::sync::atomic::Ordering::Relaxed), 2);
         assert_eq!(c.state, Creating);
+    }
+
+    #[test]
+    fn persisted_legacy_json_defaults_archived_none() {
+        // A pre-MVS3-C sessions.json entry (no `archived` field) must
+        // deserialize with archived = None — serde(default) compat gate.
+        let json = r#"{
+            "spec": {
+                "session_id": "legacy",
+                "image": "img",
+                "state_volume": "sv",
+                "workspace_volume": "wv",
+                "env": [],
+                "bind_host": "127.0.0.1",
+                "container_port": 8787,
+                "provider_config": null,
+                "created_at": "2026-09-10T00:00:00Z"
+            },
+            "handle": null,
+            "state": "Hibernating",
+            "last_error": null,
+            "updated_at": "2026-09-10T00:00:00Z"
+        }"#;
+        let p: PersistedEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(p.state, SessionState::Hibernating);
+        assert!(p.archived.is_none());
+        let e = SessionEntry::from_persisted(p);
+        assert!(e.archived.is_none());
+        // Snapshot omits the field when None (wire shape unchanged).
+        let snap_json = serde_json::to_string(&e.snapshot()).unwrap();
+        assert!(!snap_json.contains("archived"));
     }
 
     #[test]

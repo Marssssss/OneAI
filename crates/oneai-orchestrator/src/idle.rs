@@ -2,12 +2,21 @@
 //! no attached WS connections and haven't proxied a frame within the idle
 //! timeout. Volumes are preserved; the next request resumes (see
 //! `server::resume_session`).
+//!
+//! Second tier (MVS3-C, `archive.rs`): when a [`DeepArchive`] bundle is
+//! configured, sessions that stay `Hibernating` past its timeout have their
+//! volumes exported to the archive store and the container + local volumes
+//! destroyed — cold sessions stop consuming local disk. Data-loss red line:
+//! `destroy(remove_volumes=true)` runs ONLY after `store.archive()`
+//! confirmed success; any earlier failure leaves the session hibernating
+//! locally and retries next sweep.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::archive::DeepArchive;
 use crate::fsm::SessionState;
 use crate::registry::RoutingTable;
 use crate::runner::ContainerRunner;
@@ -22,6 +31,7 @@ pub const DEFAULT_SWEEP_TICK: Duration = Duration::from_secs(30);
 pub fn spawn_idle_sweep(
     table: RoutingTable,
     runner: Arc<dyn ContainerRunner>,
+    deep_archive: Option<DeepArchive>,
     idle_timeout: Duration,
     tick: Duration,
     cancel: CancellationToken,
@@ -34,16 +44,18 @@ pub fn spawn_idle_sweep(
                 _ = cancel.cancelled() => break,
                 _ = interval.tick() => {}
             }
-            sweep_once(&table, runner.as_ref(), idle_timeout).await;
+            sweep_once(&table, runner.as_ref(), deep_archive.as_ref(), idle_timeout).await;
         }
         tracing::debug!("idle sweep task stopped");
     })
 }
 
-/// One sweep pass (exposed for tests).
+/// One sweep pass (exposed for tests): hibernate idle Running sessions,
+/// then deep-archive long-hibernating ones (when configured).
 pub async fn sweep_once(
     table: &RoutingTable,
     runner: &dyn ContainerRunner,
+    deep_archive: Option<&DeepArchive>,
     idle_timeout: Duration,
 ) {
     let candidates = table
@@ -73,6 +85,96 @@ pub async fn sweep_once(
             }
         }
         tracing::info!(session = %id, "auto-hibernated (idle)");
+    }
+
+    if let Some(deep) = deep_archive {
+        deep_archive_pass(table, runner, deep).await;
+    }
+}
+
+/// Deep-archive pass (MVS3-C): export the volumes of long-hibernating
+/// sessions to the archive store, then destroy container + local volumes.
+///
+/// Per-session sequence (red line — see module docs):
+/// 1. `store.archive(volumes)` — on failure: volumes untouched, `last_error`
+///    recorded, retry next sweep.
+/// 2. `cas_set_archived(manifest)` — the claim; a miss means a concurrent
+///    pass already archived this session (our archive files are the same
+///    deterministic layout — the winner's destroy handles cleanup).
+/// 3. `runner.destroy(handle, true)` — removes container + volumes. A
+///    failure here is loud but recoverable: the marker is already set and
+///    the archive confirmed, so resume restores from the archive while
+///    `spawn` tolerates the leftover container/volumes.
+async fn deep_archive_pass(table: &RoutingTable, runner: &dyn ContainerRunner, deep: &DeepArchive) {
+    let candidates = table
+        .list_deep_archive_candidates(deep.timeout.as_millis() as u64)
+        .await;
+    for id in candidates {
+        let Some(entry) = table.get(&id).await else {
+            continue;
+        };
+        // Re-validate under a fresh read (the candidate list is advisory).
+        if entry.state != SessionState::Hibernating || entry.archived.is_some() {
+            continue;
+        }
+        let Some(handle) = entry.handle.clone() else {
+            continue;
+        };
+        let volumes = vec![
+            entry.spec.state_volume.clone(),
+            entry.spec.workspace_volume.clone(),
+        ];
+
+        // 1. Export FIRST — until this succeeds, nothing may be removed.
+        let manifest = match deep.store.archive(&id, &volumes, &deep.docker_bin).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    session = %id, error = %e,
+                    "deep-archive export failed — volumes intact, retrying next sweep"
+                );
+                let _ = table
+                    .set_last_error(&id, format!("deep-archive failed: {e}"))
+                    .await;
+                continue;
+            }
+        };
+
+        // 2. Claim (CAS on the archived marker; clears the stale handle).
+        match table.cas_set_archived(&id, Some(manifest.clone())).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // Concurrent pass won the claim — same deterministic layout,
+                // nothing to undo; the winner runs the destroy.
+                tracing::debug!(session = %id, "deep-archive claim lost to a concurrent pass");
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(session = %id, error = %e, "deep-archive claim failed");
+                continue;
+            }
+        }
+
+        // 3. Only now may the local copies go.
+        if let Err(e) = runner.destroy(&handle, true).await {
+            // Recoverable: archive confirmed + marker set; resume restores
+            // from the archive and spawn tolerates the leftover container.
+            tracing::error!(
+                session = %id, error = %e,
+                "deep-archive: container/volume destroy failed after successful archive \
+                 (resume still restores from the archive; leftover volumes may need \
+                 manual `docker volume rm`)"
+            );
+            let _ = table
+                .set_last_error(&id, format!("deep-archive destroy failed: {e}"))
+                .await;
+        }
+        tracing::info!(
+            session = %id,
+            volumes = manifest.volumes.len(),
+            bytes = manifest.volumes.iter().map(|v| v.size_bytes).sum::<u64>(),
+            "deep-archived (volumes exported, container + local volumes removed)"
+        );
     }
 }
 
@@ -167,7 +269,7 @@ mod tests {
             stops: Mutex::new(Vec::new()),
             stop_count: AtomicUsize::new(0),
         });
-        sweep_once(&t, rec.as_ref(), Duration::from_secs(60)).await;
+        sweep_once(&t, rec.as_ref(), None, Duration::from_secs(60)).await;
 
         assert_eq!(rec.stop_count.load(Ordering::Relaxed), 1);
         assert_eq!(*rec.stops.lock().await, vec!["oneai-orch-idle1"]);
@@ -191,6 +293,7 @@ mod tests {
         let h = spawn_idle_sweep(
             t,
             rec.clone(),
+            None,
             Duration::from_secs(3600),
             Duration::from_millis(10),
             cancel.clone(),

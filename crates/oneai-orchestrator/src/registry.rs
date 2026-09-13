@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::archive::ArchiveManifest;
 use crate::error::{OrchestratorError, Result};
 use crate::fsm::{
     validate_transition, PersistedEntry, SessionEntry, SessionSnapshot, SessionState,
@@ -265,6 +266,88 @@ impl RoutingTable {
             })
             .map(|e| e.spec.session_id.clone())
             .collect()
+    }
+
+    /// Deep-archive candidates (MVS3-C): Hibernating entries with no
+    /// attached connections, in that state for longer than `timeout_ms`
+    /// (`updated_at`-based, so it survives orchestrator restarts), not yet
+    /// archived, and still holding the stopped container's handle.
+    /// Advisory — the sweep re-validates under `cas_set_archived`.
+    pub async fn list_deep_archive_candidates(&self, timeout_ms: u64) -> Vec<String> {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::milliseconds(timeout_ms.min(i64::MAX as u64) as i64);
+        let map = self.inner.read().await;
+        map.values()
+            .filter(|e| {
+                e.state == SessionState::Hibernating
+                    && e.archived.is_none()
+                    && e.handle.is_some()
+                    && e.active_conns.load(std::sync::atomic::Ordering::Relaxed) == 0
+                    && e.updated_at <= cutoff
+            })
+            .map(|e| e.spec.session_id.clone())
+            .collect()
+    }
+
+    /// CAS on the deep-archive marker (NOT the lifecycle state — the entry
+    /// stays `Hibernating` through a deep archive; see `archive.rs`).
+    ///
+    /// - `Some(manifest)` (claim): succeeds only from `Hibernating` with no
+    ///   marker; clears the stale handle (the container+volumes are
+    ///   destroyed right after) and bumps `updated_at`.
+    /// - `None` (release, post successful restore+resume): succeeds only
+    ///   when a marker is present.
+    ///
+    /// Returns `false` on a CAS miss (concurrent claim, entry moved, or
+    /// gone) — exactly one concurrent sweep pass can claim a session.
+    pub async fn cas_set_archived(
+        &self,
+        id: &str,
+        manifest: Option<ArchiveManifest>,
+    ) -> Result<bool> {
+        let claimed = {
+            let mut map = self.inner.write().await;
+            let Some(entry) = map.get(id) else {
+                return Ok(false);
+            };
+            let setting = manifest.is_some();
+            if setting {
+                if entry.state != SessionState::Hibernating || entry.archived.is_some() {
+                    return Ok(false);
+                }
+            } else if entry.archived.is_none() {
+                return Ok(false);
+            }
+            let mut next = (**entry).clone();
+            if setting {
+                next.handle = None;
+                next.updated_at = chrono::Utc::now();
+            }
+            next.archived = manifest;
+            map.insert(id.to_string(), Arc::new(next));
+            true
+        };
+        if claimed {
+            // Persist outside the lock (same discipline as cas_transition).
+            if let Err(e) = self.persist().await {
+                tracing::error!(session = %id, error = %e, "routing table persist failed");
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Update `last_error` without a state transition (deep-archive sweep
+    /// failure diagnostics). No-op when the entry is gone.
+    pub async fn set_last_error(&self, id: &str, msg: String) -> Result<()> {
+        {
+            let mut map = self.inner.write().await;
+            if let Some(entry) = map.get(id) {
+                let mut next = (**entry).clone();
+                next.last_error = Some(msg);
+                map.insert(id.to_string(), Arc::new(next));
+            }
+        }
+        self.persist().await
     }
 
     /// Number of sessions in the table.
