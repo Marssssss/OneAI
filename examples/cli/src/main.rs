@@ -1037,6 +1037,14 @@ enum OrchestratorAction {
         /// Volume-archive store root (required with --deep-archive-timeout > 0)
         #[arg(long)]
         archive_dir: Option<String>,
+        /// Per-session lease TTL for multi-replica mode (MVS4-A; default 30,
+        /// renewal at ttl/3). Required > 0 when ONEAI_PG_DSN/pg_dsn selects
+        /// the shared Postgres routing table.
+        #[arg(long)]
+        lease_ttl: Option<u64>,
+        /// Replica identity for lease ownership (default: uuid v4 at boot)
+        #[arg(long)]
+        replica_id: Option<String>,
     },
     /// Create a session on a running orchestrator (spawns its container)
     Create {
@@ -1728,6 +1736,8 @@ fn main() {
                 provider_config,
                 deep_archive_timeout,
                 archive_dir,
+                lease_ttl,
+                replica_id,
             } => cmd_orchestrator::cmd_orchestrator_serve(
                 listen.as_deref(),
                 image.as_deref(),
@@ -1736,6 +1746,8 @@ fn main() {
                 provider_config.as_deref(),
                 deep_archive_timeout,
                 archive_dir.as_deref(),
+                lease_ttl,
+                replica_id.as_deref(),
             ),
             OrchestratorAction::Create { id, url } => {
                 cmd_orchestrator::cmd_orchestrator_create(url.as_deref(), id.as_deref())

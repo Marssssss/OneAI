@@ -46,20 +46,7 @@ impl OrchestratorState {
         runner: Arc<dyn ContainerRunner>,
     ) -> Result<Arc<Self>> {
         config.validate()?;
-        // Deep-archive store (MVS3-C): opt-in via config; the marker on
-        // persisted entries decides whether a resume needs a restore.
-        let archive_store: Option<Arc<dyn VolumeArchiveStore>> =
-            match (config.deep_archive_timeout_secs, &config.archive_dir) {
-                (timeout, Some(dir)) if timeout > 0 => {
-                    tracing::info!(
-                        dir = %dir.display(),
-                        timeout_secs = timeout,
-                        "deep volume archive enabled (LocalDirArchiveStore)"
-                    );
-                    Some(Arc::new(LocalDirArchiveStore::new(dir.clone())))
-                }
-                _ => None,
-            };
+        let archive_store = archive_store_from_config(&config);
         Self::with_archive_store(config, runner, archive_store).await
     }
 
@@ -574,13 +561,51 @@ impl OrchestratorState {
     }
 }
 
-/// Run the orchestrator control plane until Ctrl-C (or `cancel`).
+/// Deep-archive store (MVS3-C): opt-in via config; the marker on persisted
+/// entries decides whether a resume needs a restore.
+fn archive_store_from_config(config: &OrchestratorConfig) -> Option<Arc<dyn VolumeArchiveStore>> {
+    match (config.deep_archive_timeout_secs, &config.archive_dir) {
+        (timeout, Some(dir)) if timeout > 0 => {
+            tracing::info!(
+                dir = %dir.display(),
+                timeout_secs = timeout,
+                "deep volume archive enabled (LocalDirArchiveStore)"
+            );
+            Some(Arc::new(LocalDirArchiveStore::new(dir.clone())))
+        }
+        _ => None,
+    }
+}
+
+/// Run the orchestrator control plane until Ctrl-C (or `cancel`), on the
+/// file-backed routing table (single replica — the MVS2 default).
 pub async fn run(
     config: OrchestratorConfig,
     runner: Arc<dyn ContainerRunner>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let state = OrchestratorState::new(config.clone(), runner).await?;
+    run_with_store(config, runner, None, cancel).await
+}
+
+/// Run the control plane on an explicit session store (MVS4-A): pass a
+/// `PgSessionStore` for multi-replica mode (shared routing table + per-
+/// session leases); `None` keeps the file backend.
+pub async fn run_with_store(
+    config: OrchestratorConfig,
+    runner: Arc<dyn ContainerRunner>,
+    store: Option<Arc<dyn SessionStore>>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let archive_store = archive_store_from_config(&config);
+    let state = match store {
+        Some(store) => {
+            OrchestratorState::with_session_store(config.clone(), runner, archive_store, store)
+                .await?
+        }
+        None => {
+            OrchestratorState::with_archive_store(config.clone(), runner, archive_store).await?
+        }
+    };
     let listen: std::net::SocketAddr =
         state.config.listen.parse().map_err(|e| {
             OrchestratorError::Config(format!("listen {}: {e}", state.config.listen))

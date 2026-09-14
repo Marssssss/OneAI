@@ -21,7 +21,9 @@ default = ["fastembed"]
 fastembed = ["oneai-rag/fastembed"]
 # Shared Postgres storage backend (MVS3) — the cloud engine image builds
 # with `--features oneai-cli/postgres`; runtime selects it via ONEAI_PG_DSN.
-postgres = ["oneai-persistence/postgres"]
+# MVS4-A: also compiles the orchestrator's PgSessionStore (multi-replica
+# shared routing table), selected by the same ONEAI_PG_DSN at runtime.
+postgres = ["oneai-persistence/postgres", "oneai-orchestrator/postgres"]
 
 [dependencies]
 tokio = { workspace = true }

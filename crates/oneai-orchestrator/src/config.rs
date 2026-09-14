@@ -25,6 +25,13 @@
 //! # = disabled. Needs the throwaway helper image (alpine:3.20) pullable.
 //! deep_archive_timeout_secs = 86400
 //! archive_dir = "/srv/oneai-archive"
+//! # MVS4-A multi-replica: shared Postgres routing table + per-session
+//! # leases. Env `ONEAI_PG_DSN` wins over this field. Requires
+//! # lease_ttl_secs > 0 (leasing is what makes sweeps/reconcile safe
+//! # across replicas; escape hatch for migration: ONEAI_ORCH_PG_NO_LEASE=1).
+//! pg_dsn = "postgres://user:pass@127.0.0.1:5432/oneai"
+//! lease_ttl_secs = 30
+//! replica_id = ""   # empty → uuid v4 generated at boot
 //! ```
 
 use std::path::PathBuf;
@@ -47,6 +54,12 @@ pub const DEFAULT_RESUME_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_LEASE_TTL_SECS: u64 = 30;
 /// Bearer secret env var for the frontend → orchestrator channel (D7).
 pub const ORCHESTRATOR_SECRET_ENV: &str = "ONEAI_ORCHESTRATOR_SECRET";
+/// Shared-Postgres DSN env (same selection rule as the persistence Pg
+/// stores); wins over `OrchestratorConfig::pg_dsn`.
+pub const PG_DSN_ENV: &str = "ONEAI_PG_DSN";
+/// Escape hatch (`=1`): allow the Pg backend with leasing disabled —
+/// migration/testing only; multi-replica safety is GONE without leases.
+pub const PG_NO_LEASE_ENV: &str = "ONEAI_ORCH_PG_NO_LEASE";
 
 /// Orchestrator configuration. See the module docs for the TOML shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +114,11 @@ pub struct OrchestratorConfig {
     /// for real cold storage). Required when `deep_archive_timeout_secs > 0`.
     #[serde(default)]
     pub archive_dir: Option<PathBuf>,
+    /// Shared Postgres DSN for the multi-replica routing table (MVS4-A).
+    /// Env `ONEAI_PG_DSN` takes precedence (same selection rule as the six
+    /// persistence Pg stores). Empty/None = file backend (single replica).
+    #[serde(default)]
+    pub pg_dsn: Option<String>,
     /// Per-session lease TTL for multi-replica mode (MVS4-A). Default 30;
     /// renewal at ttl/3. Must be > 0 when the shared (Pg) store is active —
     /// leasing is what makes sweeps/reconcile ownership-scoped there.
@@ -161,6 +179,7 @@ impl Default for OrchestratorConfig {
             docker_bin: default_docker_bin(),
             deep_archive_timeout_secs: 0,
             archive_dir: None,
+            pg_dsn: None,
             lease_ttl_secs: default_lease_ttl(),
             replica_id: String::new(),
         }
@@ -192,6 +211,9 @@ impl OrchestratorConfig {
     }
 
     /// Apply CLI overrides (any `Some(..)` wins over file/default values).
+    // One flat positional list mirrors the CLI flags 1:1; a overrides
+    // struct would just move the 8-field boilerplate to the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_overrides(
         mut self,
         listen: Option<&str>,
@@ -200,6 +222,8 @@ impl OrchestratorConfig {
         idle_timeout_secs: Option<u64>,
         deep_archive_timeout_secs: Option<u64>,
         archive_dir: Option<&str>,
+        lease_ttl_secs: Option<u64>,
+        replica_id: Option<&str>,
     ) -> Self {
         if let Some(v) = listen {
             self.listen = v.to_string();
@@ -219,12 +243,49 @@ impl OrchestratorConfig {
         if let Some(v) = archive_dir {
             self.archive_dir = Some(PathBuf::from(v));
         }
+        if let Some(v) = lease_ttl_secs {
+            self.lease_ttl_secs = v;
+        }
+        if let Some(v) = replica_id {
+            self.replica_id = v.to_string();
+        }
         self
+    }
+
+    /// Effective shared-store DSN (MVS4-A): env `ONEAI_PG_DSN` wins over
+    /// `pg_dsn` — the same selection rule as the six persistence Pg stores.
+    /// `None` = file backend (single replica).
+    pub fn resolve_pg_dsn(&self) -> Option<String> {
+        std::env::var(PG_DSN_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.pg_dsn.clone().filter(|s| !s.is_empty()))
+    }
+
+    /// Whether the no-lease escape hatch is set (`ONEAI_ORCH_PG_NO_LEASE=1`).
+    pub fn pg_no_lease_escape() -> bool {
+        std::env::var(PG_NO_LEASE_ENV)
+            .ok()
+            .is_some_and(|v| v == "1")
     }
 
     /// Cross-field validation. Called by `OrchestratorState::new` so every
     /// construction path (file, defaults, CLI overrides) is covered.
     pub fn validate(&self) -> crate::error::Result<()> {
+        // MVS4-A: a shared Pg routing table WITHOUT leasing is a foot-gun —
+        // sweeps and reconcile would race across replicas with no ownership
+        // arbitration. Refuse to start (escape hatch for migration/tests).
+        if self.resolve_pg_dsn().is_some()
+            && self.lease_ttl_secs == 0
+            && !Self::pg_no_lease_escape()
+        {
+            return Err(crate::error::OrchestratorError::Config(format!(
+                "a shared Postgres routing table ({PG_DSN_ENV}/pg_dsn) requires \
+                 lease_ttl_secs > 0 (multi-replica ownership); set --lease-ttl \
+                 (default {DEFAULT_LEASE_TTL_SECS}s) or {PG_NO_LEASE_ENV}=1 to \
+                 explicitly run lease-less (NOT multi-replica safe)"
+            )));
+        }
         if self.deep_archive_timeout_secs > 0 {
             if self.archive_dir.is_none() {
                 return Err(crate::error::OrchestratorError::Config(
@@ -351,6 +412,8 @@ mod tests {
             Some(5),
             Some(90),
             Some("/tmp/arch"),
+            Some(15),
+            Some("rep-x"),
         );
         assert_eq!(c.listen, "127.0.0.1:1234");
         assert_eq!(c.image, "img:latest");
@@ -358,7 +421,30 @@ mod tests {
         assert_eq!(c.idle_timeout_secs, 5);
         assert_eq!(c.deep_archive_timeout_secs, 90);
         assert_eq!(c.archive_dir, Some(PathBuf::from("/tmp/arch")));
+        assert_eq!(c.lease_ttl_secs, 15);
+        assert_eq!(c.replica_id, "rep-x");
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn pg_without_lease_rejected_unless_escape() {
+        // Config-level DSN (env is process-global — keep this test on the
+        // field so parallel tests can't race the environment).
+        let c = OrchestratorConfig {
+            pg_dsn: Some("postgres://u:p@127.0.0.1:5432/db".into()),
+            lease_ttl_secs: 0,
+            ..OrchestratorConfig::default()
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("lease_ttl_secs"), "{err}");
+        // ttl > 0 → ok.
+        let ok = OrchestratorConfig {
+            lease_ttl_secs: 30,
+            ..c.clone()
+        };
+        assert!(ok.validate().is_ok());
+        // Default (no DSN, ttl 30) stays valid.
+        assert!(OrchestratorConfig::default().validate().is_ok());
     }
 
     #[test]

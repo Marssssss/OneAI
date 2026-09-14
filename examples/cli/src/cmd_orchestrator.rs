@@ -9,14 +9,17 @@
 
 use std::sync::Arc;
 
-use oneai_orchestrator::config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
+use oneai_orchestrator::config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV, PG_DSN_ENV};
 use oneai_orchestrator::docker::DockerRunner;
+use oneai_orchestrator::store::SessionStore;
 
 /// Default control-plane URL for client subcommands.
 const DEFAULT_URL: &str = "http://127.0.0.1:9191";
 
 // ─── serve (daemon) ─────────────────────────────────────────────────────────
 
+// Positional mirrors of the `oneai orchestrator serve` clap flags.
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_orchestrator_serve(
     listen: Option<&str>,
     image: Option<&str>,
@@ -25,8 +28,10 @@ pub fn cmd_orchestrator_serve(
     provider_config: Option<&str>,
     deep_archive_timeout: Option<u64>,
     archive_dir: Option<&str>,
+    lease_ttl: Option<u64>,
+    replica_id: Option<&str>,
 ) {
-    println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2)");
+    println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2/MVS4-A)");
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async move {
@@ -37,10 +42,61 @@ pub fn cmd_orchestrator_serve(
             idle_timeout,
             deep_archive_timeout,
             archive_dir,
+            lease_ttl,
+            replica_id,
         );
         if let Some(p) = provider_config {
             config.provider_config = Some(std::path::PathBuf::from(p));
         }
+        // Fail fast on config contradictions (Pg-without-lease foot-gun,
+        // deep-archive requirements) BEFORE binding anything.
+        config.validate().map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        // ── Routing-table backend selection (MVS4-A; mirrors the
+        // pg_backends.rs convention: env DSN wins, loud fallback, never
+        // silent divergence) ──
+        #[allow(unused_mut)] // only the `postgres` branch assigns
+        let mut store: Option<Arc<dyn SessionStore>> = None;
+        if let Some(dsn) = config.resolve_pg_dsn() {
+            #[cfg(feature = "postgres")]
+            {
+                match oneai_orchestrator::PgSessionStore::connect(&dsn).await {
+                    Ok(s) => {
+                        println!("   Backend:  Postgres (shared routing table, multi-replica)");
+                        store = Some(Arc::new(s));
+                    }
+                    Err(e) => eprintln!(
+                        "Warning: {PG_DSN_ENV}/pg_dsn is set but PgSessionStore connect failed: {e} \
+                         — falling back to the FILE routing table (single replica only; \
+                         other replicas on Pg will NOT see this one's sessions)"
+                    ),
+                }
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = dsn;
+                eprintln!(
+                    "Warning: {PG_DSN_ENV}/pg_dsn is set but this binary was built without the \
+                     `postgres` feature — falling back to the FILE routing table (single replica)"
+                );
+            }
+        }
+        if store.is_none() {
+            println!(
+                "   Backend:  file ({}/sessions.json, single replica)",
+                config.registry_dir.display()
+            );
+        }
+        println!(
+            "   Replica:  {} (lease ttl {}s{})",
+            if config.replica_id.trim().is_empty() {
+                "auto (uuid v4 at boot)".to_string()
+            } else {
+                config.replica_id.clone()
+            },
+            config.lease_ttl_secs,
+            if store.is_some() { "" } else { ", inactive — file mode" },
+        );
 
         println!("   Listen:   {}", config.listen);
         println!("   Image:    {}", config.image);
@@ -94,7 +150,7 @@ pub fn cmd_orchestrator_serve(
         };
         let runner = Arc::new(DockerRunner::with_bin(&config.docker_bin, probe_host));
         let cancel = tokio_util::sync::CancellationToken::new();
-        oneai_orchestrator::run(config, runner, cancel)
+        oneai_orchestrator::run_with_store(config, runner, store, cancel)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
     }) {

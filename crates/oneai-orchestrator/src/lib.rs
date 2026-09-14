@@ -62,7 +62,7 @@ pub use fsm::{SessionSnapshot, SessionState};
 pub use pg_session_store::PgSessionStore;
 pub use registry::RoutingTable;
 pub use runner::{ContainerHandle, ContainerRunner, SessionSpec};
-pub use server::{run, OrchestratorState};
+pub use server::{run, run_with_store, OrchestratorState};
 pub use store::{
     ClaimOutcome, FileSessionStore, LeaseGuard, LeaseIdentity, LeaseInfo, SessionStore,
     StoredSession,
