@@ -1,8 +1,12 @@
 //! Shared plumbing for the Postgres-backed stores (feature `postgres`, MVS3).
 //!
+//! Public since MVS4-A so `oneai-orchestrator`'s `PgSessionStore` reuses the
+//! same recipe instead of forking a seventh copy — this is OneAI-internal
+//! plumbing, not a stability-guaranteed public API.
+//!
 //! Every Pg store (`PgWorkingStateStore`, `PgMemoryStore`, `PgUsageTracker`,
-//! `PgHostAllowlist`, `PgSessionEventStore`, `PgFeedbackStore`) uses the same
-//! recipe:
+//! `PgHostAllowlist`, `PgSessionEventStore`, `PgFeedbackStore`, and the
+//! orchestrator's `PgSessionStore`) uses the same recipe:
 //!
 //! 1. [`build_pool`] — deadpool-postgres, `NoTls`, `RecyclingMethod::Fast`,
 //!    `Runtime::Tokio1`, default size 8.
@@ -29,23 +33,24 @@
 //! | 1330538828 | PgHostAllowlist      |
 //! | 1330538829 | PgSessionEventStore  |
 //! | 1330538830 | PgFeedbackStore      |
+//! | 1330538831 | PgSessionStore (oneai-orchestrator, MVS4-A) |
 //!
-//! Next free key: base+6 (1330538831).
+//! Next free key: base+7 (1330538832).
 
 use deadpool_postgres::tokio_postgres::NoTls;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use oneai_core::error::{OneAIError, Result};
 
 /// Advisory-lock key base ("ONEAI" = 0x4F4E4149). `PgWorkingStateStore` uses
-/// the base itself; later stores use base+1..+5 (see the registry above).
-pub(crate) const ADVISORY_LOCK_BASE: i64 = 1330538825;
+/// the base itself; later stores use base+1..+6 (see the registry above).
+pub const ADVISORY_LOCK_BASE: i64 = 1330538825;
 
 /// Build the standard OneAI Pg pool from a libpq connection string (e.g.
 /// `postgres://user:pass@host:5432/dbname`).
 ///
 /// TLS is not negotiated (`NoTls`) — target a same-host / same-VPC Postgres,
 /// or terminate TLS in front of it (pgbouncer / cloud proxy).
-pub(crate) fn build_pool(dsn: &str, max_size: usize) -> Result<Pool> {
+pub fn build_pool(dsn: &str, max_size: usize) -> Result<Pool> {
     // deadpool-postgres re-exports its tokio-postgres; parse the DSN with
     // the same `FromStr` impl libpq URLs use.
     let pg_config: deadpool_postgres::tokio_postgres::Config = dsn.parse().map_err(|e| {
@@ -65,11 +70,11 @@ pub(crate) fn build_pool(dsn: &str, max_size: usize) -> Result<Pool> {
         .map_err(|e| OneAIError::Persistence(format!("Failed to build Pg pool: {}", e)))
 }
 
-pub(crate) fn pool_err(e: deadpool_postgres::PoolError) -> OneAIError {
+pub fn pool_err(e: deadpool_postgres::PoolError) -> OneAIError {
     OneAIError::Persistence(format!("Pg pool error: {}", e))
 }
 
-pub(crate) fn pg_err(e: deadpool_postgres::tokio_postgres::Error) -> OneAIError {
+pub fn pg_err(e: deadpool_postgres::tokio_postgres::Error) -> OneAIError {
     // Surface the server-side DbError detail (message + SQLSTATE) — the bare
     // Display of a wrapped db error is just "db error", useless for triage.
     if let Some(db) = e.as_db_error() {
@@ -85,7 +90,7 @@ pub(crate) fn pg_err(e: deadpool_postgres::tokio_postgres::Error) -> OneAIError 
     OneAIError::Persistence(format!("Pg error: {}", e))
 }
 
-pub(crate) fn now_rfc3339() -> String {
+pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
@@ -98,7 +103,7 @@ pub(crate) fn now_rfc3339() -> String {
 /// - `ddl` is applied with `batch_execute`; it must be idempotent
 ///   (`CREATE ... IF NOT EXISTS`) and may include `CREATE EXTENSION`.
 /// - `lock_key` is the store's entry in the advisory-lock registry above.
-pub(crate) async fn ensure_schema(
+pub async fn ensure_schema(
     pool: &Pool,
     ready: &tokio::sync::OnceCell<()>,
     lock_key: i64,

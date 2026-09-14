@@ -26,7 +26,7 @@
 pub mod checkpoint;
 pub mod host_allowlist;
 #[cfg(feature = "postgres")]
-mod pg_common;
+pub mod pg_common;
 #[cfg(feature = "postgres")]
 pub mod pg_feedback_store;
 #[cfg(feature = "postgres")]
