@@ -33,6 +33,17 @@ pub fn cmd_orchestrator_serve(
 ) {
     println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2/MVS4-A)");
 
+    // tracing → stderr（RUST_LOG 可控，默认 info）。编排器的生命周期日志
+    // （reconcile/租约 claim-loss/sweep/deep-archive/告警回退）是验收与运维
+    // 排障的地面真值——此前从未接 subscriber，tracing::info! 全部被丢弃。
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async move {
         let mut config = OrchestratorConfig::load_default()?.with_overrides(
