@@ -933,3 +933,15 @@ rep-dq + 文件模式 rep-f，外加 node OTLP 捕获桩 :4318；`mvs4b_run.sh`
    8 并发同租户 max=3 恰 3 Running+5 拒、限流桶每副本独立）。既有测试仅
    动一处：idle_sweep 改显式回拨活动钟（原隐式依赖 ≥1ms 墙钟流逝，
    本身脆弱，非本轮语义变化）。
+
+### G.3 回归
+
+- **MVS4-A 验收原样重跑 21/21 全绿**（新宿主二进制 + `oneai-engine:mvs4b`
+  镜像；未配配额/OTEL 时行为零变化的承诺兑现）。唯一脚本侧修正：A4 原
+  断言假设「turn 时长 > 一拍心跳（ttl/3）→ 活动必已节流落库」，provider
+  快时（本轮实测 2.7s < 3.3s 首拍）偶发假阴性——改为先 close（LeaseGuard
+  drop 强制 flush）再轮询等落库，断言语义不变（产品代码零改动；A 轮
+  F.2-8/9 同款「验收脚本自身断言修正」先例）。
+- 既有单测/集成：orchestrator 70 + trace 52（含 otel feature）+ app 43 +
+  persistence 78 + multi_replica 10 全绿；idle_sweep 既有测试同因（墙钟
+  ≥1ms 隐式依赖）改显式回拨活动钟。
