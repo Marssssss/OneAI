@@ -47,6 +47,7 @@ pub mod registry;
 pub mod routes;
 pub mod runner;
 pub mod server;
+pub mod store;
 
 pub use archive::{
     ArchiveManifest, DeepArchive, LocalDirArchiveStore, VolumeArchive, VolumeArchiveStore,
@@ -58,3 +59,4 @@ pub use fsm::{SessionSnapshot, SessionState};
 pub use registry::RoutingTable;
 pub use runner::{ContainerHandle, ContainerRunner, SessionSpec};
 pub use server::{run, OrchestratorState};
+pub use store::{ClaimOutcome, FileSessionStore, LeaseInfo, SessionStore, StoredSession};

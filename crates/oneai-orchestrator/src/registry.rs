@@ -1,85 +1,196 @@
 //! Session routing table: `session_id → (container, addr, state)`.
 //!
-//! Persistence mirrors `oneai-supervisor/src/registry.rs`: whole-file JSON,
-//! atomic `write(tmp) → rename`. Reconcile on startup (D3): entries persisted
-//! as Running/Resuming are health-probed — alive containers keep Running
-//! (re-mounted), dead ones are marked `Crashed("orchestrator_restart")` and
-//! resume lazily on the next request (D6).
+//! MVS4-A: the *durable* half lives behind [`SessionStore`] (`store.rs`) —
+//! whole-file JSON by default (`FileSessionStore`, byte-compatible with the
+//! MVS2 `sessions.json`), shared Postgres in multi-replica mode
+//! (`PgSessionStore`). What remains here is the per-replica hot cache: the
+//! process-local atomics (`active_conns`, `last_activity_ms`,
+//! `ready_notify`) that the WS proxy bumps per frame without any IO, plus
+//! the merge logic that keeps cache entries aligned with fresh store reads.
+//!
+//! Reconcile on startup (D3): entries persisted as Running/Resuming are
+//! health-probed — alive containers keep Running (re-mounted), dead ones are
+//! marked `Crashed("orchestrator_restart")` and resume lazily on the next
+//! request (D6). Multi-replica reconcile is lease-gated (MVS4-A): a replica
+//! only probes/takes over sessions whose lease is expired or self-held.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::archive::ArchiveManifest;
-use crate::error::{OrchestratorError, Result};
-use crate::fsm::{
-    validate_transition, PersistedEntry, SessionEntry, SessionSnapshot, SessionState,
-};
+use crate::error::Result;
+use crate::fsm::{SessionEntry, SessionSnapshot, SessionState};
 use crate::runner::{ContainerHandle, ContainerRunner};
+use crate::store::{FileSessionStore, SessionStore, StoredSession};
 
-/// Registry file name inside the registry dir.
-pub const REGISTRY_FILE: &str = "sessions.json";
+pub use crate::store::REGISTRY_FILE;
 
-/// On-disk shape (versioned envelope like the supervisor registry).
-#[derive(Debug, Serialize, Deserialize)]
-struct RegistryFile {
-    sessions: Vec<PersistedEntry>,
-}
+/// Minimum gap between two durable activity flushes for the same session
+/// (the per-frame `touch()` stays a local atomic; only the flush hits the
+/// store). 1s granularity keeps a cross-replica idle sweep's view of
+/// `last_activity_ms` fresh enough for timeouts measured in minutes.
+pub const ACTIVITY_FLUSH_MS: u64 = 1000;
 
 /// The routing table. Cheap to clone (Arc inside).
 #[derive(Clone)]
 pub struct RoutingTable {
+    /// Per-replica hot cache: process-local atomics + ready-notify hub,
+    /// refreshed from the store on every durable read/write.
     inner: Arc<RwLock<HashMap<String, Arc<SessionEntry>>>>,
-    /// `<registry_dir>/sessions.json`
-    path: PathBuf,
-    /// Serializes whole-file persists: concurrent `write(tmp) → rename` on a
-    /// SHARED tmp name races (one renamer steals the other's file → ENOENT).
-    persist_lock: Arc<tokio::sync::Mutex<()>>,
+    store: Arc<dyn SessionStore>,
+}
+
+/// Merge one stored row into the cache.
+///
+/// The Arc is only clone-and-replaced when the DURABLE fields actually
+/// differ from the cached view. An unchanged row returns the very same Arc —
+/// critical because live handles to the entry (`ConnGuard` inside a running
+/// proxy, a sweep's veto read) mutate its atomics in place; replacing the
+/// Arc on every read would orphan those handles and leak `active_conns`.
+///
+/// Durable activity is merged monotonically *in place* (fetch_max): another
+/// replica's newer flush wins over a stale local clock, never the other way
+/// around, and no Arc replacement is needed for it.
+fn merge_stored(
+    map: &mut HashMap<String, Arc<SessionEntry>>,
+    s: &StoredSession,
+) -> Arc<SessionEntry> {
+    let id = &s.entry.spec.session_id;
+    if let Some(existing) = map.get(id) {
+        // Cross-replica activity: bump the shared atomics in place. Also
+        // raise the flush watermark so our own flusher never writes an
+        // older value back over a foreign newer one.
+        if s.last_activity_ms > existing.last_activity_ms.load(Ordering::Relaxed) {
+            existing
+                .last_activity_ms
+                .fetch_max(s.last_activity_ms, Ordering::Relaxed);
+            existing
+                .last_flushed_activity_ms
+                .fetch_max(s.last_activity_ms, Ordering::Relaxed);
+        }
+        let unchanged = existing.state == s.entry.state
+            && existing.handle == s.entry.handle
+            && existing.last_error == s.entry.last_error
+            && existing.updated_at == s.entry.updated_at
+            && existing.archived == s.entry.archived;
+        if unchanged {
+            return existing.clone();
+        }
+        let mut next = (**existing).clone();
+        next.handle = s.entry.handle.clone();
+        next.state = s.entry.state;
+        next.last_error = s.entry.last_error.clone();
+        next.updated_at = s.entry.updated_at;
+        next.archived = s.entry.archived.clone();
+        let arc = Arc::new(next);
+        map.insert(id.clone(), arc.clone());
+        return arc;
+    }
+    let e = SessionEntry::from_persisted(s.entry.clone());
+    if s.last_activity_ms > 0 {
+        // Backends that track durable activity (Pg): seed the idle clock
+        // with the truth instead of "now" (a fresh cache entry must not
+        // look freshly-active). File mode stores 0 → the from_persisted
+        // "clock starts now" restart grace applies.
+        e.last_activity_ms
+            .store(s.last_activity_ms, Ordering::Relaxed);
+        e.last_flushed_activity_ms
+            .store(s.last_activity_ms, Ordering::Relaxed);
+    }
+    let arc = Arc::new(e);
+    map.insert(id.clone(), arc.clone());
+    arc
 }
 
 impl RoutingTable {
-    /// Empty table persisting to `<dir>/sessions.json`.
+    /// Empty table backed by the file store at `<dir>/sessions.json`
+    /// (MVS2 default; dir created on the first write).
     pub fn new(dir: impl AsRef<Path>) -> Self {
+        Self::with_store(Arc::new(FileSessionStore::new(dir)))
+    }
+
+    /// Table backed by an explicit store (the MVS4-A injection point for
+    /// `PgSessionStore` / test fakes).
+    pub fn with_store(store: Arc<dyn SessionStore>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
-            path: dir.as_ref().join(REGISTRY_FILE),
-            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            store,
         }
     }
 
-    /// Registry file path.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The durable store behind this table (lease ops, backend capability
+    /// probes).
+    pub fn store(&self) -> Arc<dyn SessionStore> {
+        self.store.clone()
     }
 
-    /// Insert a brand-new entry. Err(AlreadyExists) if the id is taken.
+    /// Backing file path (file backend only; `None` for shared stores).
+    pub fn path(&self) -> Option<&Path> {
+        self.store.store_path()
+    }
+
+    /// Insert a brand-new entry. Err(AlreadyExists) if the id is taken —
+    /// on shared backends the primary key arbitrates ACROSS replicas.
+    /// Durable immediately (mid-spawn crash reconcile depends on it).
     pub async fn insert_new(&self, entry: SessionEntry) -> Result<Arc<SessionEntry>> {
         let id = entry.spec.session_id.clone();
-        {
-            let mut map = self.inner.write().await;
-            if map.contains_key(&id) {
-                return Err(OrchestratorError::AlreadyExists(id));
-            }
-            let arc = Arc::new(entry);
-            map.insert(id, arc.clone());
-            Ok(arc)
-        }
-        // NOTE: insert_new does NOT persist — callers that need the entry
-        // durable before the next state change (mid-spawn crash reconcile)
-        // call `persist()` explicitly; `cas_transition` persists on every
-        // successful transition anyway.
+        self.store.insert(&entry.to_persisted()).await?;
+        let arc = Arc::new(entry);
+        self.inner.write().await.insert(id, arc.clone());
+        Ok(arc)
     }
 
-    /// Get a session entry by id.
+    /// Get a session entry by id (fresh store read merged into the cache).
+    /// On a store outage the stale cache entry is served (logged loudly) so
+    /// in-flight proxies and control-plane reads degrade instead of failing.
     pub async fn get(&self, id: &str) -> Option<Arc<SessionEntry>> {
-        self.inner.read().await.get(id).cloned()
+        match self.store.get(id).await {
+            Ok(Some(s)) => {
+                let mut map = self.inner.write().await;
+                Some(merge_stored(&mut map, &s))
+            }
+            Ok(None) => {
+                // Gone from the shared truth (e.g. destroyed by another
+                // replica) — drop the local shadow.
+                self.inner.write().await.remove(id);
+                None
+            }
+            Err(e) => {
+                tracing::error!(
+                    session = %id, error = %e,
+                    "session store read failed; serving cached entry (may be stale)"
+                );
+                self.inner.read().await.get(id).cloned()
+            }
+        }
     }
 
-    /// All sessions as JSON snapshots (sorted by id for stable output).
+    /// Refresh the whole cache from the store; returns the fresh rows.
+    async fn refresh_cache(&self) -> Result<Vec<StoredSession>> {
+        let all = self.store.load_all().await?;
+        let mut map = self.inner.write().await;
+        let live: HashSet<&str> = all
+            .iter()
+            .map(|s| s.entry.spec.session_id.as_str())
+            .collect();
+        map.retain(|id, _| live.contains(id.as_str()));
+        for s in &all {
+            merge_stored(&mut map, s);
+        }
+        Ok(all)
+    }
+
+    /// All sessions as JSON snapshots (sorted by id for stable output),
+    /// refreshed from the store so replicas converge on the shared truth.
+    /// On a store outage the cached view is served (logged loudly).
     pub async fn list(&self) -> Vec<SessionSnapshot> {
+        if let Err(e) = self.refresh_cache().await {
+            tracing::error!(error = %e, "session store list failed; serving cached snapshots");
+        }
         let map = self.inner.read().await;
         let mut v: Vec<_> = map.values().map(|e| e.snapshot()).collect();
         v.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -87,12 +198,13 @@ impl RoutingTable {
     }
 
     /// CAS state transition: succeeds only if the current state equals
-    /// `expected`. `new_handle`/`last_error` are merged when `Some`.
-    /// On success: replaces the Arc, persists (outside the write lock), and
-    /// signals `ready_notify` waiters when the new state is Running.
+    /// `expected` (arbitrated by the STORE — cross-replica safe).
+    /// `new_handle`/`last_error` are merged when `Some`. On success the
+    /// cache is re-merged and `ready_notify` waiters are signalled when the
+    /// new state is Running.
     ///
     /// Returns `Ok(None)` on a CAS miss (caller re-reads and retries or
-    /// gives up); `Err` only on an illegal transition.
+    /// gives up); `Err` only on an illegal transition or store failure.
     pub async fn cas_transition(
         &self,
         id: &str,
@@ -101,167 +213,163 @@ impl RoutingTable {
         new_handle: Option<ContainerHandle>,
         last_error: Option<String>,
     ) -> Result<Option<Arc<SessionEntry>>> {
+        let updated = self
+            .store
+            .cas_transition(id, expected, to, new_handle, last_error)
+            .await?;
+        let Some(p) = updated else {
+            return Ok(None);
+        };
         let arc = {
             let mut map = self.inner.write().await;
-            let Some(entry) = map.get(id) else {
-                return Ok(None);
-            };
-            if entry.state != expected {
-                return Ok(None); // CAS miss
-            }
-            validate_transition(expected, to)?;
-            let mut next = (**entry).clone();
-            next.state = to;
-            if new_handle.is_some() {
-                next.handle = new_handle;
-            }
-            next.last_error = last_error;
-            next.updated_at = chrono::Utc::now();
-            let arc = Arc::new(next);
-            map.insert(id.to_string(), arc.clone());
-            arc
+            merge_stored(&mut map, &StoredSession::new(p))
         };
-        // Persist outside the lock (slow fsync must not block lookups).
-        if let Err(e) = self.persist().await {
-            tracing::error!(session = %id, error = %e, "routing table persist failed");
-        }
         if to == SessionState::Running {
             arc.ready_notify.notify_waiters();
         }
         Ok(Some(arc))
     }
 
-    /// Remove an entry entirely (post-Destroyed tombstone cleanup) and
-    /// persist.
+    /// Remove an entry entirely (post-Destroyed tombstone cleanup).
     pub async fn remove(&self, id: &str) -> Result<()> {
-        {
-            let mut map = self.inner.write().await;
-            map.remove(id);
-        }
-        self.persist().await
-    }
-
-    /// Persist the whole table atomically: write `<file>.tmp` → rename.
-    /// Parent dir is created on demand. Unix: best-effort chmod 600 (the
-    /// file may contain injected env secrets — MVS2 limitation, D5 notes
-    /// Secret Manager for production).
-    pub async fn persist(&self) -> Result<()> {
-        let sessions: Vec<PersistedEntry> = {
-            let map = self.inner.read().await;
-            let mut v: Vec<_> = map.values().map(|e| e.to_persisted()).collect();
-            v.sort_by(|a, b| a.spec.session_id.cmp(&b.spec.session_id));
-            v
-        };
-        let file = RegistryFile { sessions };
-        let json = serde_json::to_vec_pretty(&file)
-            .map_err(|e| OrchestratorError::Persist(e.to_string()))?;
-        // Serialize write+rename across concurrent transitions (a shared tmp
-        // name races: renamer A steals renamer B's file → ENOENT).
-        let _guard = self.persist_lock.lock().await;
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let tmp = self
-            .path
-            .with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4().simple()));
-        tokio::fs::write(&tmp, &json).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-        }
-        tokio::fs::rename(&tmp, &self.path).await?;
+        self.store.remove(id).await?;
+        self.inner.write().await.remove(id);
         Ok(())
     }
 
-    /// Load the table from disk (missing file = empty table; malformed file
-    /// is an error — better to refuse than silently drop live sessions).
+    /// Durability barrier (file backend: whole-file atomic write; shared
+    /// backends: no-op — every mutation is already durable).
+    pub async fn persist(&self) -> Result<()> {
+        self.store.flush().await
+    }
+
+    /// Durable activity flush for one session, throttled to
+    /// [`ACTIVITY_FLUSH_MS`] granularity unless `force` (proxy teardown /
+    /// lease release must flush so a foreign idle sweep never sees stale
+    /// activity). The per-frame `entry.touch()` remains a local atomic.
+    pub async fn flush_activity(&self, id: &str, force: bool) -> Result<()> {
+        let (val, prev_flushed) = {
+            let map = self.inner.read().await;
+            let Some(e) = map.get(id) else {
+                return Ok(());
+            };
+            (
+                e.last_activity_ms.load(Ordering::Relaxed),
+                e.last_flushed_activity_ms.load(Ordering::Relaxed),
+            )
+        };
+        if val <= prev_flushed || (!force && val - prev_flushed < ACTIVITY_FLUSH_MS) {
+            return Ok(());
+        }
+        self.store.touch_activity(id, val).await?;
+        if let Some(e) = self.inner.read().await.get(id) {
+            e.last_flushed_activity_ms.fetch_max(val, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Load the table from the file backend (missing file = empty table;
+    /// malformed file is an error — better to refuse than silently drop live
+    /// sessions).
     pub async fn load(dir: impl AsRef<Path>) -> Result<Self> {
-        let table = Self::new(dir);
-        if !table.path.exists() {
-            return Ok(table);
-        }
-        let bytes = tokio::fs::read(table.path()).await?;
-        let file: RegistryFile = serde_json::from_slice(&bytes)
-            .map_err(|e| OrchestratorError::Persist(format!("{}: {e}", table.path.display())))?;
-        {
-            let mut map = table.inner.write().await;
-            for p in file.sessions {
-                let entry = SessionEntry::from_persisted(p);
-                map.insert(entry.spec.session_id.clone(), Arc::new(entry));
-            }
-        }
+        let store = Arc::new(FileSessionStore::open(dir).await?);
+        Self::load_with_store(store).await
+    }
+
+    /// Load the cache from an explicit store.
+    pub async fn load_with_store(store: Arc<dyn SessionStore>) -> Result<Self> {
+        let table = Self::with_store(store);
+        table.refresh_cache().await?;
         Ok(table)
     }
 
-    /// Load + startup reconcile (D3/R3): for every entry persisted as
-    /// Running/Resuming/Creating, probe the container. Alive → force to
-    /// Running (re-mounted). Dead/gone → Crashed("orchestrator_restart").
-    /// Hibernating entries stay as-is (their container is stopped by
-    /// design). Failed/Destroyed are kept for API visibility.
+    /// Load + startup reconcile (D3/R3) on the file backend.
     pub async fn load_and_reconcile(
         dir: impl AsRef<Path>,
         runner: &dyn ContainerRunner,
     ) -> Result<Self> {
-        let table = Self::load(dir).await?;
-        let candidates: Vec<(String, Arc<SessionEntry>)> = {
-            let map = table.inner.read().await;
-            map.iter()
-                .filter(|(_, e)| {
-                    matches!(
-                        e.state,
-                        SessionState::Running | SessionState::Resuming | SessionState::Creating
-                    )
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-        for (id, entry) in candidates {
-            let alive = match &entry.handle {
+        let store = Arc::new(FileSessionStore::open(dir).await?);
+        Self::reconcile_with_store(store, runner).await
+    }
+
+    /// Load + startup reconcile against an explicit store. For every entry
+    /// persisted as Running/Resuming/Creating, probe the container. Alive →
+    /// force to Running (re-mounted). Dead/gone → Crashed("orchestrator_restart").
+    /// Hibernating entries stay as-is (their container is stopped by
+    /// design). Failed/Destroyed are kept for API visibility.
+    pub async fn reconcile_with_store(
+        store: Arc<dyn SessionStore>,
+        runner: &dyn ContainerRunner,
+    ) -> Result<Self> {
+        let table = Self::with_store(store);
+        let all = table.refresh_cache().await?;
+        for s in &all {
+            if !matches!(
+                s.entry.state,
+                SessionState::Running | SessionState::Resuming | SessionState::Creating
+            ) {
+                continue;
+            }
+            let id = &s.entry.spec.session_id;
+            let alive = match &s.entry.handle {
                 Some(h) => runner.health(h).await.unwrap_or(false),
                 None => false,
             };
-            let from = entry.state;
-            let mut next = table.inner.write().await;
-            if let Some(cur) = next.get(&id) {
-                if cur.state != from {
-                    continue; // moved underneath us; leave it
-                }
-                let mut e2 = (**cur).clone();
-                if alive {
-                    e2.state = SessionState::Running;
-                } else {
-                    e2.state = SessionState::Crashed;
-                    e2.last_error = Some("orchestrator_restart".into());
-                }
-                e2.updated_at = chrono::Utc::now();
-                let arc = Arc::new(e2);
-                next.insert(id.clone(), arc.clone());
-                drop(next);
-                if alive {
-                    arc.ready_notify.notify_waiters();
-                }
-                tracing::info!(
-                    session = %id,
-                    from = ?from,
-                    alive,
-                    "reconciled after orchestrator restart"
-                );
+            // Freshness re-read: the entry may have moved while we probed.
+            let Some(fresh) = table.store.get(id).await? else {
+                continue;
+            };
+            if fresh.entry.state != s.entry.state {
+                continue; // moved underneath us; leave it
             }
+            let mut e = fresh.entry.clone();
+            if alive {
+                e.state = SessionState::Running;
+            } else {
+                e.state = SessionState::Crashed;
+                e.last_error = Some("orchestrator_restart".into());
+            }
+            e.updated_at = chrono::Utc::now();
+            table.store.force_update(&e).await?;
+            let arc = {
+                let mut map = table.inner.write().await;
+                merge_stored(
+                    &mut map,
+                    &StoredSession {
+                        entry: e,
+                        lease: fresh.lease.clone(),
+                        last_activity_ms: fresh.last_activity_ms,
+                    },
+                )
+            };
+            if alive {
+                arc.ready_notify.notify_waiters();
+            }
+            tracing::info!(
+                session = %id,
+                from = ?fresh.entry.state,
+                alive,
+                "reconciled after orchestrator restart"
+            );
         }
         table.persist().await?;
         Ok(table)
     }
 
     /// Idle-hibernation candidates: Running, no attached WS connections, and
-    /// idle for longer than `timeout_ms`. Advisory — the caller must still
+    /// idle for longer than `timeout_ms`. The store is re-read first so the
+    /// idle clock accounts for activity flushed by ANOTHER replica's proxy
+    /// (monotonic merge in `merge_stored`). Advisory — the caller must still
     /// CAS (state may move between here and there).
     pub async fn list_idle_candidates(&self, timeout_ms: u64) -> Vec<String> {
+        if let Err(e) = self.refresh_cache().await {
+            tracing::warn!(error = %e, "idle sweep: store refresh failed; using cached view");
+        }
         let map = self.inner.read().await;
         map.values()
             .filter(|e| {
                 e.state == SessionState::Running
-                    && e.active_conns.load(std::sync::atomic::Ordering::Relaxed) == 0
+                    && e.active_conns.load(Ordering::Relaxed) == 0
                     && e.idle_ms() > timeout_ms
             })
             .map(|e| e.spec.session_id.clone())
@@ -276,13 +384,16 @@ impl RoutingTable {
     pub async fn list_deep_archive_candidates(&self, timeout_ms: u64) -> Vec<String> {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::milliseconds(timeout_ms.min(i64::MAX as u64) as i64);
+        if let Err(e) = self.refresh_cache().await {
+            tracing::warn!(error = %e, "deep-archive sweep: store refresh failed; using cached view");
+        }
         let map = self.inner.read().await;
         map.values()
             .filter(|e| {
                 e.state == SessionState::Hibernating
                     && e.archived.is_none()
                     && e.handle.is_some()
-                    && e.active_conns.load(std::sync::atomic::Ordering::Relaxed) == 0
+                    && e.active_conns.load(Ordering::Relaxed) == 0
                     && e.updated_at <= cutoff
             })
             .map(|e| e.spec.session_id.clone())
@@ -291,6 +402,8 @@ impl RoutingTable {
 
     /// CAS on the deep-archive marker (NOT the lifecycle state — the entry
     /// stays `Hibernating` through a deep archive; see `archive.rs`).
+    /// Arbitrated by the store: exactly one concurrent claim wins ACROSS
+    /// replicas.
     ///
     /// - `Some(manifest)` (claim): succeeds only from `Hibernating` with no
     ///   marker; clears the stale handle (the container+volumes are
@@ -299,58 +412,37 @@ impl RoutingTable {
     ///   when a marker is present.
     ///
     /// Returns `false` on a CAS miss (concurrent claim, entry moved, or
-    /// gone) — exactly one concurrent sweep pass can claim a session.
+    /// gone).
     pub async fn cas_set_archived(
         &self,
         id: &str,
         manifest: Option<ArchiveManifest>,
     ) -> Result<bool> {
-        let claimed = {
-            let mut map = self.inner.write().await;
-            let Some(entry) = map.get(id) else {
-                return Ok(false);
-            };
-            let setting = manifest.is_some();
-            if setting {
-                if entry.state != SessionState::Hibernating || entry.archived.is_some() {
-                    return Ok(false);
-                }
-            } else if entry.archived.is_none() {
-                return Ok(false);
+        match self.store.cas_set_archived(id, manifest).await? {
+            Some(p) => {
+                let mut map = self.inner.write().await;
+                merge_stored(&mut map, &StoredSession::new(p));
+                Ok(true)
             }
-            let mut next = (**entry).clone();
-            if setting {
-                next.handle = None;
-                next.updated_at = chrono::Utc::now();
-            }
-            next.archived = manifest;
-            map.insert(id.to_string(), Arc::new(next));
-            true
-        };
-        if claimed {
-            // Persist outside the lock (same discipline as cas_transition).
-            if let Err(e) = self.persist().await {
-                tracing::error!(session = %id, error = %e, "routing table persist failed");
-            }
+            None => Ok(false),
         }
-        Ok(claimed)
     }
 
     /// Update `last_error` without a state transition (deep-archive sweep
     /// failure diagnostics). No-op when the entry is gone.
     pub async fn set_last_error(&self, id: &str, msg: String) -> Result<()> {
-        {
-            let mut map = self.inner.write().await;
-            if let Some(entry) = map.get(id) {
-                let mut next = (**entry).clone();
-                next.last_error = Some(msg);
-                map.insert(id.to_string(), Arc::new(next));
-            }
+        self.store.set_last_error(id, &msg).await?;
+        let mut map = self.inner.write().await;
+        if let Some(entry) = map.get(id) {
+            let mut next = (**entry).clone();
+            next.last_error = Some(msg);
+            map.insert(id.to_string(), Arc::new(next));
         }
-        self.persist().await
+        Ok(())
     }
 
-    /// Number of sessions in the table.
+    /// Number of sessions in the local cache (populated at load; refreshed
+    /// by `list`/sweeps — use `list()` for the authoritative shared view).
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
@@ -364,6 +456,7 @@ impl RoutingTable {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::error::OrchestratorError;
     use crate::runner::SessionSpec;
     use chrono::Utc;
 
@@ -605,11 +698,97 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .active_conns
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, Ordering::Relaxed);
         // Both are "idle" for 0ms timeout, but busy is vetoed.
         let c = t.list_idle_candidates(0).await;
         assert_eq!(c, vec!["idle".to_string()]);
         // Huge timeout → nobody.
         assert!(t.list_idle_candidates(u64::MAX).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_activity_throttles_and_forces() {
+        // File backend no-ops the durable write; assert the throttle state
+        // machine (last_flushed_activity_ms) itself.
+        let dir = tempfile::tempdir().unwrap();
+        let t = RoutingTable::new(dir.path());
+        t.insert_new(SessionEntry::new_creating(test_spec("f1")))
+            .await
+            .unwrap();
+        let e = t.get("f1").await.unwrap();
+        e.last_activity_ms.store(5000, Ordering::Relaxed);
+        // First flush always goes through (prev_flushed = 0).
+        t.flush_activity("f1", false).await.unwrap();
+        assert_eq!(e.last_flushed_activity_ms.load(Ordering::Relaxed), 5000);
+        // +999ms → throttled; +1000ms → flushed; force → always.
+        e.last_activity_ms.store(5999, Ordering::Relaxed);
+        t.flush_activity("f1", false).await.unwrap();
+        assert_eq!(e.last_flushed_activity_ms.load(Ordering::Relaxed), 5000);
+        t.flush_activity("f1", true).await.unwrap();
+        assert_eq!(e.last_flushed_activity_ms.load(Ordering::Relaxed), 5999);
+        // +1ms past the forced flush → still throttled.
+        e.last_activity_ms.store(6000, Ordering::Relaxed);
+        t.flush_activity("f1", false).await.unwrap();
+        assert_eq!(e.last_flushed_activity_ms.load(Ordering::Relaxed), 5999);
+        // +1000ms past the watermark → flushed without force.
+        e.last_activity_ms.store(6999, Ordering::Relaxed);
+        t.flush_activity("f1", false).await.unwrap();
+        assert_eq!(e.last_flushed_activity_ms.load(Ordering::Relaxed), 6999);
+        // Unknown id → no-op.
+        t.flush_activity("nope", true).await.unwrap();
+    }
+
+    /// Two tables sharing one store see each other's writes (the
+    /// multi-replica convergence property, exercised with the file backend
+    /// as the shared truth).
+    #[tokio::test]
+    async fn shared_store_converges_across_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SessionStore> =
+            Arc::new(FileSessionStore::open(dir.path()).await.unwrap());
+        let a = RoutingTable::with_store(store.clone());
+        let b = RoutingTable::with_store(store);
+        a.insert_new(SessionEntry::new_creating(test_spec("x")))
+            .await
+            .unwrap();
+        a.cas_transition(
+            "x",
+            SessionState::Creating,
+            SessionState::Running,
+            Some(handle(43999)),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // B never saw the insert, yet reads converge via the store.
+        let x = b.get("x").await.unwrap();
+        assert_eq!(x.state, SessionState::Running);
+        assert_eq!(x.handle.as_ref().unwrap().host_port, 43999);
+        assert_eq!(b.list().await.len(), 1);
+        // CAS from B arbitrates against A's state.
+        let missed = b
+            .cas_transition(
+                "x",
+                SessionState::Creating,
+                SessionState::Failed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(missed.is_none());
+        let hit = b
+            .cas_transition(
+                "x",
+                SessionState::Running,
+                SessionState::Hibernating,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(hit.is_some());
+        assert_eq!(a.get("x").await.unwrap().state, SessionState::Hibernating);
     }
 }

@@ -74,7 +74,7 @@ pub fn workspace_volume_name(session_id: &str) -> String {
 }
 
 /// What the routing table needs to reach and manage a spawned container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerHandle {
     /// Backend container id (docker long id).
     pub container_id: String,

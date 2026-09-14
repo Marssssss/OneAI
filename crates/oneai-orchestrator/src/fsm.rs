@@ -103,6 +103,11 @@ pub struct SessionEntry {
     pub archived: Option<ArchiveManifest>,
     /// Unix millis of the last proxied WS frame (idle sweep input).
     pub last_activity_ms: AtomicU64,
+    /// Unix millis of the last DURABLE activity flush (MVS4-A: the store
+    /// copy other replicas' idle sweeps read). Throttles `touch_activity`
+    /// store writes to ≥`ACTIVITY_FLUSH_MS` granularity; equals 0 until the
+    /// first flush.
+    pub last_flushed_activity_ms: AtomicU64,
     /// Currently attached WS proxy connections (idle sweep veto).
     pub active_conns: AtomicUsize,
     /// Signalled when the session reaches Running (WS-upgrade waiters).
@@ -122,6 +127,7 @@ impl SessionEntry {
             updated_at: Utc::now(),
             archived: None,
             last_activity_ms: AtomicU64::new(now_millis()),
+            last_flushed_activity_ms: AtomicU64::new(0),
             active_conns: AtomicUsize::new(0),
             ready_notify: Arc::new(Notify::new()),
         }
@@ -176,6 +182,10 @@ impl Clone for SessionEntry {
             archived: self.archived.clone(),
             last_activity_ms: AtomicU64::new(
                 self.last_activity_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            last_flushed_activity_ms: AtomicU64::new(
+                self.last_flushed_activity_ms
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
             active_conns: AtomicUsize::new(
@@ -241,6 +251,7 @@ impl SessionEntry {
             updated_at: p.updated_at,
             archived: p.archived,
             last_activity_ms: AtomicU64::new(now_millis()),
+            last_flushed_activity_ms: AtomicU64::new(0),
             active_conns: AtomicUsize::new(0),
             ready_notify: Arc::new(Notify::new()),
         }
