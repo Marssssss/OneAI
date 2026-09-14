@@ -341,13 +341,70 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
     K8sRunner 轮。租约丢失中途代理的窄竞态（新 owner 可能休眠仍有帧
     流动的会话）本轮接受并记录（心跳 gap>TTL 才触发；活动落库让 sweep
     侧二次防护）。验收：附录 F（21/21）。
+- ✅ **租户配额限流 + OTEL tenant/session 贯穿**（**B 轮已交付**，
+  2026-09-14）——租户维度 + 三层配额 + 引擎 span/用量按租户归因：
+  - **租户维度（最小可用，JWT 前瞻兼容）**：`CreateSessionRequest.
+    tenant_id`（body 为准，`X-Oneai-Tenant` 头兜底；`[a-zA-Z0-9_-]{0,64}`，
+    非法 400）；存于 `SessionSpec.tenant_id`（serde default——file JSON /
+    Pg spec JSONB 旧数据零迁移可读）+ Pg 去规范化 `tenant_id` 列（部分
+    索引排除 Failed/Destroyed；exists 探针带列检查，旧部署自动 ALTER 升级）。
+    空租户归一 `"default"` 桶。鉴权仍是单一共享密钥（受信调用方申报租户）；
+    JWT/OIDC 落地后由 token 的 tenant 声明覆盖申报值。
+  - **三层配额（全 opt-in，未配置=无限制→A 轮行为零变化）**：
+    ① 并发会话帽——**跨副本精确**：`SessionStore::insert_if_under_quota`
+    把 COUNT+INSERT 收进单仲裁单元（Pg 覆写=单事务
+    `pg_advisory_xact_lock(hashtext(tenant))`+COUNT+条件 INSERT，两副本
+    抢最后一个槽恰一赢家；File 覆写=op_lock commit；禁止 check-then-insert
+    两步）。Failed/Destroyed 不计数（崩溃循环不得锁死租户）。
+    ② token 预算——引擎容器用量行打 `metadata.tenant_id/
+    orch_session_id` 标（CLI 层 `TenantTaggingUsageTracker` 装饰器，引擎
+    crate 零改动），编排器 `PgUsageTracker::tenant_token_sum` 服务端 SUM
+    （lifetime `max_total_tokens` 或滚动 24h `daily_token_budget`）；仅 Pg
+    模式生效，无 usage 源/SUM 失败**响亮 fail-open**（用量库故障不得瘫痪
+    建会话——可用性优先，与 registry 缓存 stale-read 同姿态）。
+    ③ 创建限流——每副本内存令牌桶（突发=1min 配额，`Mutex<HashMap>` 零新
+    依赖），跨副本精确需 Redis/Pg 行级节流，**接受每副本近似**（本节原文
+    预留的选项；①的共享帽已兜住总量）。
+    配置：`[quotas_default]`（全体租户基线）+ `[quotas_tenants.<桶>]`
+    （逐租户覆盖，`default` 键=未打标会话）；CLI `--quota-max-sessions/
+    --quota-max-tokens/--quota-daily-tokens/--quota-rate-per-min`。
+    拒绝=429 JSON `{error:"quota_exceeded", reason:concurrent_sessions|
+    token_budget|create_rate, tenant_id, limit, current, message}`；仅
+    create_rate 附 `Retry-After`（另两种重试无益——要删会话/调预算）。
+  - **OTEL 贯穿（编排器→容器→引擎 span 同 trace）**：编排器 `build_spec`
+    在 caller-env 合并后**主权 upsert** 四个契约变量（调用方 env 不可伪冒）：
+    `ONEAI_TENANT_ID`、`ONEAI_ORCH_SESSION_ID`（编排器会话 id，≠引擎
+    conversation UUID，是 usage/span↔路由表的 join 键）、
+    `OTEL_EXPORTER_OTLP_ENDPOINT`（配置 `otel_endpoint`/`ONEAI_OTEL_ENDPOINT`
+    才注入）、`TRACEPARENT`（每 spawn 新生成，w3c.rs；烘焙进 spec，resume
+    重 spawn 续同 trace）。引擎侧：`build_engine_server` 读标准 OTEL env 接
+    `OtlpCollector`（resource 带 tenant.id/orchestrator.session.id）+5s 周期
+    flusher（session 根 span 长驻不 end，不能只靠 batch-64 eager）；
+    `TraceContext::seed_parent_from_traceparent` 合成远端父 span（span_id=
+    trace_id），session span 在其后 enter → 全进程 span 挂进编排器 trace；
+    `Span.trace_id_override` 让导出端在中间父缺席批次时仍精确还原注入的
+    trace id。**顺带修复 P2-3 遗留断链**：`TraceContext` 的 collector 字段
+    此前是 dead_code（on_span_start/end 全仓零调用），`trace_otel` 从未真正
+    导出过任何 span——B 轮补上 enter/exit→collector 桥接（runtime 内
+    detached spawn）。
+  - **可观测补充**：编排器 create/delete/ws-proxy 入口 tracing span 带
+    tenant.id/session.id（A 轮已接的 fmt subscriber 落 stderr）；spawn 日志
+    打 traceparent 值作关联把手。容器 metrics 采集仍留后续轮。
+  - **B 轮边界**：租户=受信申报（无 JWT 校验）；限流每副本近似；预算 SUM
+    走 JSONB 表达式（生产大规模需 generated column+索引，DDL 注释已留迁移
+    语句）；file 模式无 token 预算（无共享 usage 账本）；引擎 session 根
+    span 仍不导出（长驻语义，子 span 全量导出且 trace 归属正确）；OTLP
+    导出走 reqwest——daemon 级代理注入的环境（colima 实测）下 collector
+    地址必须进容器 `NO_PROXY`，否则 POST 被代理劫持（502；Pg 不受影响，
+    tokio-postgres 不经 reqwest）。验收：附录 G。
 - `K8sRunner`（Pod 即容器抽象，跨宿主网络）——MVS4 后续轮。
-- TLS 内置（rustls）或正式约定反代；JWT/OIDC；Secret Manager 对接。
-- 配额与限流：每租户并发会话数、token 预算（复用 `UsageTracker` +
-  `RateLimiter`/`CircuitBreaker`，状态进 Redis 或接受每编排器副本近似；
-  A 轮后共享路由表已提供租户视图地基）。
-- 可观测：OTEL 已有（`oneai-trace`），补 tenant_id/session_id 贯穿 span +
-  容器 metrics 采集（A 轮已接编排器 tracing→stderr，RUST_LOG 可控）。
+- TLS 内置（rustls）或正式约定反代；JWT/OIDC（tenant 声明覆盖 B 轮的
+  申报值）；Secret Manager 对接；per-session 内部密钥（D7，需引擎 ws
+  auth 钩子）。
+- 配额后续：跨副本精确限流（Redis/Pg 行级节流，若每副本近似不够用时）；
+  预算窗口扩展（自然日/月账期）；租户配额动态下发（Pg 配置表 + 热更）。
+- 可观测后续：容器 metrics 采集；编排器 tracing↔oneai-trace 桥
+  （tracing-opentelemetry layer，两套系统目前仅经 TRACEPARENT env 关联）。
 - egress 治理：容器网络策略（默认拒绝 + 域名放行），与引擎内
   host-allowlist/CONNECT 代理形成双层。
 
@@ -395,12 +452,14 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 |---|---|
 | 引擎（core/bus/agent/app） | **零改动**（N1/N2 的排除项）。例外：`oneai-tool` sandbox `is_available` 运行期探测（MVS1 产出的缺陷修复，与环境适配无关，任何 Linux 部署受益，见附录 A.3）；`oneai-core` `MemoryPersistence` B 轮**加法**增补 `rename_conversation`/`set_conversation_archived` 默认方法（会话元数据编辑进 trait，Pg/SQLite 各自定向 UPDATE 覆写——既有实现零破坏） |
 | `oneai-app-server` | 零改动（ws 监听、serve_web 均已存在） |
-| 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复）；✅ MVS4-A：orchestrator 内加 `store.rs`（`SessionStore` trait + `FileSessionStore` + `LeaseGuard`）/`pg_session_store.rs`（feature `postgres`，锁 key base+6） |
-| `oneai-persistence` | ✅ MVS3 加 Pg 后端（`pg_working_state_store.rs` + B 轮 `pg_memory_store.rs`/`pg_usage_tracker.rs`/`pg_host_allowlist.rs` + 共用 `pg_common.rs`，均为新文件；SQLite 侧仅 helper 提为 pub(crate) + trait 覆写委托）；✅ MVS4-A `pg_common` 放宽为 `pub`（orchestrator 第七 store 直接复用配方，零复制） |
+| 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复）；✅ MVS4-A：orchestrator 内加 `store.rs`（`SessionStore` trait + `FileSessionStore` + `LeaseGuard`）/`pg_session_store.rs`（feature `postgres`，锁 key base+6）；✅ MVS4-B：orchestrator 内加 `quota.rs`（`TenantQuotaEnforcer`/`QuotaReason`/`TenantUsageSum` trait + `PgTenantUsage` adapter），`SessionSpec/PersistedEntry` 加 `tenant_id`（serde default 零迁移） |
+| `oneai-persistence` | ✅ MVS3 加 Pg 后端（`pg_working_state_store.rs` + B 轮 `pg_memory_store.rs`/`pg_usage_tracker.rs`/`pg_host_allowlist.rs` + 共用 `pg_common.rs`，均为新文件；SQLite 侧仅 helper 提为 pub(crate) + trait 覆写委托）；✅ MVS4-A `pg_common` 放宽为 `pub`（orchestrator 第七 store 直接复用配方，零复制）；✅ MVS4-B `PgUsageTracker::tenant_token_sum`（唯一服务端聚合，metadata_json->>'tenant_id' SUM，生产迁移 DDL 注释留位） |
 | `oneai-app` builder | ✅ MVS3 加 `working_state_store(Arc<dyn …>)` 泛型注入；✅ B 轮补 2 setter（`host_allowlist_store`/`memory_persistence`）+ `App.memory_persistence` 会话面路由（list/load/rename/archive/delete + turn 尾自动落盘 gate） |
 | `oneai-a2a` / `oneai-scheduler` | MVS2 把 Bearer 三件套改指向 `oneai-http-auth`（消重复） |
-| CLI | `oneai orchestrator` 子命令（MVS2）；✅ MVS4-A `serve --lease-ttl/--replica-id` + Pg 路由表选择（`ONEAI_PG_DSN`，响亮回退）+ `postgres` feature 聚合 `oneai-orchestrator/postgres` + tracing subscriber 接线（此前编排器 info/warn 日志全被丢弃） |
-| 部署件 | Dockerfile（MVS1）、镜像流水线（MVS4） |
+| CLI | `oneai orchestrator` 子命令（MVS2）；✅ MVS4-A `serve --lease-ttl/--replica-id` + Pg 路由表选择（`ONEAI_PG_DSN`，响亮回退）+ `postgres` feature 聚合 `oneai-orchestrator/postgres` + tracing subscriber 接线（此前编排器 info/warn 日志全被丢弃）；✅ MVS4-B `serve --quota-*/--otel-endpoint` + `create --tenant`/`list --tenant` + usage 源自动接线（token 预算配置且 Pg 模式才连 `PgUsageTracker`）+ 引擎侧 `TenantTaggingUsageTracker` 装饰器与 OTEL bootstrap（均 examples/cli 层）+ `otel` feature（默认开，云镜像显式列） |
+| `oneai-trace` | ✅ MVS4-B：collector 桥接（enter/exit 喂 on_span_start/end——修复 P2-3 以来 `trace_otel` 导出路径从未收到 span 的断链）+ `seed_parent_from_traceparent`（W3C 远端父合成）+ `Span.trace_id_override`（导出端在中间父缺席批次时仍还原注入 trace id） |
+| `oneai-app` | ✅ MVS4-B `session.rs` 加法：enter session span 前 seed `TRACEPARENT`，span 加 `tenant.id`/`orchestrator.session.id` 属性（env 契约，端侧无 env 零变化）——引擎 crate 改动仅此 |
+| 部署件 | Dockerfile（MVS1）、镜像流水线（MVS4）；✅ MVS4-B 构建命令加 `oneai-cli/otel`（镜像 `oneai-engine:mvs4b`，106MB） |
 
 ---
 
@@ -787,3 +846,90 @@ rep-c/rep-d + 文件模式回归实例；`mvs4a_run.sh` 一键跑）。lease_ttl
     接管、GREATEST 单调）+ multi_replica_tests 8 项（MemLeaseStore 镜像
     Pg 契约：双 state 共享真相、真 axum+真 WS 握手收 409、kill 接管、
     并发对账、归档竞态）。文件模式既有 82 测零修改全绿（D8 承诺兑现）。
+
+## 附录 G：MVS4-B 验收记录（租户配额限流 + OTEL tenant/session 贯穿，2026-09-14）
+
+环境：macOS/arm64 + colima（docker 29.8.0）+ pgvector/pgvector:pg16 容器
+（`oneai-pg-test`，库 `oneai_mvs4b`；编排器宿主侧 DSN 走 127.0.0.1，引擎
+容器侧走 bridge 网关 172.17.0.1，OTLP 桩走 lima VM→host 192.168.5.2）。
+宿主二进制 `cargo build -p oneai-cli --features postgres`；引擎镜像
+**`oneai-engine:mvs4b`（重建，106MB）**——本轮引擎侧有改动（CLI 层用量
+打标装饰器 + OTEL bootstrap + session.rs span 属性/seed + oneai-trace
+collector 桥接）。验收驱动：`deploy/docker/mvs4b_verify.mjs`（自包含拉起
+五个编排器进程：主实例 rep-m 无配额带 OTEL + 三个配额实例 rep-bq/rep-cq/
+rep-dq + 文件模式 rep-f，外加 node OTLP 捕获桩 :4318；`mvs4b_run.sh`
+一键跑）。lease_ttl=10s。
+
+### G.1 验收矩阵（25/25 全过；前两轮 22/25——G2-G4 败于验收环境两坑，
+###     见 G.2-1/2，产品代码零改动，修脚本后复跑全绿）
+
+| # | 项 | 结果 |
+|---|---|---|
+| A1 | banner：Backend Postgres + rep-m + Quotas disabled + OTEL endpoint | ✅ |
+| A2 | DDL：`tenant_id` 列 + `idx_orch_sess_tenant` 部分索引存在 | ✅ |
+| A3 | body `tenant_id` 建会话 → 201 + snapshot.tenant_id + Pg 列三方一致 | ✅ |
+| A4 | `X-Oneai-Tenant` 头兜底（body 缺省时生效） | ✅ |
+| A5 | 非法 tenant_id（含空格/感叹号）→ 400 invalid tenant id | ✅ |
+| A6 | `docker inspect` Env 四契约变量：ONEAI_TENANT_ID/ONEAI_ORCH_SESSION_ID/OTEL_EXPORTER_OTLP_ENDPOINT/TRACEPARENT（W3C 格式校验） | ✅ |
+| G1 | 真实 turn 答出暗号（引擎+provider 基线） | ✅ |
+| G2 | **OTLP 桩收到引擎 span 且 traceId == 注入 TRACEPARENT 的 trace id**（spans=2：agent_loop+inference） | ✅ |
+| G3 | OTEL resource 属性带 tenant.id=acme + orchestrator.session.id | ✅ |
+| G4 | 导出含 agent_loop（引擎主循环真贯穿，非仅资源声明） | ✅ |
+| G5 | **用量行引擎侧打标**：SUM(acme)=8194>0 且 metadata.orch_session_id 可回联路由表 | ✅ |
+| B1 | max_concurrent=2：前两个 201 Running | ✅ |
+| B2 | 第 3 个 → 429 reason=concurrent_sessions + limit/current 正确 + **无 Retry-After** | ✅ |
+| B3 | destroy 释放槽位 → 再建 201 | ✅ |
+| B4 | 异租户桶独立（qt 满员不影响 qt2） | ✅ |
+| C1 | banner 自证 usage 源接线（token budget reads usage_records_pg） | ✅ |
+| C2 | 已耗预算租户（G5 真实用量）→ 429 reason=token_budget（8194/1） | ✅ |
+| C3 | 零用量新租户放行 201 | ✅ |
+| D1 | rate=3/min burst 6 并发 → **恰 3 成 3 拒** reason=create_rate + Retry-After≥1 | ✅ |
+| E1 | `?tenant=` 过滤：xx/yy 各归各、default 匹配未打标、全量含所有 | ✅ |
+| F1 | 文件模式 banner：Backend file + default 桶 max_sessions=1 | ✅ |
+| F2 | 未打标会话归 default 桶：第 1 个 201、第 2 个 429（file 模式配额生效，tenant_id="default"） | ✅ |
+| F3 | 命名租户桶独立于 default（ff 首个 201） | ✅ |
+| J1 | sessions.json 落 tenant_id（命名租户持久化 + 未打标空串） | ✅ |
+| J2 | 文件模式删除零残留（容器+卷） | ✅ |
+
+### G.2 实现期发现与决策落地
+
+1. **daemon 级代理注入劫持 OTLP（验收首轮 G2-G4 失败的根因）**：colima 的
+   dockerd 配了代理 → 所有容器被注入 `HTTP(S)_PROXY`，默认 NO_PROXY 只有
+   localhost/*.local——引擎 OTLP POST 走代理得 502（Pg 不受影响：
+   tokio-postgres 直连不经 reqwest）。修法零产品改动：create 请求 env 显式
+   `NO_PROXY`（含桩地址）覆盖 daemon 注入（docker 显式 -e 优先）。生产
+   同理：collector 地址须在容器 NO_PROXY 内或代理可达——已记 §6 B 轮边界
+   + deploy README §23。
+2. **colima 网络方向二分**：容器→published 容器端口（Pg）走 bridge 网关
+   172.17.0.1；容器→**macOS 宿主进程**（OTLP 桩）必须走 lima VM→host
+   192.168.5.2（host.lima.internal 的 IP；容器内无该 DNS，直连 IP；
+   172.17.0.1 实测不通）。首轮误用 172.17.0.1 是 G2-G4 失败的另一半。
+3. **P2-3 遗留断链修复（本轮最重要的引擎侧发现）**：`TraceContext` 的
+   collector 字段自诞生起就是 dead_code（`on_span_start/end` 全仓零调用，
+   otel_exporter 旧测试甚至断言 completed_count==0 并注明"may not have
+   been called"）——`trace_otel` 的 OTLP 导出从未真正送出过任何 span。
+   B 轮补上 enter/exit→collector 桥接（runtime 内 detached spawn）后，
+   G2-G4 才有意义。
+4. **session 根 span 永不导出 → trace id 碎裂**：长驻引擎的 session span
+   不 end，其子 span 导出时 parent 缺席 batch，原 root-walk 会把 parent id
+   当 trace id（每 span 一个 trace）。修法：`Span.trace_id_override`
+   （seed 时盖章到 context，enter_span 复制到每个新 span，导出端优先取）。
+   G2 的 traceId==TRACEPARENT 断言即验证此路径。
+5. **配额竞态收进单仲裁单元**：并发帽不是"查数再插"两步——
+   `insert_if_under_quota` 在 Pg 侧是单事务 `pg_advisory_xact_lock(
+   hashtext(tenant))`+COUNT+条件 INSERT（20 并发 max=5 恰 5 赢家，Pg 门控
+   测试与 D1 双副本真机各自验证）；File 侧 op_lock commit；MemLeaseStore
+   测试替身单 mutex hold 镜像 Pg 契约。
+6. **预算 SUM 依赖引擎打标先行**：C2 的拒绝量（8194/1）来自 G5 同一 turn
+   的真实用量——验收矩阵顺序（G 先于 C）即依赖顺序。装饰器只在
+   `ONEAI_TENANT_ID` 非空时包装（端侧引擎/未编排容器零变化）。
+7. **429 语义分层**：仅 create_rate 附 `Retry-After`（等一拍即恢复）；
+   concurrent_sessions/token_budget 不附（重试无益——须删会话/调预算），
+   客户端按 `reason` 判别。B2/C2/D1 分别断言。
+8. **测试矩阵**：单测/集成（无外部依赖）orchestrator 70 + trace 52 +
+   app 43 + persistence 78 全绿；Pg 门控 pg_store_tests 12（+3：tenant
+   roundtrip/legacy 行/20 并发恰 5 赢）+ pg_usage_tracker 9（+1：
+   tenant_token_sum 聚合/隔离/窗口）；multi_replica_tests 10（+2：双副本
+   8 并发同租户 max=3 恰 3 Running+5 拒、限流桶每副本独立）。既有测试仅
+   动一处：idle_sweep 改显式回拨活动钟（原隐式依赖 ≥1ms 墙钟流逝，
+   本身脆弱，非本轮语义变化）。

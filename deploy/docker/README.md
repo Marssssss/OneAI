@@ -420,3 +420,104 @@ ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
 # 另有 multi_replica_tests 8 测（无需 Pg/docker：MemLeaseStore 镜像 Pg 契约，
 # 双 OrchestratorState 共享真相 + 真 axum/WS 握手收 409 + 并发对账探活计数）
 ```
+
+## 23. MVS4-B 租户配额限流 + OTEL 贯穿
+
+引擎侧有改动（用量打标 + OTEL 导出 + span seed），镜像必须重建：
+
+```bash
+cargo build -p oneai-cli --features postgres        # 宿主侧编排器
+docker build -f deploy/docker/Dockerfile -t oneai-engine:mvs4b .   # 引擎镜像（postgres,otel）
+```
+
+配额全 opt-in（不配 `[quotas*]`/`--quota-*` = 无限制，MVS4-A 行为零变化）：
+
+```bash
+# 并发会话帽（跨副本精确：Pg 单事务 advisory-lock COUNT+INSERT）
+ONEAI_ORCHESTRATOR_SECRET=... ONEAI_PG_DSN=postgres://... \
+  ./target/debug/oneai orchestrator serve --quota-max-sessions 10
+
+# token 预算（lifetime / 滚动 24h；仅 Pg 模式，SUM 引擎打标的用量行）
+  ... orchestrator serve --quota-max-tokens 50000000
+  ... orchestrator serve --quota-daily-tokens 1000000
+
+# 创建限流（每副本令牌桶近似，突发=1min）
+  ... orchestrator serve --quota-rate-per-min 30
+
+# OTEL：每个容器注入 OTLP endpoint + TRACEPARENT，引擎 span 同 trace 归因
+  ... orchestrator serve --otel-endpoint http://127.0.0.1:4318   # env ONEAI_OTEL_ENDPOINT 优先
+```
+
+逐租户覆盖走 `~/.oneai/orchestrator.toml`（`[quotas_default]` 基线 +
+`[quotas_tenants.<桶>]` 覆盖；未打标会话归 `default` 桶）：
+
+```toml
+[quotas_default]
+max_concurrent_sessions = 10
+create_rate_per_min = 30
+
+[quotas_tenants.acme]
+max_concurrent_sessions = 2
+daily_token_budget = 1000000
+```
+
+客户端语义速记（详见设计文档 §6 MVS4-B + 附录 G）：
+
+- `POST /v1/sessions` 带 `{"tenant_id":"acme"}`（或 `X-Oneai-Tenant` 头，
+  body 胜）；`GET /v1/sessions?tenant=acme` 过滤（`default` 匹配未打标）。
+- 配额拒绝 = `429` + `{"error":"quota_exceeded","reason":
+  "concurrent_sessions|token_budget|create_rate","tenant_id","limit",
+  "current","message"}`；仅 create_rate 附 `Retry-After`（另两种重试无益）。
+- 容器 env 契约（编排器主权注入，调用方 env 不可伪冒）：`ONEAI_TENANT_ID`、
+  `ONEAI_ORCH_SESSION_ID`（≠引擎 conversation UUID，是 usage/span↔路由表
+  join 键）、`OTEL_EXPORTER_OTLP_ENDPOINT`、`TRACEPARENT`（每 spawn 新生成，
+  resume 重 spawn 续同 trace）。
+- 引擎用量行自动打 `metadata.tenant_id/orch_session_id` 标（仅云容器：
+  CLI 层装饰器，端侧引擎零变化）；span 以注入 trace id 导出，OTEL resource
+  带 tenant.id/orchestrator.session.id。
+- token 预算 fail-open：usage 源缺失/SUM 失败 → 响亮告警 + 放行（用量库
+  故障不瘫痪建会话）；file 模式无预算（无共享账本）。
+- **代理坑（colima 实测）**：dockerd 的 daemon 级代理配置会给所有容器注入
+  `HTTP(S)_PROXY`，默认 `NO_PROXY` 只有 localhost/*.local——引擎的 OTLP
+  POST 被代理劫持（502；Pg 不受影响，tokio-postgres 不走 reqwest 代理）。
+  修法：collector 地址必须进容器 `NO_PROXY`（create 请求 env 显式传即可
+  覆盖 daemon 注入，验收脚本已带），或确保代理可达 collector。
+- **colima 网络方向速记**：容器→published 容器端口（如 Pg）走 bridge 网关
+  `172.17.0.1`；容器→macOS 宿主进程（如 OTLP 桩）走 lima VM→host 地址
+  `192.168.5.2`（host.lima.internal 的 IP；容器内无该 DNS，直连 IP）。
+
+## 24. MVS4-B 全量验收（一键）
+
+```bash
+./deploy/docker/mvs4b_run.sh   # 确保 pgvector 容器 + 库 oneai_mvs4b + 二进制 + 镜像 mvs4b + 跑 mvs4b_verify.mjs
+```
+
+验收矩阵（七 phase 16 项）：A 租户基线（banner/DDL 列+索引/body+header
+双通道/非法 400/容器 Env 四契约变量）→ G OTEL 贯穿（真实 turn 后 OTLP 桩
+收到引擎 span：traceId==注入 TRACEPARENT、resource 带 tenant.id+
+orchestrator.session.id、agent_loop 真导出、用量行按租户打标 SUM>0）→
+B 并发配额（max=2 第 3 个 429 concurrent_sessions 无 Retry-After/destroy
+释放槽位/异租户桶独立）→ C token 预算（已耗租户 429 token_budget/零用量
+新租户放行/banner 自证 usage 源）→ D 创建限流（rate=3 burst 6 恰 3 成 3 拒
++Retry-After）→ E ?tenant= 过滤 → F/J 文件模式（default 桶配额生效/命名桶
+独立/sessions.json 落 tenant_id/删除零残留）。
+
+MVS4-A 回归：`./deploy/docker/mvs4a_run.sh -- --image oneai-engine:mvs4b`
+（A 轮 21 项须原样全绿——未配配额时行为零变化的承诺）。
+
+## 25. Pg 集成测试（B 轮新增，开发侧）
+
+```bash
+ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
+  cargo test -p oneai-orchestrator --features postgres \
+  --test pg_store_tests -- --ignored
+# 12 测（+3）：tenant 列 roundtrip + legacy 行默认空 + force_update 携带 /
+#   20 并发同租户 max=5 → 恰 5 赢家（advisory xact lock 单事务仲裁）/
+#   Failed 不计数 + PK 冲突仍 AlreadyExists + None=无限制
+ONEAI_TEST_PG_DSN=... cargo test -p oneai-persistence --features postgres \
+  --test pg_usage_tracker -- --ignored
+# 9 测（+1）：tenant_token_sum 服务端 SUM（跨会话聚合/租户隔离/未打标不计/
+#   daily 窗口/clear 归零）
+# 另有 multi_replica_tests 10 测（无需 Pg/docker）：双副本 8 并发建同租户
+#   max=3 → 恰 3 Running + 5 QuotaExceeded、destroy 释放槽位、限流桶每副本独立
+```

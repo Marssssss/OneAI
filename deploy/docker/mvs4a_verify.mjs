@@ -368,13 +368,23 @@ async function phaseA() {
   await client.connect();
   await client.send("session/create", { id: CONV1, workspace: "/workspace" });
   const done = await client.runTurn(`不要使用任何工具，直接回答：请记住暗号 ${PROOF1} ，并逐字复述它。`);
-  // 心跳 tick = ttl/3；turn 远超一拍 → 活动必然已节流落库（≥1s 粒度）。
-  const act = activityOf(S1);
+  // 原断言假设「turn 远超一拍心跳（tick=ttl/3）→ 活动必已节流落库」——
+  // provider 快时 turn 可短于一拍（MVS4-B 回归实测 2.7s < 3.3s 首拍，
+  // 偶发 activity=0 假阴性）。改：先 close（LeaseGuard drop 强制 flush），
+  // 再轮询等落库（异步 detached spawn，给 20s 上限）。语义不变：活动
+  // 时间戳必须持久化到共享 Pg（异地副本 idle sweep 的输入）。
+  client.close();
+  let act = 0;
+  const actDeadline = Date.now() + 20_000;
+  while (Date.now() < actDeadline) {
+    act = activityOf(S1);
+    if (act > 0) break;
+    await sleep(500);
+  }
   const fresh = Math.abs(Date.now() - act) < 120_000;
   record("A", "A4 WS 经 A 真实 turn 答出暗号 + last_activity_ms 落库",
     done.final_answer?.includes(PROOF1) === true && act > 0 && fresh,
     `activity=${act} now=${Date.now()}`, t4);
-  client.close();
 
   const t5 = Date.now();
   const del = await destroySession(LISTEN_A, S1);
