@@ -42,6 +42,8 @@ pub mod docker;
 pub mod error;
 pub mod fsm;
 pub mod idle;
+#[cfg(feature = "postgres")]
+pub mod pg_session_store;
 pub mod proxy;
 pub mod registry;
 pub mod routes;
@@ -56,6 +58,8 @@ pub use config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
 pub use docker::DockerRunner;
 pub use error::{OrchestratorError, Result};
 pub use fsm::{SessionSnapshot, SessionState};
+#[cfg(feature = "postgres")]
+pub use pg_session_store::PgSessionStore;
 pub use registry::RoutingTable;
 pub use runner::{ContainerHandle, ContainerRunner, SessionSpec};
 pub use server::{run, OrchestratorState};

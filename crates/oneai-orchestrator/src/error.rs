@@ -55,9 +55,27 @@ pub enum OrchestratorError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// Shared session-store (Postgres) failure — the multi-replica backend
+    /// (MVS4-A). Surfaces the server-side SQLSTATE + detail via pg_common's
+    /// error mapping.
+    #[error("session store (Pg) error: {0}")]
+    Pg(String),
+
+    /// A lease we believed we held is gone (lost to a takeover after a
+    /// renewal gap). Carries `session_id`.
+    #[error("lease lost for session {0} (taken over by another replica?)")]
+    LeaseLost(String),
+
     /// Local IO failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(feature = "postgres")]
+impl From<oneai_core::error::OneAIError> for OrchestratorError {
+    fn from(e: oneai_core::error::OneAIError) -> Self {
+        OrchestratorError::Pg(e.to_string())
+    }
 }
 
 /// Crate-wide result alias.
