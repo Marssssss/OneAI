@@ -25,7 +25,7 @@ use crate::archive::ArchiveManifest;
 use crate::error::Result;
 use crate::fsm::{SessionEntry, SessionSnapshot, SessionState};
 use crate::runner::{ContainerHandle, ContainerRunner};
-use crate::store::{FileSessionStore, SessionStore, StoredSession};
+use crate::store::{ClaimOutcome, FileSessionStore, LeaseIdentity, SessionStore, StoredSession};
 
 pub use crate::store::REGISTRY_FILE;
 
@@ -283,13 +283,14 @@ impl RoutingTable {
         Ok(table)
     }
 
-    /// Load + startup reconcile (D3/R3) on the file backend.
+    /// Load + startup reconcile (D3/R3) on the file backend (single
+    /// replica — no lease gating).
     pub async fn load_and_reconcile(
         dir: impl AsRef<Path>,
         runner: &dyn ContainerRunner,
     ) -> Result<Self> {
         let store = Arc::new(FileSessionStore::open(dir).await?);
-        Self::reconcile_with_store(store, runner).await
+        Self::reconcile_with_store(store, runner, None).await
     }
 
     /// Load + startup reconcile against an explicit store. For every entry
@@ -297,11 +298,22 @@ impl RoutingTable {
     /// force to Running (re-mounted). Dead/gone → Crashed("orchestrator_restart").
     /// Hibernating entries stay as-is (their container is stopped by
     /// design). Failed/Destroyed are kept for API visibility.
+    ///
+    /// MVS4-A multi-replica gating: when `lease` is present (and the store
+    /// leases), each candidate must be lease-CLAIMED before it is probed —
+    /// the claim is the cross-replica mutex, so two replicas reconciling
+    /// simultaneously never double-probe or fight over the same entry:
+    /// a live foreign lease → `HeldByOther` → skipped (its owner's own
+    /// reconcile/sweeps handle it); an expired/unowned lease → claimed and
+    /// reconciled here. Dead entries release the claim again so any replica
+    /// can own the eventual resume.
     pub async fn reconcile_with_store(
         store: Arc<dyn SessionStore>,
         runner: &dyn ContainerRunner,
+        lease: Option<&LeaseIdentity>,
     ) -> Result<Self> {
         let table = Self::with_store(store);
+        let lease = lease.filter(|_| table.store.supports_leasing());
         let all = table.refresh_cache().await?;
         for s in &all {
             if !matches!(
@@ -311,6 +323,23 @@ impl RoutingTable {
                 continue;
             }
             let id = &s.entry.spec.session_id;
+            if let Some(l) = lease {
+                match table
+                    .store
+                    .try_claim_lease(id, &l.replica_id, l.ttl)
+                    .await?
+                {
+                    ClaimOutcome::Owned { .. } => {}
+                    ClaimOutcome::HeldByOther { owner_replica, .. } => {
+                        tracing::debug!(
+                            session = %id, %owner_replica,
+                            "reconcile: live foreign lease — skipping (owner probes it)"
+                        );
+                        continue;
+                    }
+                    ClaimOutcome::NotFound => continue,
+                }
+            }
             let alive = match &s.entry.handle {
                 Some(h) => runner.health(h).await.unwrap_or(false),
                 None => false,
@@ -331,6 +360,13 @@ impl RoutingTable {
             }
             e.updated_at = chrono::Utc::now();
             table.store.force_update(&e).await?;
+            if !alive {
+                // Crashed: hand ownership back so whichever replica gets
+                // the resume request owns the session from there.
+                if let Some(l) = lease {
+                    let _ = table.store.release_lease(id, &l.replica_id).await;
+                }
+            }
             let arc = {
                 let mut map = table.inner.write().await;
                 merge_stored(

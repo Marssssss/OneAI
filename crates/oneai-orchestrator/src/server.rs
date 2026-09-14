@@ -99,10 +99,17 @@ impl OrchestratorState {
         } else {
             config.replica_id.trim().to_string()
         };
-        let table = RoutingTable::reconcile_with_store(store, runner.as_ref()).await?;
+        // Lease identity is needed BEFORE reconcile (startup reconcile is
+        // lease-gated in multi-replica mode).
+        let lease = store.supports_leasing().then(|| LeaseIdentity {
+            replica_id: replica_id.clone(),
+            ttl: Duration::from_secs(config.lease_ttl_secs.max(1)),
+        });
+        let table =
+            RoutingTable::reconcile_with_store(store, runner.as_ref(), lease.as_ref()).await?;
         tracing::info!(
             %replica_id,
-            leasing = table.store().supports_leasing(),
+            leasing = lease.is_some(),
             lease_ttl_secs = config.lease_ttl_secs,
             "orchestrator replica identity"
         );
