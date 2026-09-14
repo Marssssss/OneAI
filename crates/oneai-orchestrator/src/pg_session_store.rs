@@ -47,8 +47,12 @@ use crate::store::{ClaimOutcome, LeaseInfo, SessionStore, StoredSession};
 const LOCK_KEY: i64 = ADVISORY_LOCK_BASE + 6;
 
 /// Catalog probe: TRUE when every object this store needs already exists.
+/// The `tenant_id` column check makes pre-MVS4-B deployments re-run the
+/// (idempotent) DDL so the ALTER below actually migrates them.
 const SCHEMA_EXISTS_SQL: &str = "SELECT to_regclass('orchestrator_sessions') IS NOT NULL \
-     AND to_regclass('idx_orch_sess_lease') IS NOT NULL";
+     AND to_regclass('idx_orch_sess_lease') IS NOT NULL \
+     AND EXISTS (SELECT 1 FROM information_schema.columns \
+                 WHERE table_name = 'orchestrator_sessions' AND column_name = 'tenant_id')";
 
 /// DDL applied idempotently on first use (see `pg_common::ensure_schema`).
 const SCHEMA_DDL: &str = r#"
@@ -62,18 +66,26 @@ CREATE TABLE IF NOT EXISTS orchestrator_sessions (
     archived         JSONB,
     owner_replica    TEXT,
     lease_expires_at TIMESTAMPTZ,
-    last_activity_ms BIGINT NOT NULL DEFAULT 0
+    last_activity_ms BIGINT NOT NULL DEFAULT 0,
+    tenant_id        TEXT NOT NULL DEFAULT ''
 );
+-- Upgrade path for pre-MVS4-B tables (fresh installs already have the column).
+ALTER TABLE orchestrator_sessions
+    ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_orch_sess_lease
     ON orchestrator_sessions (lease_expires_at)
     WHERE owner_replica IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orch_sess_state_owner
     ON orchestrator_sessions (state, owner_replica);
+-- Tenant quota counting (MVS4-B): partial index over quota-counting states.
+CREATE INDEX IF NOT EXISTS idx_orch_sess_tenant
+    ON orchestrator_sessions (tenant_id)
+    WHERE state NOT IN ('Failed', 'Destroyed');
 "#;
 
 /// Every column, in one place (JSONB read back as text — see module docs).
 const COLS: &str = "session_id, spec::text, handle::text, state, last_error, updated_at, \
-     archived::text, owner_replica, lease_expires_at, last_activity_ms";
+     archived::text, owner_replica, lease_expires_at, last_activity_ms, tenant_id";
 
 /// Shared-Postgres session store. See the module docs for the contract.
 pub struct PgSessionStore {
@@ -164,7 +176,7 @@ fn to_json<T: serde::Serialize>(v: &T, what: &str) -> Result<String> {
 
 fn row_to_stored(row: &Row) -> Result<StoredSession> {
     let spec_json: String = row.get(1);
-    let spec: SessionSpec = serde_json::from_str(&spec_json)
+    let mut spec: SessionSpec = serde_json::from_str(&spec_json)
         .map_err(|e| OrchestratorError::Pg(format!("unreadable spec: {e}")))?;
     let handle: Option<ContainerHandle> = json_opt(row.get(2), "handle")?;
     let state: String = row.get(3);
@@ -174,6 +186,13 @@ fn row_to_stored(row: &Row) -> Result<StoredSession> {
     let owner_replica: Option<String> = row.get(7);
     let lease_expires_at: Option<DateTime<Utc>> = row.get(8);
     let last_activity_ms: i64 = row.get(9);
+    // The tenant column is the denormalized filter/count key; the spec JSONB
+    // is the entry contract. Legacy specs (pre-MVS4-B) have no tenant_id
+    // field — adopt the column (DEFAULT '' for migrated rows, so both agree).
+    let tenant_col: String = row.get(10);
+    if spec.tenant_id.is_empty() && !tenant_col.is_empty() {
+        spec.tenant_id = tenant_col;
+    }
     Ok(StoredSession {
         entry: PersistedEntry {
             spec,
@@ -200,11 +219,38 @@ struct EntryParams {
     last_error: Option<String>,
     updated_at: DateTime<Utc>,
     archived: Option<String>,
+    /// Denormalized tenant column (MVS4-B) — mirrors `spec.tenant_id`.
+    tenant: String,
+}
+
+/// The one INSERT statement (plain insert + quota-gated insert share it).
+/// `ON CONFLICT DO NOTHING` → 0 rows means the id is taken (cross-replica
+/// AlreadyExists; inside the quota tx the PK conflict also ends the race
+/// cleanly — the count check already passed under the advisory lock).
+const INSERT_SQL: &str = "INSERT INTO orchestrator_sessions \
+     (session_id, spec, handle, state, last_error, updated_at, archived, tenant_id) \
+     VALUES ($1, $2::text::jsonb, $3::text::jsonb, $4, $5, $6, $7::text::jsonb, $8) \
+     ON CONFLICT (session_id) DO NOTHING";
+
+fn insert_params(
+    p: &EntryParams,
+) -> [&(dyn deadpool_postgres::tokio_postgres::types::ToSql + Sync); 8] {
+    [
+        &p.id,
+        &p.spec,
+        &p.handle,
+        &p.state,
+        &p.last_error,
+        &p.updated_at,
+        &p.archived,
+        &p.tenant,
+    ]
 }
 
 fn entry_params(e: &PersistedEntry) -> Result<EntryParams> {
     Ok(EntryParams {
         id: e.spec.session_id.clone(),
+        tenant: e.spec.tenant_id.clone(),
         spec: to_json(&e.spec, "spec")?,
         handle: e
             .handle
@@ -257,27 +303,61 @@ impl SessionStore for PgSessionStore {
         // resolve the param as unknown/jsonb and the driver refuses; the
         // double cast pins it to text (MVS3-A pitfall, see pg_common docs).
         let n = c
-            .execute(
-                "INSERT INTO orchestrator_sessions \
-                 (session_id, spec, handle, state, last_error, updated_at, archived) \
-                 VALUES ($1, $2::text::jsonb, $3::text::jsonb, $4, $5, $6, $7::text::jsonb) \
-                 ON CONFLICT (session_id) DO NOTHING",
-                &[
-                    &p.id,
-                    &p.spec,
-                    &p.handle,
-                    &p.state,
-                    &p.last_error,
-                    &p.updated_at,
-                    &p.archived,
-                ],
-            )
+            .execute(INSERT_SQL, &insert_params(&p))
             .await
             .map_err(|e| OrchestratorError::from(pg_err(e)))?;
         if n == 0 {
             return Err(OrchestratorError::AlreadyExists(p.id));
         }
         Ok(())
+    }
+
+    async fn insert_if_under_quota(
+        &self,
+        entry: &PersistedEntry,
+        max_concurrent: Option<usize>,
+    ) -> Result<Option<usize>> {
+        let p = entry_params(entry)?;
+        let mut c = self.client().await?;
+        let tx = c
+            .transaction()
+            .await
+            .map_err(|e| OrchestratorError::from(pg_err(e)))?;
+        if let Some(max) = max_concurrent {
+            // Serialize same-tenant creates ACROSS replicas for the duration
+            // of this transaction (short-lived; auto-released on commit or
+            // rollback). hashtext → int4 implicitly widens to the bigint
+            // lock key — two tenants hashing to the same int merely share a
+            // queue briefly (correctness is per-tenant via the COUNT filter).
+            tx.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&p.tenant])
+                .await
+                .map_err(|e| OrchestratorError::from(pg_err(e)))?;
+            let row = tx
+                .query_one(
+                    "SELECT COUNT(*)::BIGINT FROM orchestrator_sessions \
+                     WHERE tenant_id = $1 AND state NOT IN ('Failed', 'Destroyed')",
+                    &[&p.tenant],
+                )
+                .await
+                .map_err(|e| OrchestratorError::from(pg_err(e)))?;
+            let count: i64 = row.get(0);
+            if count.max(0) as usize >= max {
+                // Explicit rollback (dropping the tx would do it too — be loud).
+                tx.rollback().await.ok();
+                return Ok(Some(count.max(0) as usize));
+            }
+        }
+        let n = tx
+            .execute(INSERT_SQL, &insert_params(&p))
+            .await
+            .map_err(|e| OrchestratorError::from(pg_err(e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| OrchestratorError::from(pg_err(e)))?;
+        if n == 0 {
+            return Err(OrchestratorError::AlreadyExists(p.id));
+        }
+        Ok(None)
     }
 
     async fn cas_transition(
@@ -387,7 +467,8 @@ impl SessionStore for PgSessionStore {
         c.execute(
             "UPDATE orchestrator_sessions SET \
                spec = $2::text::jsonb, handle = $3::text::jsonb, state = $4, \
-               last_error = $5, updated_at = $6, archived = $7::text::jsonb \
+               last_error = $5, updated_at = $6, archived = $7::text::jsonb, \
+               tenant_id = $8 \
              WHERE session_id = $1",
             &[
                 &p.id,
@@ -397,6 +478,7 @@ impl SessionStore for PgSessionStore {
                 &p.last_error,
                 &p.updated_at,
                 &p.archived,
+                &p.tenant,
             ],
         )
         .await

@@ -32,8 +32,27 @@
 //! pg_dsn = "postgres://user:pass@127.0.0.1:5432/oneai"
 //! lease_ttl_secs = 30
 //! replica_id = ""   # empty → uuid v4 generated at boot
+//! # MVS4-B OTEL: OTLP/HTTP endpoint injected into every session container
+//! # (engine exports spans tagged tenant.id/orchestrator.session.id under the
+//! # spawn's TRACEPARENT). Env `ONEAI_OTEL_ENDPOINT` wins over this field.
+//! otel_endpoint = "http://127.0.0.1:4318"
+//!
+//! # MVS4-B tenant quotas (all opt-in; unset = unlimited). `quotas_default`
+//! # is the fallback for every tenant; `[quotas_tenants.<id>]` overrides it
+//! # per tenant. Untagged sessions share the literal "default" bucket, so
+//! # `[quotas_tenants.default]` limits them specifically. TOML tables go
+//! # last (everything above must stay scalar).
+//! [quotas_default]
+//! max_concurrent_sessions = 10   # exact across replicas (Pg atomic insert)
+//! max_total_tokens = 50000000    # lifetime token budget (Pg mode only)
+//! # daily_token_budget = 1000000 # alternative: rolling-24h window
+//! create_rate_per_min = 30       # session creates (per-replica approx)
+//!
+//! [quotas_tenants.acme]
+//! max_concurrent_sessions = 2
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +79,50 @@ pub const PG_DSN_ENV: &str = "ONEAI_PG_DSN";
 /// Escape hatch (`=1`): allow the Pg backend with leasing disabled —
 /// migration/testing only; multi-replica safety is GONE without leases.
 pub const PG_NO_LEASE_ENV: &str = "ONEAI_ORCH_PG_NO_LEASE";
+/// OTLP/HTTP endpoint env (MVS4-B); wins over `OrchestratorConfig::
+/// otel_endpoint`. Standard OTEL naming — the engine reads the same var.
+pub const OTEL_ENDPOINT_ENV: &str = "ONEAI_OTEL_ENDPOINT";
+
+/// Per-tenant quota knobs (MVS4-B). Every field is opt-in: `None` = that
+/// dimension is unlimited for the tenant. Resolution order lives in
+/// [`OrchestratorConfig::effective_quota`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct QuotaConfig {
+    /// Maximum concurrently-active sessions (Creating/Running/Resuming/
+    /// Hibernating/Crashed — Failed/Destroyed don't count). Enforced
+    /// atomically inside the store insert (cross-replica exact on Pg).
+    #[serde(default)]
+    pub max_concurrent_sessions: Option<u32>,
+    /// Lifetime token budget: `SUM(prompt+completion)` over the tenant's
+    /// tagged usage rows. Pg mode only (needs the shared usage ledger);
+    /// degrades open elsewhere. Wins over `daily_token_budget` when both set.
+    #[serde(default)]
+    pub max_total_tokens: Option<u64>,
+    /// Rolling-24h token budget (softer alternative to the lifetime cap).
+    #[serde(default)]
+    pub daily_token_budget: Option<u64>,
+    /// Session-create rate per minute. PER-REPLICA approximation (in-memory
+    /// token bucket, burst = one minute) — design §6 MVS4 accepts this.
+    #[serde(default)]
+    pub create_rate_per_min: Option<u32>,
+}
+
+impl QuotaConfig {
+    /// True when no dimension is configured (a no-op quota).
+    pub fn is_unlimited(&self) -> bool {
+        self.max_concurrent_sessions.is_none()
+            && self.max_total_tokens.is_none()
+            && self.daily_token_budget.is_none()
+            && self.create_rate_per_min.is_none()
+    }
+
+    /// True when any token-budget dimension is set (the CLI uses this to
+    /// decide whether to wire a shared usage source).
+    pub fn needs_usage_source(&self) -> bool {
+        self.max_total_tokens.is_some() || self.daily_token_budget.is_some()
+    }
+}
 
 /// Orchestrator configuration. See the module docs for the TOML shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +193,20 @@ pub struct OrchestratorConfig {
     /// the previous incarnation's not-yet-expired leases).
     #[serde(default)]
     pub replica_id: String,
+    /// Fallback quota for every tenant bucket (MVS4-B). `None` (default) =
+    /// unlimited unless the tenant has its own `[quotas_tenants.<id>]` entry.
+    #[serde(default)]
+    pub quotas_default: Option<QuotaConfig>,
+    /// Per-tenant quota overrides (MVS4-B), keyed on the tenant bucket
+    /// (untagged sessions → the literal `"default"` key). Wins over
+    /// `quotas_default`.
+    #[serde(default)]
+    pub quotas_tenants: HashMap<String, QuotaConfig>,
+    /// OTLP/HTTP endpoint for engine span export (MVS4-B). Injected into
+    /// every container as `OTEL_EXPORTER_OTLP_ENDPOINT` (plus a fresh
+    /// `TRACEPARENT` per spawn). Env `ONEAI_OTEL_ENDPOINT` wins.
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
 }
 
 fn default_listen() -> String {
@@ -182,6 +259,9 @@ impl Default for OrchestratorConfig {
             pg_dsn: None,
             lease_ttl_secs: default_lease_ttl(),
             replica_id: String::new(),
+            quotas_default: None,
+            quotas_tenants: HashMap::new(),
+            otel_endpoint: None,
         }
     }
 }
@@ -267,6 +347,38 @@ impl OrchestratorConfig {
         std::env::var(PG_NO_LEASE_ENV)
             .ok()
             .is_some_and(|v| v == "1")
+    }
+
+    /// Effective OTLP endpoint (MVS4-B): env `ONEAI_OTEL_ENDPOINT` wins over
+    /// the config field. `None` = span export disabled (no env injected into
+    /// containers).
+    pub fn resolve_otel_endpoint(&self) -> Option<String> {
+        std::env::var(OTEL_ENDPOINT_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.otel_endpoint.clone().filter(|s| !s.is_empty()))
+    }
+
+    /// The quota governing a tenant (MVS4-B): per-tenant override (keyed on
+    /// the normalized bucket — untagged → `"default"`) wins over
+    /// `quotas_default`; `None` = unlimited. An all-`None` configured entry
+    /// still counts as "configured" (it deliberately overrides a stricter
+    /// default with unlimited).
+    pub fn effective_quota(&self, tenant_id: &str) -> Option<&QuotaConfig> {
+        let bucket = crate::runner::tenant_bucket(tenant_id);
+        self.quotas_tenants
+            .get(bucket)
+            .or(self.quotas_default.as_ref())
+    }
+
+    /// Whether ANY configured quota needs the shared usage ledger (token
+    /// budgets) — the CLI wires a `PgUsageTracker`-backed source when this
+    /// is true and a Pg DSN is present.
+    pub fn any_quota_needs_usage(&self) -> bool {
+        self.quotas_default
+            .as_ref()
+            .is_some_and(|q| q.needs_usage_source())
+            || self.quotas_tenants.values().any(|q| q.needs_usage_source())
     }
 
     /// Cross-field validation. Called by `OrchestratorState::new` so every
@@ -445,6 +557,73 @@ mod tests {
         assert!(ok.validate().is_ok());
         // Default (no DSN, ttl 30) stays valid.
         assert!(OrchestratorConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn toml_parse_quotas_and_otel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchestrator.toml");
+        std::fs::write(
+            &path,
+            r#"
+            otel_endpoint = "http://127.0.0.1:4318"
+
+            [quotas_default]
+            max_concurrent_sessions = 10
+            create_rate_per_min = 30
+
+            [quotas_tenants.acme]
+            max_concurrent_sessions = 2
+            daily_token_budget = 1000000
+            "#,
+        )
+        .unwrap();
+        let c = OrchestratorConfig::load_from(&path).unwrap();
+        assert_eq!(c.otel_endpoint.as_deref(), Some("http://127.0.0.1:4318"));
+        let d = c.quotas_default.unwrap();
+        assert_eq!(d.max_concurrent_sessions, Some(10));
+        assert_eq!(d.create_rate_per_min, Some(30));
+        assert_eq!(d.max_total_tokens, None);
+        // Per-tenant override wins over the default…
+        let acme = c.effective_quota("acme").unwrap();
+        assert_eq!(acme.max_concurrent_sessions, Some(2));
+        assert_eq!(acme.daily_token_budget, Some(1_000_000));
+        // …unknown tenants fall back to the default…
+        assert_eq!(
+            c.effective_quota("other").unwrap().max_concurrent_sessions,
+            Some(10)
+        );
+        // …untagged sessions normalize to the "default" bucket key (no
+        // [quotas_tenants.default] entry here → quotas_default applies).
+        assert_eq!(
+            c.effective_quota("").unwrap().max_concurrent_sessions,
+            Some(10)
+        );
+        assert!(c.any_quota_needs_usage());
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn quotas_absent_means_unlimited() {
+        let c = OrchestratorConfig::default();
+        assert!(c.effective_quota("acme").is_none());
+        assert!(c.effective_quota("").is_none());
+        assert!(!c.any_quota_needs_usage());
+        // A tenants-map entry for "default" specifically limits untagged
+        // sessions without touching named tenants.
+        let mut c2 = OrchestratorConfig::default();
+        c2.quotas_tenants.insert(
+            "default".into(),
+            QuotaConfig {
+                max_concurrent_sessions: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            c2.effective_quota("").unwrap().max_concurrent_sessions,
+            Some(1)
+        );
+        assert!(c2.effective_quota("acme").is_none());
     }
 
     #[test]

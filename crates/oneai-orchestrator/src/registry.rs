@@ -144,6 +144,29 @@ impl RoutingTable {
         Ok(arc)
     }
 
+    /// Quota-gated [`insert_new`](Self::insert_new) (MVS4-B): the store
+    /// arbitrates count + insert as ONE unit (Pg: single transaction under
+    /// a per-tenant advisory xact lock — cross-replica exact).
+    /// `Ok(Some(count))` = the tenant's concurrent-session cap rejected the
+    /// insert (observed active count); the hot cache is untouched then.
+    pub async fn insert_new_if_under_quota(
+        &self,
+        entry: SessionEntry,
+        max_concurrent: Option<usize>,
+    ) -> Result<std::result::Result<Arc<SessionEntry>, usize>> {
+        let id = entry.spec.session_id.clone();
+        if let Some(count) = self
+            .store
+            .insert_if_under_quota(&entry.to_persisted(), max_concurrent)
+            .await?
+        {
+            return Ok(Err(count));
+        }
+        let arc = Arc::new(entry);
+        self.inner.write().await.insert(id, arc.clone());
+        Ok(Ok(arc))
+    }
+
     /// Get a session entry by id (fresh store read merged into the cache).
     /// On a store outage the stale cache entry is served (logged loudly) so
     /// in-flight proxies and control-plane reads degrade instead of failing.
@@ -499,6 +522,7 @@ pub(crate) mod tests {
     pub(crate) fn test_spec(id: &str) -> SessionSpec {
         SessionSpec {
             session_id: id.into(),
+            tenant_id: String::new(),
             image: "img".into(),
             state_volume: format!("oneai-orch-{id}-state"),
             workspace_volume: format!("oneai-orch-{id}-ws"),

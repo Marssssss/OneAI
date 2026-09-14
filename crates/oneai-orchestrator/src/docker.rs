@@ -320,6 +320,7 @@ mod tests {
     fn spec() -> SessionSpec {
         SessionSpec {
             session_id: "s1".into(),
+            tenant_id: String::new(),
             image: "oneai-engine:mvs1".into(),
             state_volume: "oneai-orch-s1-state".into(),
             workspace_volume: "oneai-orch-s1-ws".into(),

@@ -189,6 +189,7 @@ impl ContainerRunner for FakeRunner {
 pub fn test_spec(id: &str) -> SessionSpec {
     SessionSpec {
         session_id: id.into(),
+        tenant_id: String::new(),
         image: "fake-image:test".into(),
         state_volume: oneai_orchestrator::runner::state_volume_name(id),
         workspace_volume: oneai_orchestrator::runner::workspace_volume_name(id),

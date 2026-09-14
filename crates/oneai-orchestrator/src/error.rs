@@ -47,6 +47,24 @@ pub enum OrchestratorError {
     #[error("invalid session id: {0}")]
     InvalidSessionId(String),
 
+    /// Invalid tenant id (MVS4-B: `[a-zA-Z0-9_-]*`, ≤64, empty allowed).
+    #[error("invalid tenant id: {0}")]
+    InvalidTenantId(String),
+
+    /// Tenant quota exceeded (MVS4-B): concurrent-session cap, token budget
+    /// or per-replica create rate. Maps to HTTP 429; `retry_after_secs` is
+    /// `Some` only for the rate-limit reason (the others need a deletion or
+    /// a budget change — retrying alone won't help).
+    #[error("quota exceeded for tenant '{tenant}': {message}")]
+    QuotaExceeded {
+        tenant: String,
+        reason: crate::quota::QuotaReason,
+        limit: u64,
+        current: u64,
+        retry_after_secs: Option<u64>,
+        message: String,
+    },
+
     /// Registry persistence / load failure.
     #[error("registry persistence error: {0}")]
     Persist(String),

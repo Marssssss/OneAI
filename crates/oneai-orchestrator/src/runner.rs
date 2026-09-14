@@ -16,6 +16,13 @@ use crate::error::Result;
 pub struct SessionSpec {
     /// Caller-chosen unique session id; validated `[a-zA-Z0-9_-]+`.
     pub session_id: String,
+    /// Owning tenant (MVS4-B quota/observability dimension). Empty string =
+    /// untagged → the literal `"default"` quota bucket. `#[serde(default)]`
+    /// so pre-MVS4-B persisted specs (file JSON / Pg spec JSONB) load
+    /// unchanged — same byte-compat pattern as `PersistedEntry::archived`.
+    /// Immutable after insert: quotas count on it, spans/usage rows tag it.
+    #[serde(default)]
+    pub tenant_id: String,
     /// Container image, e.g. `oneai-engine:mvs1`.
     pub image: String,
     /// Named volume holding engine state (`~/.oneai`: SQLite + JSONL).
@@ -52,9 +59,52 @@ impl SessionSpec {
         Ok(())
     }
 
+    /// Validate a tenant id (MVS4-B): like a session id but MAY be empty
+    /// (untagged → the `"default"` quota bucket). The same charset keeps it
+    /// safe for log fields, Pg keys and env injection.
+    pub fn validate_tenant_id(tenant: &str) -> Result<()> {
+        if tenant.len() > 64
+            || !tenant
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(crate::error::OrchestratorError::InvalidTenantId(
+                tenant.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Docker container name for this session (`oneai-orch-<id>`).
     pub fn container_name(&self) -> String {
         container_name(&self.session_id)
+    }
+}
+
+// ─── Orchestrator → engine env contract (MVS4-B) ──────────────────────────────
+// Injected by `OrchestratorState::build_spec` AFTER the caller-env merge (so
+// callers can never spoof them), read by the engine container: usage-metadata
+// tagging + OTEL span attributes (`examples/cli/src/pg_backends.rs`,
+// `oneai-app/src/session.rs`).
+
+/// Tenant the session belongs to (empty string = untagged).
+pub const ENV_TENANT_ID: &str = "ONEAI_TENANT_ID";
+/// The ORCHESTRATOR's session id — distinct from the engine's internal
+/// conversation UUID; the join key for usage rows / spans ↔ routing table.
+pub const ENV_ORCH_SESSION_ID: &str = "ONEAI_ORCH_SESSION_ID";
+/// Standard OTEL OTLP/HTTP endpoint; the engine exports spans when set.
+pub const ENV_OTEL_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+/// W3C traceparent of the spawn — the engine seeds its trace context from
+/// it so engine spans land under the orchestrator's trace id.
+pub const ENV_TRACEPARENT: &str = "TRACEPARENT";
+
+/// The tenant bucket key for quota/rate lookups: empty (untagged) normalizes
+/// to the literal `"default"` bucket.
+pub fn tenant_bucket(tenant_id: &str) -> &str {
+    if tenant_id.is_empty() {
+        "default"
+    } else {
+        tenant_id
     }
 }
 

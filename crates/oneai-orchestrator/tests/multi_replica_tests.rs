@@ -641,9 +641,21 @@ async fn idle_sweep_respects_foreign_lease() {
         .await
         .unwrap()
         .unwrap();
-    // Ancient durable activity → idle candidate on any replica (timeout 0
-    // makes the local clock irrelevant; the lease gate is what's tested).
+    // Ancient activity → idle candidate on any replica; the lease gate is
+    // what's tested. Backdate BOTH clocks explicitly: the durable store copy
+    // (what a foreign replica's sweep reads) and the local atomic (what
+    // list_idle_candidates' idle_ms() consults — merge_stored is monotonic
+    // upward-only, so the durable 1ms never propagates BACKWARD into a cache
+    // entry born "now"; relying on ≥1ms of wall-clock elapsing between
+    // insert and sweep made this test timing-fragile).
     store.touch_activity("s1", 1).await.unwrap();
+    {
+        let e = table.get("s1").await.unwrap();
+        e.last_activity_ms
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        e.last_flushed_activity_ms
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Foreign fresh lease: B must skip.
     store

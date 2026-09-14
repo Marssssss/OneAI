@@ -1045,18 +1045,45 @@ enum OrchestratorAction {
         /// Replica identity for lease ownership (default: uuid v4 at boot)
         #[arg(long)]
         replica_id: Option<String>,
+        /// Default per-tenant concurrent-session cap (MVS4-B; populates
+        /// quotas_default — unset = unlimited)
+        #[arg(long)]
+        quota_max_sessions: Option<u32>,
+        /// Default per-tenant lifetime token budget (MVS4-B; needs the
+        /// shared Pg usage ledger — ONEAI_PG_DSN + postgres feature)
+        #[arg(long)]
+        quota_max_tokens: Option<u64>,
+        /// Default per-tenant rolling-24h token budget (MVS4-B; alternative
+        /// to --quota-max-tokens, which wins when both are set)
+        #[arg(long)]
+        quota_daily_tokens: Option<u64>,
+        /// Default per-tenant session-create rate per minute (MVS4-B;
+        /// per-replica approximation)
+        #[arg(long)]
+        quota_rate_per_min: Option<u32>,
+        /// OTLP/HTTP endpoint injected into every session container (MVS4-B;
+        /// engine spans export there tagged tenant.id/orchestrator.session.id
+        /// under the spawn's TRACEPARENT). Env ONEAI_OTEL_ENDPOINT wins.
+        #[arg(long)]
+        otel_endpoint: Option<String>,
     },
     /// Create a session on a running orchestrator (spawns its container)
     Create {
         /// Session id ([a-zA-Z0-9_-]+; random uuid when omitted)
         #[arg(long)]
         id: Option<String>,
+        /// Owning tenant (MVS4-B quota bucket; untagged = "default")
+        #[arg(long)]
+        tenant: Option<String>,
         /// Control-plane URL (default: http://127.0.0.1:9191)
         #[arg(long)]
         url: Option<String>,
     },
     /// List sessions on a running orchestrator
     List {
+        /// Filter to one tenant bucket (MVS4-B; "default" = untagged)
+        #[arg(long)]
+        tenant: Option<String>,
         #[arg(long)]
         url: Option<String>,
     },
@@ -1738,6 +1765,11 @@ fn main() {
                 archive_dir,
                 lease_ttl,
                 replica_id,
+                quota_max_sessions,
+                quota_max_tokens,
+                quota_daily_tokens,
+                quota_rate_per_min,
+                otel_endpoint,
             } => cmd_orchestrator::cmd_orchestrator_serve(
                 listen.as_deref(),
                 image.as_deref(),
@@ -1748,12 +1780,23 @@ fn main() {
                 archive_dir.as_deref(),
                 lease_ttl,
                 replica_id.as_deref(),
+                cmd_orchestrator::QuotaFlags {
+                    max_sessions: quota_max_sessions,
+                    max_tokens: quota_max_tokens,
+                    daily_tokens: quota_daily_tokens,
+                    rate_per_min: quota_rate_per_min,
+                    otel_endpoint: otel_endpoint.as_deref(),
+                },
             ),
-            OrchestratorAction::Create { id, url } => {
-                cmd_orchestrator::cmd_orchestrator_create(url.as_deref(), id.as_deref())
+            OrchestratorAction::Create { id, tenant, url } => {
+                cmd_orchestrator::cmd_orchestrator_create(
+                    url.as_deref(),
+                    id.as_deref(),
+                    tenant.as_deref(),
+                )
             }
-            OrchestratorAction::List { url } => {
-                cmd_orchestrator::cmd_orchestrator_list(url.as_deref())
+            OrchestratorAction::List { tenant, url } => {
+                cmd_orchestrator::cmd_orchestrator_list(url.as_deref(), tenant.as_deref())
             }
             OrchestratorAction::Status { id, url } => {
                 cmd_orchestrator::cmd_orchestrator_status(url.as_deref(), &id)

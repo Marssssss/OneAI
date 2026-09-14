@@ -144,6 +144,40 @@ impl PgUsageTracker {
          completion_tokens, cache_read_tokens, cache_creation_tokens, timestamp, \
          metadata_json::text, is_estimated FROM usage_records_pg";
 
+    /// Server-side token SUM for one tenant's tagged rows (MVS4-B tenant
+    /// budgets): `SUM(prompt_tokens + completion_tokens)` over
+    /// `metadata_json->>'tenant_id' = $tenant`; `daily` narrows to the
+    /// rolling 24h window (`timestamp > now() - interval '1 day'`).
+    /// Rows are tagged by the CLI-layer `TenantTaggingUsageTracker`
+    /// decorator (the orchestrator injects `ONEAI_TENANT_ID` per container).
+    ///
+    /// This is the ONE server-side aggregate in this store (every other read
+    /// aggregates in Rust via `UsageSummary::from_records`) — a budget check
+    /// must not materialize the tenant's whole ledger per create.
+    ///
+    /// PROD MIGRATION for large ledgers (the JSONB expression seq-scans):
+    /// `ALTER TABLE usage_records_pg ADD COLUMN tenant_id_gen TEXT GENERATED
+    /// ALWAYS AS (metadata_json->>'tenant_id') STORED;` +
+    /// `CREATE INDEX idx_usage_pg_tenant ON usage_records_pg(tenant_id_gen);`
+    /// — then rewrite the WHERE below to `tenant_id_gen = $1`.
+    pub async fn tenant_token_sum(&self, tenant: &str, daily: bool) -> Result<u64> {
+        let client = self.client().await?;
+        let sql = if daily {
+            "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0)::BIGINT \
+             FROM usage_records_pg \
+             WHERE metadata_json->>'tenant_id' = $1 \
+               AND timestamp > now() - interval '1 day'"
+        } else {
+            "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0)::BIGINT \
+             FROM usage_records_pg WHERE metadata_json->>'tenant_id' = $1"
+        };
+        let row = client.query_one(sql, &[&tenant]).await.map_err(|e| {
+            OneAIError::Usage(format!("Failed to sum tenant token usage: {}", pg_err(e)))
+        })?;
+        let sum: i64 = row.get(0);
+        Ok(sum.max(0) as u64)
+    }
+
     async fn load_records(&self, session_id: Option<&str>) -> Result<Vec<UsageRecord>> {
         let client = self.client().await?;
         let sql = match session_id {

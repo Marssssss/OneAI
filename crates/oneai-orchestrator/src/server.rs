@@ -11,10 +11,12 @@ use crate::config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
 use crate::error::{OrchestratorError, Result};
 use crate::fsm::{SessionEntry, SessionSnapshot, SessionState};
 use crate::idle::spawn_idle_sweep;
+use crate::quota::{TenantQuotaEnforcer, TenantUsageSum};
 use crate::registry::RoutingTable;
 use crate::routes::router;
 use crate::runner::{
     state_volume_name, workspace_volume_name, ContainerHandle, ContainerRunner, SessionSpec,
+    ENV_ORCH_SESSION_ID, ENV_OTEL_ENDPOINT, ENV_TENANT_ID, ENV_TRACEPARENT,
 };
 use crate::store::{FileSessionStore, LeaseIdentity, SessionStore};
 
@@ -34,6 +36,9 @@ pub struct OrchestratorState {
     /// This replica's lease identity (MVS4-A): uuid unless pinned via
     /// config. Only meaningful when the store `supports_leasing()`.
     pub replica_id: String,
+    /// Per-tenant quota enforcement (MVS4-B): create-rate buckets (process-
+    /// local) + token-budget reads (shared usage source when wired).
+    pub quota: Arc<TenantQuotaEnforcer>,
 }
 
 impl OrchestratorState {
@@ -73,7 +78,28 @@ impl OrchestratorState {
         archive_store: Option<Arc<dyn VolumeArchiveStore>>,
         store: Arc<dyn SessionStore>,
     ) -> Result<Arc<Self>> {
+        Self::with_session_store_and_usage(config, runner, archive_store, store, None).await
+    }
+
+    /// Like [`with_session_store`](Self::with_session_store) plus the shared
+    /// token-usage source for tenant budget checks (MVS4-B). `None` (or a
+    /// file-mode store) degrades budget checks open with a warning — see
+    /// `quota.rs`.
+    pub async fn with_session_store_and_usage(
+        config: OrchestratorConfig,
+        runner: Arc<dyn ContainerRunner>,
+        archive_store: Option<Arc<dyn VolumeArchiveStore>>,
+        store: Arc<dyn SessionStore>,
+        usage: Option<Arc<dyn TenantUsageSum>>,
+    ) -> Result<Arc<Self>> {
         config.validate()?;
+        if config.any_quota_needs_usage() && usage.is_none() {
+            tracing::warn!(
+                "token-budget quotas are configured but no shared usage source is wired \
+                 (needs {dsn} + the postgres feature) — budget checks will be SKIPPED",
+                dsn = crate::config::PG_DSN_ENV
+            );
+        }
         let bearer =
             oneai_http_auth::BearerSecret::from_env(ORCHESTRATOR_SECRET_ENV).ok_or_else(|| {
                 OrchestratorError::Config(format!(
@@ -107,6 +133,7 @@ impl OrchestratorState {
             bearer,
             archive_store,
             replica_id,
+            quota: Arc::new(TenantQuotaEnforcer::new(usage)),
         }))
     }
 
@@ -123,8 +150,29 @@ impl OrchestratorState {
     }
 
     /// Compose the spawn spec for a session id (image/volumes/ports/env from
-    /// config + per-session env).
+    /// config + per-session env). Untagged overload — `""` tenant.
     pub fn build_spec(&self, session_id: &str, extra_env: Vec<(String, String)>) -> SessionSpec {
+        self.build_spec_for_tenant(session_id, "", extra_env)
+    }
+
+    /// Tenant-aware [`build_spec`](Self::build_spec) (MVS4-B). After the
+    /// caller-env merge, the orchestrator-sovereign contract vars are
+    /// UPSERTED (so a per-request env can never spoof the tenant, the
+    /// orchestrator session id, or the trace linkage):
+    ///
+    /// - `ONEAI_TENANT_ID` / `ONEAI_ORCH_SESSION_ID` — always (the engine
+    ///   tags usage rows + spans with them; empty tenant = untagged).
+    /// - `OTEL_EXPORTER_OTLP_ENDPOINT` + a freshly generated `TRACEPARENT`
+    ///   — only when an OTLP endpoint is configured. The traceparent roots
+    ///   the container's engine spans under this spawn's trace id (W3C
+    ///   format via `oneai_trace::w3c`); it is baked into the persisted spec,
+    ///   so a resume-spawn of the same session continues the same trace.
+    pub fn build_spec_for_tenant(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        extra_env: Vec<(String, String)>,
+    ) -> SessionSpec {
         let mut env = self.config.resolved_passthrough_env();
         for (k, v) in extra_env {
             // Per-session env wins over passthrough on key collision.
@@ -134,9 +182,33 @@ impl OrchestratorState {
                 env.push((k, v));
             }
         }
+        // Orchestrator-sovereign contract vars win over BOTH layers.
+        let mut sovereign = vec![
+            (ENV_TENANT_ID.to_string(), tenant_id.to_string()),
+            (ENV_ORCH_SESSION_ID.to_string(), session_id.to_string()),
+        ];
+        if let Some(endpoint) = self.config.resolve_otel_endpoint() {
+            sovereign.push((ENV_OTEL_ENDPOINT.to_string(), endpoint));
+            let tp = generate_traceparent();
+            tracing::info!(
+                session = %session_id,
+                tenant = %tenant_id,
+                traceparent = %tp,
+                "spawn trace context seeded (engine spans will attach under this trace id)"
+            );
+            sovereign.push((ENV_TRACEPARENT.to_string(), tp));
+        }
+        for (k, v) in sovereign {
+            if let Some(slot) = env.iter_mut().find(|(ek, _)| *ek == k) {
+                slot.1 = v;
+            } else {
+                env.push((k, v));
+            }
+        }
         env.sort();
         SessionSpec {
             session_id: session_id.to_string(),
+            tenant_id: tenant_id.to_string(),
             image: self.config.image.clone(),
             state_volume: state_volume_name(session_id),
             workspace_volume: workspace_volume_name(session_id),
@@ -148,11 +220,29 @@ impl OrchestratorState {
         }
     }
 
-    /// Create a session and spawn its container. Blocks until the engine
-    /// port is accepting connections (or the spawn fails → Failed state).
+    /// Create a session and spawn its container (untagged — the `"default"`
+    /// quota bucket). Blocks until the engine port is accepting connections
+    /// (or the spawn fails → Failed state).
     pub async fn create_session(
         self: &Arc<Self>,
         session_id: Option<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<SessionSnapshot> {
+        self.create_session_for_tenant(session_id, "", env).await
+    }
+
+    /// Tenant-aware [`create_session`](Self::create_session) (MVS4-B).
+    /// Enforcement order (cheapest + most replica-local first):
+    /// 1. create-rate token bucket (per-replica approximation),
+    /// 2. token budget (shared Pg SUM; fail-open without a usage source),
+    /// 3. concurrent-session cap — arbitrated INSIDE the store insert
+    ///    (cross-replica exact on Pg; the count and the insert are one unit).
+    ///
+    /// Rejections surface as `OrchestratorError::QuotaExceeded` → HTTP 429.
+    pub async fn create_session_for_tenant(
+        self: &Arc<Self>,
+        session_id: Option<String>,
+        tenant_id: &str,
         env: Vec<(String, String)>,
     ) -> Result<SessionSnapshot> {
         let id = match session_id {
@@ -162,11 +252,31 @@ impl OrchestratorState {
             }
             None => uuid::Uuid::new_v4().simple().to_string(),
         };
-        let spec = self.build_spec(&id, env);
-        let entry = self
+        SessionSpec::validate_tenant_id(tenant_id)?;
+        let quota = self.config.effective_quota(tenant_id);
+        if let Some(q) = quota {
+            self.quota.check_create_rate(tenant_id, q)?;
+            self.quota.check_token_budget(tenant_id, q).await?;
+        }
+        let spec = self.build_spec_for_tenant(&id, tenant_id, env);
+        let max_concurrent = quota
+            .and_then(|q| q.max_concurrent_sessions)
+            .map(|m| m as usize);
+        let entry = match self
             .table
-            .insert_new(SessionEntry::new_creating(spec.clone()))
-            .await?;
+            .insert_new_if_under_quota(SessionEntry::new_creating(spec.clone()), max_concurrent)
+            .await?
+        {
+            Ok(entry) => entry,
+            Err(count) => {
+                let limit = max_concurrent.unwrap_or(0) as u64;
+                return Err(self.quota.concurrent_rejection(
+                    tenant_id,
+                    limit,
+                    limit.max(count as u64),
+                ));
+            }
+        };
         // Durability barrier (file backend: whole-file write; shared stores:
         // the insert itself is already durable).
         self.table.persist().await?;
@@ -561,6 +671,17 @@ impl OrchestratorState {
     }
 }
 
+/// Fresh W3C traceparent for one container spawn (MVS4-B): a random 128-bit
+/// trace id + a random 64-bit parent span id representing the orchestrator's
+/// spawn context. The engine seeds its `TraceContext` from it, so every
+/// engine span exports under this trace id (the orchestrator itself logs the
+/// value at spawn — that log line is the correlation handle).
+fn generate_traceparent() -> String {
+    let trace_id = uuid::Uuid::new_v4().simple().to_string();
+    let parent_id = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
+    oneai_trace::w3c::format_traceparent(&trace_id, &parent_id, true)
+}
+
 /// Deep-archive store (MVS3-C): opt-in via config; the marker on persisted
 /// entries decides whether a resume needs a restore.
 fn archive_store_from_config(config: &OrchestratorConfig) -> Option<Arc<dyn VolumeArchiveStore>> {
@@ -596,11 +717,29 @@ pub async fn run_with_store(
     store: Option<Arc<dyn SessionStore>>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    run_with_deps(config, runner, store, None, cancel).await
+}
+
+/// Like [`run_with_store`] plus the shared token-usage source for tenant
+/// budget quotas (MVS4-B). `None` = budget checks degrade open (warned).
+pub async fn run_with_deps(
+    config: OrchestratorConfig,
+    runner: Arc<dyn ContainerRunner>,
+    store: Option<Arc<dyn SessionStore>>,
+    usage: Option<Arc<dyn TenantUsageSum>>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let archive_store = archive_store_from_config(&config);
     let state = match store {
         Some(store) => {
-            OrchestratorState::with_session_store(config.clone(), runner, archive_store, store)
-                .await?
+            OrchestratorState::with_session_store_and_usage(
+                config.clone(),
+                runner,
+                archive_store,
+                store,
+                usage,
+            )
+            .await?
         }
         None => {
             OrchestratorState::with_archive_store(config.clone(), runner, archive_store).await?

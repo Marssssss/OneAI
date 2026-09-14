@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::error::OrchestratorError;
 use crate::fsm::{SessionSnapshot, SessionState};
@@ -26,6 +27,10 @@ use crate::store::{ClaimOutcome, LeaseGuard};
 /// Header carrying the owning replica id on a 409 lease conflict (MVS4-A) —
 /// a fronting LB can learn sticky routing from it.
 pub const OWNER_REPLICA_HEADER: HeaderName = HeaderName::from_static("x-oneai-owner-replica");
+
+/// Header fallback for the tenant declaration (MVS4-B) — for proxies that
+/// can't rewrite request bodies. The body field wins on conflict.
+pub const TENANT_HEADER: HeaderName = HeaderName::from_static("x-oneai-tenant");
 
 /// Assemble the control-plane router.
 pub fn router(state: Arc<OrchestratorState>) -> Router {
@@ -45,10 +50,26 @@ pub struct CreateSessionRequest {
     /// Client-chosen session id (`[a-zA-Z0-9_-]+`, ≤64). Random uuid when
     /// omitted.
     pub session_id: Option<String>,
+    /// Owning tenant (MVS4-B, `[a-zA-Z0-9_-]*`, ≤64). Canonical source for
+    /// the quota bucket; the `X-Oneai-Tenant` header is the fallback when
+    /// this is omitted (body wins on conflict). Empty/absent = untagged →
+    /// the `"default"` bucket. Trusted-caller declared for now; JWT/OIDC
+    /// tenant claims will override this in a later round.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     /// Extra env vars injected into the container (merged over the
     /// orchestrator's passthrough env).
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+/// `GET /v1/sessions` query params.
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    /// Filter to one tenant bucket (MVS4-B). `default` matches untagged
+    /// sessions (they normalize to that bucket).
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 /// `POST /v1/sessions` response.
@@ -64,10 +85,42 @@ fn ws_url(id: &str) -> String {
 }
 
 fn err_response(e: OrchestratorError) -> Response {
+    // MVS4-B quota rejections get a machine-readable 429 body (the `reason`
+    // discriminator lets clients tell "delete something" from "slow down").
+    if let OrchestratorError::QuotaExceeded {
+        ref tenant,
+        reason,
+        limit,
+        current,
+        retry_after_secs,
+        ref message,
+    } = e
+    {
+        let mut headers = HeaderMap::new();
+        if let Some(secs) = retry_after_secs {
+            if let Ok(v) = secs.to_string().parse() {
+                headers.insert(header::RETRY_AFTER, v);
+            }
+        }
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            headers,
+            Json(serde_json::json!({
+                "error": "quota_exceeded",
+                "reason": reason.as_str(),
+                "tenant_id": tenant,
+                "limit": limit,
+                "current": current,
+                "message": message,
+            })),
+        )
+            .into_response();
+    }
     let (status, msg) = match &e {
         OrchestratorError::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         OrchestratorError::AlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         OrchestratorError::InvalidSessionId(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+        OrchestratorError::InvalidTenantId(_) => (StatusCode::BAD_REQUEST, e.to_string()),
         OrchestratorError::Runner(_) => (StatusCode::BAD_GATEWAY, e.to_string()),
         OrchestratorError::NotRunnable { .. } | OrchestratorError::ResumeTimeout(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.to_string())
@@ -79,6 +132,19 @@ fn err_response(e: OrchestratorError) -> Response {
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// Resolve the tenant declaration: body field wins over the
+/// `X-Oneai-Tenant` header; both absent = untagged (`""`).
+fn resolve_tenant(req_tenant: Option<&str>, headers: &HeaderMap) -> String {
+    if let Some(t) = req_tenant {
+        return t.trim().to_string();
+    }
+    headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Query params for the WS endpoint (browser-compatible token auth).
@@ -102,9 +168,15 @@ async fn create_session(
     if let Some(resp) = st.bearer.guard(&headers) {
         return resp;
     }
+    let tenant = resolve_tenant(req.tenant_id.as_deref(), &headers);
     let mut env: Vec<(String, String)> = req.env.into_iter().collect();
     env.sort();
-    match st.create_session(req.session_id, env).await {
+    let create = st.create_session_for_tenant(req.session_id, &tenant, env);
+    let span = tracing::info_span!(
+        "orchestrator.create_session",
+        tenant.id = %crate::runner::tenant_bucket(&tenant),
+    );
+    match create.instrument(span).await {
         Ok(session) => {
             let resp = CreateSessionResponse {
                 ws_url: ws_url(&session.session_id),
@@ -112,15 +184,40 @@ async fn create_session(
             };
             (StatusCode::CREATED, Json(resp)).into_response()
         }
-        Err(e) => err_response(e),
+        Err(e) => {
+            if let OrchestratorError::QuotaExceeded {
+                reason,
+                ref message,
+                ..
+            } = e
+            {
+                tracing::warn!(
+                    tenant = %crate::runner::tenant_bucket(&tenant),
+                    reason = %reason,
+                    "session create rejected by quota: {message}"
+                );
+            }
+            err_response(e)
+        }
     }
 }
 
-async fn list_sessions(State(st): State<Arc<OrchestratorState>>, headers: HeaderMap) -> Response {
+async fn list_sessions(
+    State(st): State<Arc<OrchestratorState>>,
+    headers: HeaderMap,
+    Query(q): Query<ListQuery>,
+) -> Response {
     if let Some(resp) = st.bearer.guard(&headers) {
         return resp;
     }
-    Json(serde_json::json!({ "sessions": st.table.list().await })).into_response()
+    let mut sessions = st.table.list().await;
+    // Tenant filter (MVS4-B): `?tenant=default` matches untagged sessions
+    // (bucket normalization), anything else matches the declared tenant.
+    if let Some(tenant) = q.tenant.filter(|t| !t.trim().is_empty()) {
+        let bucket = crate::runner::tenant_bucket(tenant.trim()).to_string();
+        sessions.retain(|s| crate::runner::tenant_bucket(&s.tenant_id) == bucket);
+    }
+    Json(serde_json::json!({ "sessions": sessions })).into_response()
 }
 
 async fn get_session(
@@ -145,7 +242,8 @@ async fn delete_session(
     if let Some(resp) = st.bearer.guard(&headers) {
         return resp;
     }
-    match st.destroy_session(&id).await {
+    let span = tracing::info_span!("orchestrator.delete_session", session.id = %id);
+    match st.destroy_session(&id).instrument(span).await {
         Ok(()) => Json(serde_json::json!({ "deleted": id })).into_response(),
         Err(e) => err_response(e),
     }
@@ -282,11 +380,19 @@ async fn ws_session(
         )));
     };
 
-    ws.on_upgrade(move |socket| async move {
-        // Ownership lives exactly as long as the pump (drop → force-flush
-        // activity + release the lease for the next replica).
-        let _lease = lease_guard;
-        proxy_pump(socket, upstream, entry).await;
+    let proxy_span = tracing::info_span!(
+        "orchestrator.ws_proxy",
+        session.id = %id,
+        tenant.id = %crate::runner::tenant_bucket(&entry.spec.tenant_id),
+    );
+    ws.on_upgrade(move |socket| {
+        async move {
+            // Ownership lives exactly as long as the pump (drop → force-flush
+            // activity + release the lease for the next replica).
+            let _lease = lease_guard;
+            proxy_pump(socket, upstream, entry).await;
+        }
+        .instrument(proxy_span)
     })
 }
 

@@ -110,6 +110,42 @@ pub trait SessionStore: Send + Sync {
     /// (across ALL replicas on shared backends — the primary key arbitrates).
     async fn insert(&self, entry: &PersistedEntry) -> Result<()>;
 
+    /// Atomic quota-gated insert (MVS4-B): insert ONLY when the entry's
+    /// tenant has fewer than `max_concurrent` quota-counting sessions
+    /// (`fsm::counts_toward_quota` — Failed/Destroyed don't count);
+    /// `None` = unlimited (behaves exactly like [`insert`](Self::insert)).
+    ///
+    /// Returns `Ok(None)` when inserted, `Ok(Some(count))` when REJECTED
+    /// (observed active count, `>= max`). Count + insert must be ONE
+    /// arbitration unit — implementations must never split this into two
+    /// calls. The default impl runs both under no cross-call lock (fine for
+    /// single-writer test doubles); `FileSessionStore` overrides it inside
+    /// its op-lock commit; `PgSessionStore` overrides it with a single
+    /// transaction under `pg_advisory_xact_lock(hashtext(tenant))`, so two
+    /// replicas racing the last slot produce exactly one winner.
+    async fn insert_if_under_quota(
+        &self,
+        entry: &PersistedEntry,
+        max_concurrent: Option<usize>,
+    ) -> Result<Option<usize>> {
+        if let Some(max) = max_concurrent {
+            let count = self
+                .load_all()
+                .await?
+                .iter()
+                .filter(|s| {
+                    crate::fsm::counts_toward_quota(s.entry.state)
+                        && s.entry.spec.tenant_id == entry.spec.tenant_id
+                })
+                .count();
+            if count >= max {
+                return Ok(Some(count));
+            }
+        }
+        self.insert(entry).await?;
+        Ok(None)
+    }
+
     /// CAS state transition; `new_handle`/`last_error` are merged when
     /// `Some`. Returns the post-transition entry on a hit, `None` on a miss.
     async fn cas_transition(
@@ -459,6 +495,37 @@ impl SessionStore for FileSessionStore {
         .await
     }
 
+    async fn insert_if_under_quota(
+        &self,
+        entry: &PersistedEntry,
+        max_concurrent: Option<usize>,
+    ) -> Result<Option<usize>> {
+        // One commit: op-lock spans count + insert + file write, so even
+        // concurrent in-process creates can't overshoot the cap (the file
+        // backend is single-replica by definition).
+        let id = entry.spec.session_id.clone();
+        let tenant = entry.spec.tenant_id.clone();
+        self.commit(move |map| {
+            if map.contains_key(&id) {
+                return Err(OrchestratorError::AlreadyExists(id.clone()));
+            }
+            if let Some(max) = max_concurrent {
+                let count = map
+                    .values()
+                    .filter(|e| {
+                        crate::fsm::counts_toward_quota(e.state) && e.spec.tenant_id == tenant
+                    })
+                    .count();
+                if count >= max {
+                    return Ok(Some(count));
+                }
+            }
+            map.insert(id.clone(), entry.clone());
+            Ok(None)
+        })
+        .await
+    }
+
     async fn cas_transition(
         &self,
         id: &str,
@@ -612,6 +679,7 @@ mod tests {
     pub(crate) fn test_spec(id: &str) -> SessionSpec {
         SessionSpec {
             session_id: id.into(),
+            tenant_id: String::new(),
             image: "img".into(),
             state_volume: format!("oneai-orch-{id}-state"),
             workspace_volume: format!("oneai-orch-{id}-ws"),

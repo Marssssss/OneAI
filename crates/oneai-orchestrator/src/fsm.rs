@@ -55,6 +55,14 @@ impl SessionState {
     }
 }
 
+/// Whether a session in this state counts toward the tenant's
+/// concurrent-session quota (MVS4-B). Failed/Destroyed are excluded: their
+/// containers are gone (or never came up), so they hold no resources —
+/// keeping them counted would let a crash loop permanently block a tenant.
+pub fn counts_toward_quota(state: SessionState) -> bool {
+    !matches!(state, SessionState::Failed | SessionState::Destroyed)
+}
+
 /// Validate a state transition against the D6 edge set (plus administrative
 /// destroy: every non-terminal state may be force-deleted).
 pub fn validate_transition(from: SessionState, to: SessionState) -> Result<()> {
@@ -151,6 +159,7 @@ impl SessionEntry {
     pub fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
             session_id: self.spec.session_id.clone(),
+            tenant_id: self.spec.tenant_id.clone(),
             state: self.state,
             last_error: self.last_error.clone(),
             updated_at: self.updated_at,
@@ -201,6 +210,10 @@ impl Clone for SessionEntry {
 #[non_exhaustive]
 pub struct SessionSnapshot {
     pub session_id: String,
+    /// Owning tenant (MVS4-B); omitted from the JSON when empty (untagged)
+    /// so pre-MVS4-B clients see the exact same wire shape.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tenant_id: String,
     pub state: SessionState,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -318,6 +331,7 @@ mod tests {
     fn entry_clone_shares_notify_and_copies_atomics() {
         let spec = SessionSpec {
             session_id: "s".into(),
+            tenant_id: String::new(),
             image: "i".into(),
             state_volume: "sv".into(),
             workspace_volume: "wv".into(),
@@ -361,17 +375,65 @@ mod tests {
         let p: PersistedEntry = serde_json::from_str(json).unwrap();
         assert_eq!(p.state, SessionState::Hibernating);
         assert!(p.archived.is_none());
+        // MVS4-B: the same pre-B spec JSON has no `tenant_id` either —
+        // serde(default) loads it as "" (untagged → "default" bucket).
+        assert_eq!(p.spec.tenant_id, "");
         let e = SessionEntry::from_persisted(p);
         assert!(e.archived.is_none());
         // Snapshot omits the field when None (wire shape unchanged).
         let snap_json = serde_json::to_string(&e.snapshot()).unwrap();
         assert!(!snap_json.contains("archived"));
+        // Empty tenant_id is omitted from the snapshot JSON too — older
+        // clients see the exact pre-MVS4-B wire shape.
+        assert!(!snap_json.contains("tenant_id"));
+    }
+
+    #[test]
+    fn tenant_snapshot_and_quota_state_filter() {
+        let mut spec = test_spec_tenant("t1", "acme");
+        spec_tenant_check(&mut spec);
+        let e = SessionEntry::new_creating(spec);
+        let snap = e.snapshot();
+        assert_eq!(snap.tenant_id, "acme");
+        let snap_json = serde_json::to_string(&snap).unwrap();
+        assert!(snap_json.contains("\"tenant_id\":\"acme\""));
+        // Quota counting: live states count; Failed/Destroyed don't.
+        assert!(crate::fsm::counts_toward_quota(SessionState::Creating));
+        assert!(crate::fsm::counts_toward_quota(SessionState::Running));
+        assert!(crate::fsm::counts_toward_quota(SessionState::Hibernating));
+        assert!(crate::fsm::counts_toward_quota(SessionState::Crashed));
+        assert!(crate::fsm::counts_toward_quota(SessionState::Resuming));
+        assert!(!crate::fsm::counts_toward_quota(SessionState::Failed));
+        assert!(!crate::fsm::counts_toward_quota(SessionState::Destroyed));
+    }
+
+    fn test_spec_tenant(id: &str, tenant: &str) -> SessionSpec {
+        SessionSpec {
+            session_id: id.into(),
+            tenant_id: tenant.into(),
+            image: "img".into(),
+            state_volume: "sv".into(),
+            workspace_volume: "wv".into(),
+            env: vec![],
+            bind_host: "127.0.0.1".into(),
+            container_port: 8787,
+            provider_config: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn spec_tenant_check(spec: &mut SessionSpec) {
+        // tenant_id round-trips through JSON (the Pg spec JSONB path).
+        let json = serde_json::to_string(spec).unwrap();
+        let back: SessionSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tenant_id, spec.tenant_id);
     }
 
     #[test]
     fn persisted_roundtrip() {
         let spec = SessionSpec {
             session_id: "rt".into(),
+            tenant_id: String::new(),
             image: "img".into(),
             state_volume: "sv".into(),
             workspace_volume: "wv".into(),

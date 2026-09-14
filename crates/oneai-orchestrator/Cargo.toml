@@ -23,6 +23,9 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
 oneai-http-auth = { workspace = true }
+# MVS4-B: W3C traceparent generation for the orchestrator→engine span
+# linkage (w3c module is always compiled; no otel feature needed here).
+oneai-trace = { workspace = true }
 # MVS4-A multi-replica backend (feature `postgres`, default off): the Pg
 # session store reuses oneai-persistence's pg_common recipe (pool +
 # advisory-lock DDL + error mapping).

@@ -18,6 +18,17 @@ const DEFAULT_URL: &str = "http://127.0.0.1:9191";
 
 // ─── serve (daemon) ─────────────────────────────────────────────────────────
 
+/// MVS4-B serve flags bundled (the positional list outgrew flat args):
+/// populate `quotas_default` + `otel_endpoint` when set.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct QuotaFlags<'a> {
+    pub max_sessions: Option<u32>,
+    pub max_tokens: Option<u64>,
+    pub daily_tokens: Option<u64>,
+    pub rate_per_min: Option<u32>,
+    pub otel_endpoint: Option<&'a str>,
+}
+
 // Positional mirrors of the `oneai orchestrator serve` clap flags.
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_orchestrator_serve(
@@ -30,8 +41,9 @@ pub fn cmd_orchestrator_serve(
     archive_dir: Option<&str>,
     lease_ttl: Option<u64>,
     replica_id: Option<&str>,
+    quota: QuotaFlags<'_>,
 ) {
-    println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2/MVS4-A)");
+    println!("🤖 OneAI Orchestrator — cloud session control plane (MVS2/MVS4-A/B)");
 
     // tracing → stderr（RUST_LOG 可控，默认 info）。编排器的生命周期日志
     // （reconcile/租约 claim-loss/sweep/deep-archive/告警回退）是验收与运维
@@ -58,6 +70,31 @@ pub fn cmd_orchestrator_serve(
         );
         if let Some(p) = provider_config {
             config.provider_config = Some(std::path::PathBuf::from(p));
+        }
+        // MVS4-B serve flags → quotas_default / otel_endpoint (CLI wins over
+        // the toml, mirroring with_overrides semantics).
+        if quota.max_sessions.is_some()
+            || quota.max_tokens.is_some()
+            || quota.daily_tokens.is_some()
+            || quota.rate_per_min.is_some()
+        {
+            let mut q = config.quotas_default.unwrap_or_default();
+            if let Some(v) = quota.max_sessions {
+                q.max_concurrent_sessions = Some(v);
+            }
+            if let Some(v) = quota.max_tokens {
+                q.max_total_tokens = Some(v);
+            }
+            if let Some(v) = quota.daily_tokens {
+                q.daily_token_budget = Some(v);
+            }
+            if let Some(v) = quota.rate_per_min {
+                q.create_rate_per_min = Some(v);
+            }
+            config.quotas_default = Some(q);
+        }
+        if let Some(ep) = quota.otel_endpoint {
+            config.otel_endpoint = Some(ep.to_string());
         }
         // Fail fast on config contradictions (Pg-without-lease foot-gun,
         // deep-archive requirements) BEFORE binding anything.
@@ -97,6 +134,30 @@ pub fn cmd_orchestrator_serve(
                 "   Backend:  file ({}/sessions.json, single replica)",
                 config.registry_dir.display()
             );
+        }
+
+        // ── Tenant token-budget source (MVS4-B): the budget SUM reads the
+        // shared usage ledger the ENGINE containers write (they stamp
+        // metadata.tenant_id from the injected ONEAI_TENANT_ID). Only wired
+        // when some quota actually needs it AND the Pg backend is active;
+        // otherwise budget checks degrade open with a warning (quota.rs).
+        let mut usage: Option<Arc<dyn oneai_orchestrator::TenantUsageSum>> = None;
+        if config.any_quota_needs_usage() && store.is_some() {
+            #[cfg(feature = "postgres")]
+            if let Some(dsn) = config.resolve_pg_dsn() {
+                match oneai_persistence::PgUsageTracker::connect(&dsn).await {
+                    Ok(tracker) => {
+                        println!("   Quotas:   token budget reads usage_records_pg (shared)");
+                        usage = Some(Arc::new(oneai_orchestrator::PgTenantUsage::new(Arc::new(
+                            tracker,
+                        ))));
+                    }
+                    Err(e) => eprintln!(
+                        "Warning: token-budget quotas are configured but PgUsageTracker connect \
+                         failed: {e} — budget checks will be SKIPPED (fail open)"
+                    ),
+                }
+            }
         }
         println!(
             "   Replica:  {} (lease ttl {}s{})",
@@ -139,6 +200,26 @@ pub fn cmd_orchestrator_serve(
         if let Some(p) = &config.provider_config {
             println!("   Provider config (ro bind-mount): {}", p.display());
         }
+        // MVS4-B quota/OTEL banner (ground truth for acceptance scripts).
+        match config.effective_quota("") {
+            Some(q) => println!(
+                "   Quotas (default bucket): max_sessions={} max_tokens={} daily_tokens={} rate_per_min={}",
+                q.max_concurrent_sessions.map(|v| v.to_string()).unwrap_or_else(|| "∞".into()),
+                q.max_total_tokens.map(|v| v.to_string()).unwrap_or_else(|| "∞".into()),
+                q.daily_token_budget.map(|v| v.to_string()).unwrap_or_else(|| "∞".into()),
+                q.create_rate_per_min.map(|v| v.to_string()).unwrap_or_else(|| "∞".into()),
+            ),
+            None => println!("   Quotas: disabled (no [quotas*] configured)"),
+        }
+        if !config.quotas_tenants.is_empty() {
+            let mut tenants: Vec<&str> = config.quotas_tenants.keys().map(String::as_str).collect();
+            tenants.sort();
+            println!("   Quota overrides: {}", tenants.join(", "));
+        }
+        match config.resolve_otel_endpoint() {
+            Some(ep) => println!("   OTEL:     containers export to {ep} (TRACEPARENT seeded per spawn)"),
+            None => println!("   OTEL:     disabled (no otel_endpoint / ONEAI_OTEL_ENDPOINT)"),
+        }
         if std::env::var(ORCHESTRATOR_SECRET_ENV)
             .ok()
             .filter(|s| !s.is_empty())
@@ -161,7 +242,7 @@ pub fn cmd_orchestrator_serve(
         };
         let runner = Arc::new(DockerRunner::with_bin(&config.docker_bin, probe_host));
         let cancel = tokio_util::sync::CancellationToken::new();
-        oneai_orchestrator::run_with_store(config, runner, store, cancel)
+        oneai_orchestrator::run_with_deps(config, runner, store, usage, cancel)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
     }) {
@@ -200,7 +281,7 @@ fn url_or_default(url: Option<&str>) -> String {
         .to_string()
 }
 
-pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>) {
+pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>, tenant: Option<&str>) {
     let base = url_or_default(url);
     let secret = client_secret();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -208,6 +289,9 @@ pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>) {
         let mut body = serde_json::Map::new();
         if let Some(id) = id {
             body.insert("session_id".into(), serde_json::Value::String(id.into()));
+        }
+        if let Some(tenant) = tenant {
+            body.insert("tenant_id".into(), serde_json::Value::String(tenant.into()));
         }
         let resp = http_client()
             .post(format!("{base}/v1/sessions"))
@@ -223,6 +307,9 @@ pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>) {
         Ok((status, json)) if status.is_success() => {
             println!("Created session: {}", json["session"]["session_id"]);
             println!("  state:   {}", json["session"]["state"]);
+            if let Some(t) = json["session"]["tenant_id"].as_str() {
+                println!("  tenant:  {t}");
+            }
             println!(
                 "  ws_url:  {}{}",
                 base.replace("http://", "ws://"),
@@ -230,7 +317,16 @@ pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>) {
             );
         }
         Ok((status, json)) => {
-            eprintln!("Error {status}: {}", json["error"]);
+            // 429 carries the machine-readable quota detail (MVS4-B).
+            if let Some(reason) = json["reason"].as_str() {
+                eprintln!(
+                    "Error {status} ({}): {}",
+                    reason,
+                    json["message"].as_str().unwrap_or("quota exceeded")
+                );
+            } else {
+                eprintln!("Error {status}: {}", json["error"]);
+            }
             std::process::exit(1);
         }
         Err(e) => {
@@ -240,16 +336,18 @@ pub fn cmd_orchestrator_create(url: Option<&str>, id: Option<&str>) {
     }
 }
 
-pub fn cmd_orchestrator_list(url: Option<&str>) {
+pub fn cmd_orchestrator_list(url: Option<&str>, tenant: Option<&str>) {
     let base = url_or_default(url);
     let secret = client_secret();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = rt.block_on(async {
-        let resp = http_client()
+        let mut req = http_client()
             .get(format!("{base}/v1/sessions"))
-            .bearer_auth(&secret)
-            .send()
-            .await?;
+            .bearer_auth(&secret);
+        if let Some(t) = tenant {
+            req = req.query(&[("tenant", t)]);
+        }
+        let resp = req.send().await?;
         let json: serde_json::Value = resp.json().await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json)
     });
@@ -261,14 +359,15 @@ pub fn cmd_orchestrator_list(url: Option<&str>) {
                 return;
             }
             println!(
-                "{:<36} {:<12} {:<8} {:<24} UPDATED",
-                "SESSION", "STATE", "PORT", "CONTAINER"
+                "{:<36} {:<12} {:<10} {:<8} {:<24} UPDATED",
+                "SESSION", "STATE", "TENANT", "PORT", "CONTAINER"
             );
             for s in &sessions {
                 println!(
-                    "{:<36} {:<12} {:<8} {:<24} {}",
+                    "{:<36} {:<12} {:<10} {:<8} {:<24} {}",
                     s["session_id"].as_str().unwrap_or("?"),
                     s["state"].as_str().unwrap_or("?"),
+                    s["tenant_id"].as_str().unwrap_or("-"),
                     s["host_port"]
                         .as_u64()
                         .map(|p| p.to_string())

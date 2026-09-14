@@ -53,6 +53,7 @@ fn scope(label: &str) -> String {
 fn test_spec(id: &str) -> SessionSpec {
     SessionSpec {
         session_id: id.into(),
+        tenant_id: String::new(),
         image: "img".into(),
         state_volume: format!("oneai-orch-{id}-state"),
         workspace_volume: format!("oneai-orch-{id}-ws"),

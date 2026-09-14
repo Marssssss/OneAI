@@ -45,6 +45,7 @@ pub mod idle;
 #[cfg(feature = "postgres")]
 pub mod pg_session_store;
 pub mod proxy;
+pub mod quota;
 pub mod registry;
 pub mod routes;
 pub mod runner;
@@ -54,15 +55,18 @@ pub mod store;
 pub use archive::{
     ArchiveManifest, DeepArchive, LocalDirArchiveStore, VolumeArchive, VolumeArchiveStore,
 };
-pub use config::{OrchestratorConfig, ORCHESTRATOR_SECRET_ENV};
+pub use config::{OrchestratorConfig, QuotaConfig, ORCHESTRATOR_SECRET_ENV};
 pub use docker::DockerRunner;
 pub use error::{OrchestratorError, Result};
 pub use fsm::{SessionSnapshot, SessionState};
 #[cfg(feature = "postgres")]
 pub use pg_session_store::PgSessionStore;
+#[cfg(feature = "postgres")]
+pub use quota::PgTenantUsage;
+pub use quota::{QuotaReason, TenantQuotaEnforcer, TenantUsageSum};
 pub use registry::RoutingTable;
 pub use runner::{ContainerHandle, ContainerRunner, SessionSpec};
-pub use server::{run, run_with_store, OrchestratorState};
+pub use server::{run, run_with_deps, run_with_store, OrchestratorState};
 pub use store::{
     ClaimOutcome, FileSessionStore, LeaseGuard, LeaseIdentity, LeaseInfo, SessionStore,
     StoredSession,

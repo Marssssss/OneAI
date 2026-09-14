@@ -4276,6 +4276,7 @@ dependencies = [
  "oneai-core",
  "oneai-http-auth",
  "oneai-persistence",
+ "oneai-trace",
  "reqwest",
  "serde",
  "serde_json",
