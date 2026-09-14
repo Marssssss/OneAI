@@ -21,9 +21,13 @@ use common::{ensure_secret_env, test_config, test_spec, FakeRunner, TEST_SECRET}
 use tokio::sync::Mutex;
 
 use oneai_orchestrator::archive::{ArchiveManifest, DeepArchive, VolumeArchiveStore};
+use oneai_orchestrator::config::QuotaConfig;
 use oneai_orchestrator::error::{OrchestratorError, Result};
-use oneai_orchestrator::fsm::{validate_transition, PersistedEntry, SessionEntry, SessionState};
+use oneai_orchestrator::fsm::{
+    counts_toward_quota, validate_transition, PersistedEntry, SessionEntry, SessionState,
+};
 use oneai_orchestrator::idle::sweep_once;
+use oneai_orchestrator::quota::QuotaReason;
 use oneai_orchestrator::registry::RoutingTable;
 use oneai_orchestrator::runner::{ContainerHandle, ContainerRunner};
 use oneai_orchestrator::server::OrchestratorState;
@@ -109,6 +113,42 @@ impl SessionStore for MemLeaseStore {
             },
         );
         Ok(())
+    }
+
+    async fn insert_if_under_quota(
+        &self,
+        entry: &PersistedEntry,
+        max_concurrent: Option<usize>,
+    ) -> Result<Option<usize>> {
+        // ONE mutex hold for count + insert — mirrors PgSessionStore's
+        // single-transaction arbitration (the default trait impl's two-step
+        // would race across the two OrchestratorStates in the quota test).
+        let mut map = self.inner.lock().await;
+        let id = &entry.spec.session_id;
+        if map.contains_key(id) {
+            return Err(OrchestratorError::AlreadyExists(id.clone()));
+        }
+        if let Some(max) = max_concurrent {
+            let count = map
+                .values()
+                .filter(|r| {
+                    counts_toward_quota(r.entry.state)
+                        && r.entry.spec.tenant_id == entry.spec.tenant_id
+                })
+                .count();
+            if count >= max {
+                return Ok(Some(count));
+            }
+        }
+        map.insert(
+            id.clone(),
+            Row {
+                entry: entry.clone(),
+                lease: None,
+                activity_ms: 0,
+            },
+        );
+        Ok(None)
     }
 
     async fn cas_transition(
@@ -774,4 +814,164 @@ async fn deep_archive_race_exactly_one_export_and_destroy() {
     let row = store.get("s1").await.unwrap().unwrap();
     assert!(row.entry.archived.is_some(), "marker set");
     assert!(row.entry.handle.is_none(), "stale handle cleared");
+}
+
+// ─── MVS4-B: tenant quotas across replicas ──────────────────────────────────
+
+/// Two replicas, ONE shared store, same tenant, `max_concurrent_sessions=3`:
+/// 8 interleaved creates must yield EXACTLY 3 Running sessions and 5
+/// `QuotaExceeded{ConcurrentSessions}` rejections — the store arbitrates
+/// count+insert as one unit, so no replica-pair race can overshoot the cap.
+#[tokio::test]
+async fn tenant_quota_concurrent_creates_exactly_max_across_replicas() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemLeaseStore::new();
+    let runner = FakeRunner::new();
+    ensure_secret_env();
+
+    let quota_cfg = |id: &str| {
+        let mut c = lease_cfg(dir.path(), id, 30);
+        let mut q = QuotaConfig::default();
+        q.max_concurrent_sessions = Some(3);
+        c.quotas_tenants.insert("acme".into(), q);
+        c
+    };
+    let a = OrchestratorState::with_session_store(
+        quota_cfg("rep-a"),
+        runner.clone(),
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let b = OrchestratorState::with_session_store(
+        quota_cfg("rep-b"),
+        runner.clone(),
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    let mut joins = Vec::new();
+    for i in 0..8 {
+        let st = if i % 2 == 0 { a.clone() } else { b.clone() };
+        joins.push(tokio::spawn(async move {
+            st.create_session_for_tenant(Some(format!("q{i}")), "acme", vec![])
+                .await
+        }));
+    }
+    let results: Vec<_> = futures::future::join_all(joins)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+    let created: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    let rejected: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert_eq!(created.len(), 3, "exactly max_concurrent winners");
+    assert!(created.iter().all(|s| s.state == SessionState::Running));
+    assert_eq!(rejected.len(), 5);
+    for e in rejected {
+        match e {
+            OrchestratorError::QuotaExceeded {
+                reason,
+                tenant,
+                limit,
+                current,
+                retry_after_secs,
+                ..
+            } => {
+                assert_eq!(*reason, QuotaReason::ConcurrentSessions);
+                assert_eq!(tenant, "acme");
+                assert_eq!(*limit, 3);
+                assert!(*current >= 3);
+                assert!(
+                    retry_after_secs.is_none(),
+                    "concurrency rejects carry no Retry-After"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // A different tenant is untouched by acme's cap…
+    let other = a
+        .create_session_for_tenant(Some("other1".into()), "globex", vec![])
+        .await
+        .unwrap();
+    assert_eq!(other.state, SessionState::Running);
+    // …and an untagged session lands in the "default" bucket (no quota
+    // configured for it here → unlimited).
+    let untagged = a
+        .create_session(Some("untagged".into()), vec![])
+        .await
+        .unwrap();
+    assert_eq!(untagged.tenant_id, "");
+
+    // Destroy frees a slot: the next acme create succeeds again.
+    let victim = &created[0].session_id;
+    a.destroy_session(victim).await.unwrap();
+    let refill = a
+        .create_session_for_tenant(Some("q-refill".into()), "acme", vec![])
+        .await;
+    assert!(refill.is_ok(), "slot freed by destroy");
+}
+
+/// Per-tenant create-rate buckets are per-replica (documented approximation):
+/// exhausting the rate on A leaves B's bucket full.
+#[tokio::test]
+async fn create_rate_is_per_replica_approximation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemLeaseStore::new();
+    let runner = FakeRunner::new();
+    ensure_secret_env();
+    let rate_cfg = |id: &str| {
+        let mut c = lease_cfg(dir.path(), id, 30);
+        let mut q = QuotaConfig::default();
+        q.create_rate_per_min = Some(2);
+        c.quotas_tenants.insert("bursty".into(), q);
+        c
+    };
+    let a = OrchestratorState::with_session_store(
+        rate_cfg("rep-a"),
+        runner.clone(),
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let b = OrchestratorState::with_session_store(
+        rate_cfg("rep-b"),
+        runner.clone(),
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    a.create_session_for_tenant(Some("r1".into()), "bursty", vec![])
+        .await
+        .unwrap();
+    a.create_session_for_tenant(Some("r2".into()), "bursty", vec![])
+        .await
+        .unwrap();
+    let err = a
+        .create_session_for_tenant(Some("r3".into()), "bursty", vec![])
+        .await
+        .unwrap_err();
+    match err {
+        OrchestratorError::QuotaExceeded {
+            reason,
+            retry_after_secs,
+            ..
+        } => {
+            assert_eq!(reason, QuotaReason::CreateRate);
+            assert!(retry_after_secs.is_some_and(|s| s >= 1));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // B has its own bucket — the same tenant can still create there.
+    b.create_session_for_tenant(Some("r4".into()), "bursty", vec![])
+        .await
+        .unwrap();
 }

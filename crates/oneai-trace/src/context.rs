@@ -450,3 +450,60 @@ impl AsRef<str> for EventKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::SpanStatus;
+
+    /// The W3C sample traceparent from the spec.
+    const TP: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+    #[test]
+    fn seed_parent_parses_and_becomes_stack_top() {
+        let ctx = TraceContext::new(Arc::new(crate::collector::NoopCollector));
+        let id = ctx.seed_parent_from_traceparent(TP).unwrap();
+        // The synthetic span's id IS the injected 32-hex trace id, so the
+        // exporter's root-walk derives exactly that trace id for children.
+        assert_eq!(id, "0af7651916cd43dd8448eb211c80319c");
+        assert_eq!(ctx.current_span_id().as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn seed_parent_rejects_malformed_and_disabled() {
+        let ctx = TraceContext::new(Arc::new(crate::collector::NoopCollector));
+        assert!(ctx.seed_parent_from_traceparent("garbage").is_none());
+        assert!(ctx.seed_parent_from_traceparent("").is_none());
+        let off = TraceContext::disabled();
+        assert!(off.seed_parent_from_traceparent(TP).is_none());
+        // A failed seed leaves the stack empty (children stay unparented).
+        assert!(ctx.current_span_id().is_none());
+    }
+
+    #[test]
+    fn seeded_children_inherit_the_injected_trace_id() {
+        let ctx = TraceContext::new(Arc::new(crate::collector::NoopCollector));
+        ctx.seed_parent_from_traceparent(TP).unwrap();
+        let session = ctx.enter_span(SpanKind::SESSION, "session", None);
+        // The session span auto-parented under the synthetic remote span…
+        let tree = ctx.build_tree();
+        assert_eq!(tree.root_span.name, "remote.parent");
+        assert_eq!(tree.root_span.span_id, "0af7651916cd43dd8448eb211c80319c");
+        // …and the traceparent handed downstream (sub-agents / A2A) carries
+        // the INJECTED trace id — the whole process tree stays in one trace.
+        let tp = ctx.current_traceparent().unwrap();
+        let parsed = crate::w3c::parse_traceparent(&tp).unwrap();
+        assert_eq!(parsed.trace_id, "0af7651916cd43dd8448eb211c80319c");
+        // Without seeding, the trace id would derive from the session span's
+        // own uuid (different value) — sanity-check that contrast.
+        let plain = TraceContext::new(Arc::new(crate::collector::NoopCollector));
+        let s2 = plain.enter_span(SpanKind::SESSION, "session", None);
+        let tp2 = plain.current_traceparent().unwrap();
+        assert_ne!(
+            crate::w3c::parse_traceparent(&tp2).unwrap().trace_id,
+            parsed.trace_id
+        );
+        ctx.exit_span(&session, SpanStatus::Ok);
+        plain.exit_span(&s2, SpanStatus::Ok);
+    }
+}

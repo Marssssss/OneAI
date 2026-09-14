@@ -918,6 +918,74 @@ mod tests {
         ));
     }
 
+    fn persisted_tenant(id: &str, tenant: &str) -> PersistedEntry {
+        let mut spec = test_spec(id);
+        spec.tenant_id = tenant.to_string();
+        SessionEntry::new_creating(spec).to_persisted()
+    }
+
+    #[tokio::test]
+    async fn file_insert_if_under_quota_counts_per_tenant() {
+        let (_d, s) = tmp_store().await;
+        // Two acme slots fill up; the third is rejected with the count.
+        for id in ["q1", "q2"] {
+            assert!(s
+                .insert_if_under_quota(&persisted_tenant(id, "acme"), Some(2))
+                .await
+                .unwrap()
+                .is_none());
+        }
+        let rejected = s
+            .insert_if_under_quota(&persisted_tenant("q3", "acme"), Some(2))
+            .await
+            .unwrap();
+        assert_eq!(rejected, Some(2));
+        assert!(
+            s.get("q3").await.unwrap().is_none(),
+            "rejection inserts nothing"
+        );
+        // Another tenant has its own budget.
+        assert!(s
+            .insert_if_under_quota(&persisted_tenant("o1", "globex"), Some(2))
+            .await
+            .unwrap()
+            .is_none());
+        // Failed sessions stop counting (crash loop must not brick a tenant).
+        s.cas_transition(
+            "q1",
+            SessionState::Creating,
+            SessionState::Failed,
+            None,
+            Some("boom".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(s
+            .insert_if_under_quota(&persisted_tenant("q4", "acme"), Some(2))
+            .await
+            .unwrap()
+            .is_none());
+        // Duplicate id → AlreadyExists even under a quota (PK semantics).
+        let dup = s
+            .insert_if_under_quota(&persisted_tenant("q4", "acme"), Some(9))
+            .await;
+        assert!(matches!(dup, Err(OrchestratorError::AlreadyExists(_))));
+        // None = unlimited.
+        assert!(s
+            .insert_if_under_quota(&persisted_tenant("u1", "acme"), None)
+            .await
+            .unwrap()
+            .is_none());
+        // Rejections are durable-free: the file holds exactly the inserts.
+        let all = s.load_all().await.unwrap();
+        let ids: Vec<_> = all
+            .iter()
+            .map(|x| x.entry.spec.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["o1", "q1", "q2", "q4", "u1"]);
+    }
+
     #[tokio::test]
     async fn concurrent_inserts_serialize_no_tmp_race() {
         // MVS2 regression: shared tmp name races → ENOENT. uuid tmp names +

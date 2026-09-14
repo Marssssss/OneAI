@@ -468,3 +468,174 @@ async fn force_update_set_last_error_and_cross_store_visibility() {
     a.flush().await.unwrap();
     b.remove(&id).await.unwrap();
 }
+
+// ─── MVS4-B: tenant dimension + atomic quota insert ─────────────────────────
+
+fn persisted_tenant(id: &str, tenant: &str) -> PersistedEntry {
+    let mut spec = test_spec(id);
+    spec.tenant_id = tenant.to_string();
+    SessionEntry::new_creating(spec).to_persisted()
+}
+
+#[tokio::test]
+#[ignore = "requires ONEAI_TEST_PG_DSN (disposable Postgres)"]
+async fn tenant_roundtrip_and_legacy_row_default() {
+    let Some(store) = pg_store().await else {
+        return;
+    };
+    let id = scope("tenant");
+    store.insert(&persisted_tenant(&id, "acme")).await.unwrap();
+    let got = store.get(&id).await.unwrap().unwrap();
+    assert_eq!(got.entry.spec.tenant_id, "acme");
+
+    // Legacy simulation: a row written WITHOUT the tenant column (pre-MVS4-B
+    // INSERT shape) must load as "" — the column DEFAULT '' plus serde
+    // default on the spec JSON keep old rows readable.
+    let legacy_id = scope("legacy");
+    let legacy_entry = persisted(&legacy_id);
+    let spec_json = serde_json::to_string(&legacy_entry.spec).unwrap();
+    let pool = store.pool();
+    let c = pool.get().await.unwrap();
+    c.execute(
+        "INSERT INTO orchestrator_sessions \
+         (session_id, spec, handle, state, last_error, updated_at, archived) \
+         VALUES ($1, $2::text::jsonb, $3::text::jsonb, $4, $5, $6, $7::text::jsonb)",
+        &[
+            &legacy_id,
+            &spec_json,
+            &Option::<String>::None,
+            &"Creating",
+            &Option::<String>::None,
+            &Utc::now(),
+            &Option::<String>::None,
+        ],
+    )
+    .await
+    .unwrap();
+    let legacy = store.get(&legacy_id).await.unwrap().unwrap();
+    assert_eq!(legacy.entry.spec.tenant_id, "");
+
+    // force_update carries the tenant column (reconcile path).
+    let mut e = got.entry.clone();
+    e.state = SessionState::Running;
+    e.handle = Some(handle(44000));
+    store.force_update(&e).await.unwrap();
+    assert_eq!(
+        store.get(&id).await.unwrap().unwrap().entry.spec.tenant_id,
+        "acme"
+    );
+
+    store.remove(&id).await.unwrap();
+    store.remove(&legacy_id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ONEAI_TEST_PG_DSN (disposable Postgres)"]
+async fn insert_if_under_quota_concurrent_exactly_max_win() {
+    let Some(store) = pg_store().await else {
+        return;
+    };
+    let store = Arc::new(store);
+    // Tenant ids are scoped per run; the advisory xact lock + COUNT + INSERT
+    // run in ONE transaction, so 20 racers for 5 slots yield exactly 5
+    // winners — no overshoot, no lost update.
+    let tenant = scope("qt");
+    let mut joins = Vec::new();
+    for i in 0..20 {
+        let s = store.clone();
+        let t = tenant.clone();
+        joins.push(tokio::spawn(async move {
+            let id = format!("{t}-{i}");
+            s.insert_if_under_quota(&persisted_tenant(&id, &t), Some(5))
+                .await
+        }));
+    }
+    let outcomes: Vec<_> = futures::future::join_all(joins)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+    let inserted = outcomes
+        .iter()
+        .filter(|o| o.is_ok() && o.as_ref().unwrap().is_none())
+        .count();
+    let rejected: Vec<usize> = outcomes
+        .iter()
+        .filter_map(|o| o.as_ref().unwrap().as_ref().copied())
+        .collect();
+    assert_eq!(inserted, 5, "exactly max_concurrent winners");
+    assert_eq!(rejected.len(), 15);
+    assert!(
+        rejected.iter().all(|c| *c >= 5),
+        "counts >= max: {rejected:?}"
+    );
+
+    // A different tenant is unaffected (per-bucket arbitration).
+    let other = scope("qt2");
+    let r = store
+        .insert_if_under_quota(&persisted_tenant(&format!("{other}-x"), &other), Some(5))
+        .await
+        .unwrap();
+    assert!(r.is_none());
+
+    // Cleanup.
+    for i in 0..20 {
+        let _ = store.remove(&format!("{tenant}-{i}")).await;
+    }
+    let _ = store.remove(&format!("{other}-x")).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ONEAI_TEST_PG_DSN (disposable Postgres)"]
+async fn quota_insert_unlimited_duplicate_and_failed_state() {
+    let Some(store) = pg_store().await else {
+        return;
+    };
+    let tenant = scope("qf");
+    let id1 = format!("{tenant}-a");
+    // max None = plain insert.
+    assert!(store
+        .insert_if_under_quota(&persisted_tenant(&id1, &tenant), None)
+        .await
+        .unwrap()
+        .is_none());
+    // Duplicate id → AlreadyExists even with a quota (PK still arbitrates).
+    let dup = store
+        .insert_if_under_quota(&persisted_tenant(&id1, &tenant), Some(5))
+        .await;
+    assert!(matches!(dup, Err(OrchestratorError::AlreadyExists(_))));
+
+    // Failed sessions don't count toward the cap (crash loop must not brick
+    // the tenant): mark a1 Failed, then fill to the cap and verify one more
+    // still fits.
+    store
+        .cas_transition(
+            &id1,
+            SessionState::Creating,
+            SessionState::Failed,
+            None,
+            Some("spawn boom".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for i in 0..2 {
+        let id = format!("{tenant}-b{i}");
+        assert!(store
+            .insert_if_under_quota(&persisted_tenant(&id, &tenant), Some(2))
+            .await
+            .unwrap()
+            .is_none());
+    }
+    // Cap now full (2 active; the Failed one is invisible to the count).
+    let over = store
+        .insert_if_under_quota(&persisted_tenant(&format!("{tenant}-c"), &tenant), Some(2))
+        .await
+        .unwrap();
+    assert_eq!(over, Some(2));
+
+    store.remove(&id1).await.unwrap();
+    for i in 0..2 {
+        store.remove(&format!("{tenant}-b{i}")).await.unwrap();
+    }
+}

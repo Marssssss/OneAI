@@ -421,6 +421,10 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (
+                OrchestratorError::InvalidTenantId("x".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
                 OrchestratorError::Runner("x".into()),
                 StatusCode::BAD_GATEWAY,
             ),
@@ -432,5 +436,71 @@ mod tests {
         for (e, want) in cases {
             assert_eq!(err_response(e).status(), want);
         }
+    }
+
+    #[test]
+    fn tenant_resolution_body_wins_then_header_then_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TENANT_HEADER, "from-header".parse().unwrap());
+        // Body field wins over the header…
+        assert_eq!(resolve_tenant(Some("from-body"), &headers), "from-body");
+        // …header is the fallback…
+        assert_eq!(resolve_tenant(None, &headers), "from-header");
+        // …both absent = untagged. Trimming applies to both sources.
+        assert_eq!(resolve_tenant(None, &HeaderMap::new()), "");
+        assert_eq!(resolve_tenant(Some("  t1 "), &HeaderMap::new()), "t1");
+    }
+
+    #[tokio::test]
+    async fn quota_429_shape_and_retry_after_semantics() {
+        use crate::quota::QuotaReason;
+        // Rate rejection: 429 + Retry-After header + machine-readable body.
+        let rate = OrchestratorError::QuotaExceeded {
+            tenant: "acme".into(),
+            reason: QuotaReason::CreateRate,
+            limit: 5,
+            current: 5,
+            retry_after_secs: Some(7),
+            message: "slow down".into(),
+        };
+        let resp = err_response(rate);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers().get(header::RETRY_AFTER).unwrap(), "7");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "quota_exceeded");
+        assert_eq!(json["reason"], "create_rate");
+        assert_eq!(json["tenant_id"], "acme");
+        assert_eq!(json["limit"], 5);
+        assert_eq!(json["current"], 5);
+
+        // Concurrency/budget rejections carry NO Retry-After (retrying alone
+        // won't help — the caller must delete a session or raise the budget).
+        for reason in [QuotaReason::ConcurrentSessions, QuotaReason::TokenBudget] {
+            let e = OrchestratorError::QuotaExceeded {
+                tenant: "acme".into(),
+                reason,
+                limit: 3,
+                current: 3,
+                retry_after_secs: None,
+                message: "full".into(),
+            };
+            let resp = err_response(e);
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(resp.headers().get(header::RETRY_AFTER).is_none());
+        }
+    }
+
+    #[test]
+    fn create_request_tenant_is_optional_and_defaulted() {
+        // Pre-MVS4-B bodies (no tenant_id field) must still deserialize.
+        let legacy: CreateSessionRequest =
+            serde_json::from_str(r#"{ "session_id": "s1" }"#).unwrap();
+        assert!(legacy.tenant_id.is_none());
+        let with_tenant: CreateSessionRequest =
+            serde_json::from_str(r#"{ "tenant_id": "acme", "env": {} }"#).unwrap();
+        assert_eq!(with_tenant.tenant_id.as_deref(), Some("acme"));
     }
 }

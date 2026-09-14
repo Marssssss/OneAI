@@ -312,3 +312,60 @@ async fn survives_reconnect() {
 
     cleanup(&tracker2, &sess).await;
 }
+
+// ─── MVS4-B: tenant token-budget aggregate ──────────────────────────────────
+
+fn tagged(session: &str, tenant: &str, prompt: u32, completion: u32) -> UsageRecord {
+    let mut r = UsageRecord::new(session, "gpt-4o", "openai", prompt, completion);
+    r.metadata
+        .insert("tenant_id".to_string(), tenant.to_string());
+    r
+}
+
+#[tokio::test]
+#[ignore = "requires ONEAI_TEST_PG_DSN (disposable Postgres)"]
+async fn tenant_token_sum_lifetime_and_isolation() {
+    let Some(tracker) = pg_tracker().await else {
+        return;
+    };
+    let sess_a = scope("ten-a");
+    let sess_b = scope("ten-b");
+    let tenant_a = scope("ta");
+    let tenant_b = scope("tb");
+
+    // Tenant A: two sessions, 100+50 and 200+0 → 350 lifetime.
+    tracker
+        .record_usage(tagged(&sess_a, &tenant_a, 100, 50))
+        .await
+        .unwrap();
+    tracker
+        .record_usage(tagged(&sess_b, &tenant_a, 200, 0))
+        .await
+        .unwrap();
+    // Tenant B: 7 tokens — must not leak into A's sum.
+    tracker
+        .record_usage(tagged(&sess_b, &tenant_b, 3, 4))
+        .await
+        .unwrap();
+    // An UNTAGGED row (no metadata tenant) must not count for either.
+    tracker
+        .record_usage(UsageRecord::new(&sess_a, "gpt-4o", "openai", 999, 999))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tracker.tenant_token_sum(&tenant_a, false).await.unwrap(),
+        350
+    );
+    assert_eq!(tracker.tenant_token_sum(&tenant_b, false).await.unwrap(), 7);
+    assert_eq!(tracker.tenant_token_sum("nobody", false).await.unwrap(), 0);
+    // Daily window: all rows are fresh → same sums.
+    assert_eq!(
+        tracker.tenant_token_sum(&tenant_a, true).await.unwrap(),
+        350
+    );
+
+    cleanup(&tracker, &sess_a).await;
+    cleanup(&tracker, &sess_b).await;
+    assert_eq!(tracker.tenant_token_sum(&tenant_a, false).await.unwrap(), 0);
+}
