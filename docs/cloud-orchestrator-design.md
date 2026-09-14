@@ -302,14 +302,52 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
   容器内不可用）；④启动预热：`build_engine_server` 在监听 bind 前调
   `warm_model_context`（30s 超时兜底）——编排器 TCP 探活通过 = 引擎就绪。
 
-### MVS4 —— 生产化
+### MVS4 —— 生产化（A 轮已交付，2026-09-14）
 
-- `K8sRunner`（Pod 即容器抽象）；编排器多副本 + 路由表进共享存储 + lease。
+- ✅ **编排器多副本 + 路由表进共享存储 + lease**（**A 轮已交付**，
+  2026-09-14）——`SessionStore` trait（`oneai-orchestrator/src/store.rs`）
+  把路由表的持久半边抽成可插拔后端：`FileSessionStore`（MVS2 sessions.json
+  原样承接，字节兼容，默认）+ `PgSessionStore`（feature `postgres`，第七个
+  Pg 后端，复用 `pg_common` 配方，锁 key base+6=1330538831，表
+  `orchestrator_sessions`）。要点：
+  - **每会话行级租约**（非全局 leader）：`owner_replica`+`lease_expires_at`
+    列；claim/renew/takeover 全部单条条件 UPDATE 对**服务端 now()**（副本
+    时钟偏斜无关）；心跳 ttl/3。所有权是 **claim-on-act**（WS upgrade/
+    sweep/归档/reconcile 各自动作前 claim，动作完释放或任其过期）——
+    不粘滞，天然负载均衡。
+  - **CAS 进 SQL**：状态迁移/归档标记 = `UPDATE … WHERE state=…
+    RETURNING`（行锁仲裁，跨副本恰一赢家）；存在性→期望态→FSM 校验的
+    顺序与 MVS2 内存版逐位一致；`insert` 的 PK 冲突即跨副本
+    AlreadyExists。
+  - **单 owner 代理**：WS upgrade 先 claim；他人活跃租约 → 409 +
+    `X-Oneai-Owner-Replica`（LB sticky 学习窗口）。`LeaseGuard`（RAII，
+    仿 `ConnGuard`）持租约与代理泵同生共死：心跳续租顺带把
+    `last_activity_ms` 以 ≥1s 节流落库（`GREATEST` 单调），异地副本的
+    idle sweep 靠它避免休眠活跃会话。
+  - **租约门控对账**：启动 reconcile 先 claim 再探活（claim 即互斥）——
+    两副本同时重启每条恰一次探活、恰一个 owner、零误判 Crashed；死亡
+    容器标 Crashed 后释放租约。kill -9 owner → 租约过期 → 任意副本
+    接管，**容器零操作**（StartedAt 逐字节不变）。
+  - 每副本内存热缓存只存进程内 atomics（active_conns/活动钟/notify）；
+    持久字段每次读经 store 刷新合并（Arc 仅在持久字段真变化时替换——
+    否则 ConnGuard 持有的 Arc 被孤儿化、active_conns 泄漏）。
+  - 选择层照抄 pg_backends 惯例：`ONEAI_PG_DSN`（env 优先于
+    `orchestrator.toml pg_dsn`）+ 响亮告警回退；`validate()` 拒绝
+    「Pg+lease_ttl=0」（逃生门 `ONEAI_ORCH_PG_NO_LEASE=1`）。CLI
+    `--lease-ttl`/`--replica-id`；oneai-cli `postgres` feature 聚合
+    `oneai-orchestrator/postgres`（云镜像构建命令零改动）。
+  - **MVS4-A 边界**：多副本 = 同 docker 宿主多进程（scale-out + 零停机
+    重启 + 故障转移）；跨宿主网络（容器端口 127.0.0.1 发布）留给
+    K8sRunner 轮。租约丢失中途代理的窄竞态（新 owner 可能休眠仍有帧
+    流动的会话）本轮接受并记录（心跳 gap>TTL 才触发；活动落库让 sweep
+    侧二次防护）。验收：附录 F（21/21）。
+- `K8sRunner`（Pod 即容器抽象，跨宿主网络）——MVS4 后续轮。
 - TLS 内置（rustls）或正式约定反代；JWT/OIDC；Secret Manager 对接。
 - 配额与限流：每租户并发会话数、token 预算（复用 `UsageTracker` +
-  `RateLimiter`/`CircuitBreaker`，状态进 Redis 或接受每编排器副本近似）。
+  `RateLimiter`/`CircuitBreaker`，状态进 Redis 或接受每编排器副本近似；
+  A 轮后共享路由表已提供租户视图地基）。
 - 可观测：OTEL 已有（`oneai-trace`），补 tenant_id/session_id 贯穿 span +
-  容器 metrics 采集。
+  容器 metrics 采集（A 轮已接编排器 tracing→stderr，RUST_LOG 可控）。
 - egress 治理：容器网络策略（默认拒绝 + 域名放行），与引擎内
   host-allowlist/CONNECT 代理形成双层。
 
@@ -345,7 +383,7 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 |---|---|---|
 | R1 | 每会话一容器的内存底座成本 | Rust 引擎空载占用小；idle 休眠（D6）+ commit 快照；实测数据 MVS1 补 |
 | R2 | WS 反代多一跳的延迟 | 同宿主机/同 AZ 内 <1ms 量级；交互式场景本来就走端侧，云端形态承接的是长时任务，延迟不敏感 |
-| R3 | 编排器单点 | MVS2 单副本 + `sessions.json` 原子持久化对账恢复（重启秒级重挂，✅ 附录 B.2-D 实测 1.3s/10 会话）；MVS4 多副本 + lease |
+| R3 | 编排器单点 | MVS2 单副本 + `sessions.json` 原子持久化对账恢复（重启秒级重挂，✅ 附录 B.2-D 实测 1.3s/10 会话）；**✅ MVS4-A 已解**：Pg 共享路由表 + 每会话租约，kill -9 owner 后其他副本零容器操作接管（附录 F C 段实测）；文件模式单副本行为不变 |
 | R4 | 容器内嵌套沙箱（bwrap-in-docker）兼容性 | **✅ MVS1 已判：不可用**（Ubuntu 24.04 宿主系统级 AppArmor 限制非特权 userns，`--privileged`/unconfined 均无法恢复；VM 层 root 可用、非 root 不可用）。引擎已补 `is_available` 运行期探测自动降级 RegexBackend（附录 A.3）；容器本身是隔离边界（§8），生产纵深防御走 gVisor/kata runtimeClass（MVS4） |
 | Q1 | 端云冷迁移（导出/导入会话）要不要做 | 状态格式天然兼容（同 schema 卷），做「拷卷」即可；产品化另议 |
 | Q2 | 企业合规（SOC2/HIPAA）对云化的真实驱动强度 | 调研中该论断未过核验（证据不足），面向企业客户前需单独调研 |
@@ -357,11 +395,11 @@ Creating ──▶ Running ──idle超时──▶ Hibernating ──请求到
 |---|---|
 | 引擎（core/bus/agent/app） | **零改动**（N1/N2 的排除项）。例外：`oneai-tool` sandbox `is_available` 运行期探测（MVS1 产出的缺陷修复，与环境适配无关，任何 Linux 部署受益，见附录 A.3）；`oneai-core` `MemoryPersistence` B 轮**加法**增补 `rename_conversation`/`set_conversation_archived` 默认方法（会话元数据编辑进 trait，Pg/SQLite 各自定向 UPDATE 覆写——既有实现零破坏） |
 | `oneai-app-server` | 零改动（ws 监听、serve_web 均已存在） |
-| 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复） |
-| `oneai-persistence` | ✅ MVS3 加 Pg 后端（`pg_working_state_store.rs` + B 轮 `pg_memory_store.rs`/`pg_usage_tracker.rs`/`pg_host_allowlist.rs` + 共用 `pg_common.rs`，均为新文件；SQLite 侧仅 helper 提为 pub(crate) + trait 覆写委托） |
+| 新增 crate | `oneai-orchestrator`（MVS2）、`oneai-http-auth`（MVS2，抽 a2a/scheduler 重复）；✅ MVS4-A：orchestrator 内加 `store.rs`（`SessionStore` trait + `FileSessionStore` + `LeaseGuard`）/`pg_session_store.rs`（feature `postgres`，锁 key base+6） |
+| `oneai-persistence` | ✅ MVS3 加 Pg 后端（`pg_working_state_store.rs` + B 轮 `pg_memory_store.rs`/`pg_usage_tracker.rs`/`pg_host_allowlist.rs` + 共用 `pg_common.rs`，均为新文件；SQLite 侧仅 helper 提为 pub(crate) + trait 覆写委托）；✅ MVS4-A `pg_common` 放宽为 `pub`（orchestrator 第七 store 直接复用配方，零复制） |
 | `oneai-app` builder | ✅ MVS3 加 `working_state_store(Arc<dyn …>)` 泛型注入；✅ B 轮补 2 setter（`host_allowlist_store`/`memory_persistence`）+ `App.memory_persistence` 会话面路由（list/load/rename/archive/delete + turn 尾自动落盘 gate） |
 | `oneai-a2a` / `oneai-scheduler` | MVS2 把 Bearer 三件套改指向 `oneai-http-auth`（消重复） |
-| CLI | `oneai orchestrator` 子命令（MVS2） |
+| CLI | `oneai orchestrator` 子命令（MVS2）；✅ MVS4-A `serve --lease-ttl/--replica-id` + Pg 路由表选择（`ONEAI_PG_DSN`，响亮回退）+ `postgres` feature 聚合 `oneai-orchestrator/postgres` + tracing subscriber 接线（此前编排器 info/warn 日志全被丢弃） |
 | 部署件 | Dockerfile（MVS1）、镜像流水线（MVS4） |
 
 ---
@@ -669,3 +707,83 @@ fmt / clippy / deny 绿。web：vitest 88/88、playwright 13/14（trajectory.spe
     `sh -c "mkdir -p /archive/<sid> && tar czf …"`——消除对宿主目录经
     bind-mount 可见性的依赖（VM 型 daemon 的挂载传播时序也一并覆盖）；
     失败红线语义不变（mkdir/tar 任一失败 → Err → 卷不动）。
+
+## 附录 F：MVS4-A 验收记录（多副本编排器：Pg 共享路由表 + 每会话租约，2026-09-14）
+
+环境：macOS/arm64 + colima（docker 29.5.2）+ pgvector/pgvector:pg16 容器
+（`oneai-pg-test`，库 `oneai_mvs4`；编排器宿主侧 DSN 走 127.0.0.1，引擎
+容器侧走 bridge 网关 172.17.0.1）。宿主二进制 `cargo build -p oneai-cli
+--features postgres`；引擎镜像**直接复用 `oneai-engine:mvs3c`**（本轮
+引擎侧零改动，111MB）。验收驱动：`deploy/docker/mvs4a_verify.mjs`
+（自包含拉起最多 5 个编排器进程：主对 rep-a/rep-b + 短超时归档对
+rep-c/rep-d + 文件模式回归实例；`mvs4a_run.sh` 一键跑）。lease_ttl=10s
+（加快验收节奏；生产默认 30s）。
+
+### F.1 验收矩阵（21/21 全过；首轮 19/21——E2/E3 两项败于验收脚本自身
+###     断言，见 F.2-8/9，修脚本后复跑全绿）
+
+| # | 项 | 结果 |
+|---|---|---|
+| A1 | banner：Backend Postgres (shared routing table, multi-replica) + replica rep-a + lease ttl | ✅ |
+| A2 | DDL 冷启：`orchestrator_sessions` + 双索引（lease 过期扫描/state+owner） | ✅ |
+| A3 | POST /v1/sessions → 201 Running；落行 owner=rep-a 且 lease_expires_at > now() | ✅ |
+| A4 | WS 经 A 真实 turn 答出暗号；`last_activity_ms` 节流落库（心跳 tick 顺带 flush） | ✅ |
+| A5 | DELETE → 容器/卷零残留 + Pg 行删除 | ✅ |
+| B1 | 第二副本 rep-b 启动（同 DSN，异 registry） | ✅ |
+| B2 | A 持新租约时 WS 连 B → **409 + `X-Oneai-Owner-Replica: rep-a`** | ✅ |
+| B3 | 租约过期后 WS 连 B → claim 成功代理；owner 翻 rep-b | ✅ |
+| B4 | B 建会话 owner=rep-b；A/B `GET /v1/sessions` 收敛一致 | ✅ |
+| C1 | 经 A 建 s4 + 真实 turn 暗号（基线） | ✅ |
+| C2 | **kill -9 A** → 租约过期 → WS 连 B 接管成功；psql owner=rep-b | ✅ |
+| C3 | 接管零容器操作：`docker inspect StartedAt` 逐字节不变 | ✅ |
+| C4 | 接管后真实 turn 答出 A 时代暗号（同引擎进程存活） | ✅ |
+| D1 | B 持活跃租约（WS 心跳中）时重启 A → 不夺租、不误判 Crashed | ✅ |
+| D2 | ghost 过期租约 + A/B **同时**重启对账 → 每条恰一 owner（实测自然分片 s2/s4→a、s3→b）、全 Running、容器未动 | ✅ |
+| E1 | 经 C 建 s5 + 真实 turn 暗号（短超时归档对 idle=20s/deep=6s） | ✅ |
+| E2 | **kill -9 C** → D 的 sweep 接管整链：自动休眠 → deep-archive（tar.gz×2 + manifest、容器+卷消失、archived 落库、D 日志自证） | ✅ |
+| E3 | WS 经 D 重连 → Resuming（restore+spawn）→ `session/load` + 真实 turn 答出归档前暗号；archived 清空、卷回归 | ✅ |
+| F1 | 红线：archive_dir 只读 → 保持 Hibernating + 卷 intact + `last_error` 诊断；恢复可写 → 下轮归档成功 | ✅ |
+| F2 | `lease_ttl=0` + Pg DSN → validate 启动拒绝（exit≠0，日志含 lease_ttl_secs） | ✅ |
+| F3 | 文件模式回归：无 DSN → banner file、建会话 Running、sessions.json 落盘、删除零残留 | ✅ |
+
+### F.2 实现期发现与决策落地
+
+1. **claim-on-act 取代常驻心跳**：所有权不是粘滞的——WS upgrade/sweep/
+   深度归档/reconcile 各自在动作前 claim，`LeaseGuard` 只在动作期间心跳
+   （ttl/3），drop 即释放。好处：无需后台「保有权」任务，副本死亡只影响
+   它正在服务的连接；闲置会话无 owner，任意副本可即时接管（B3/C2 实测
+   13s 内完成 = ttl+探测）。
+2. **缓存合并的 Arc 稳定性**：热缓存的 clone-and-replace 必须只在持久字段
+   真变化时发生——每次读都替换 Arc 会孤儿化 `ConnGuard`/sweep 持有的旧
+   Arc，`active_conns` 计数泄漏（会话永不休眠）。活动钟用 `fetch_max`
+   原地单调合并（异地副本的 flush 只升不降本地钟），同样不换 Arc。
+3. **CAS 不需要 updated_at 版本号**：state 等值条件 + 行锁已是线性化 CAS
+   （与 MVS2 内存版语义一致）；ABA 状态回环在 FSM 边集下无害。原计划的
+   `prev_updated_at` 乐观锁被删除，trait 面更窄。
+4. **深度归档必须持 LeaseGuard 而非裸 claim**：导出是分钟级 docker save|
+   gzip，裸 claim 的租约会在 tar 中途过期，引来另一副本并发写同一确定性
+   布局（损坏归档）。guard 心跳护住整个「导出→CAS→destroy」段。
+5. **对账先 claim 再探活**：claim 即跨副本互斥——两副本同时重启对 5 条
+   孤儿恰好 5 次探活（multi_replica_tests 断言探活计数），败者
+   `HeldByOther` 直接跳过。
+6. **Pg 模式活动钟首见语义**：store 行 `last_activity_ms>0` 时用真值播种
+   本地钟（否则接管副本会把死副本的旧会话当「刚活跃」白宽限一轮）；
+   =0（从未 flush）才落回 from_persisted 的 now 宽限。
+7. **编排器 tracing 从未接线**（验收 E2 找地面真值时发现）：serve 进程
+   没有 subscriber，reconcile/租约/sweep/deep-archive 的 info/warn 全部
+   被丢弃。已接 `tracing_subscriber::fmt` → stderr（RUST_LOG 可控）。
+8. **验收首轮 E2 失败是断言错误**：归档完成后 owner 为空是 claim-on-act
+   的正确行为（guard drop 释放），断言却要求 owner=rep-d 持久存在；改用
+   D 日志（`deep-archived` + session id）做「是 D 干的」地面真值。
+9. **验收首轮 E3 失败是脚本漏 step**：归档恢复后容器是全新引擎进程，
+   直接问暗号必然失败——须先 `session/load`（mvs3c E 段同款双通道，
+   Pg 记忆 + 卷恢复）。
+10. **MVS4-A 边界（明确记录）**：多副本 = 同 docker 宿主多进程（容器端口
+    发布在 127.0.0.1，跨宿主不可达）；跨宿主/K8s 网络留给 K8sRunner 轮。
+    租约丢失中途代理的窄竞态（心跳 gap>TTL 才被接管，接管方 sweep 又有
+    活动落库二次防护）本轮接受，监控 `lease lost mid-flight` 告警日志。
+11. **测试矩阵**：单测/集成（无外部依赖）91 项 + Pg 门控集成 9 项
+    （`ONEAI_TEST_PG_DSN`，真 pgvector：并发 CAS/lease 恰一赢家、过期
+    接管、GREATEST 单调）+ multi_replica_tests 8 项（MemLeaseStore 镜像
+    Pg 契约：双 state 共享真相、真 axum+真 WS 握手收 409、kill 接管、
+    并发对账、归档竞态）。文件模式既有 82 测零修改全绿（D8 承诺兑现）。

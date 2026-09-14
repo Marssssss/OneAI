@@ -354,3 +354,69 @@ ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
 #                        重连存活 / 10×5 并发零丢失（BIGSERIAL 全序）
 # pg_feedback_store      4 测：round-trip+scoping / 空载 / 重连存活 / 8 并发
 ```
+
+## 20. MVS4-A 多副本编排器（Pg 共享路由表 + 每会话租约）
+
+引擎侧零改动（镜像直接复用 `oneai-engine:mvs3c`）；变化全在宿主侧编排器。
+
+```bash
+cargo build -p oneai-cli --features postgres   # 聚合 oneai-orchestrator/postgres
+
+# 副本 A（宿主终端 1）
+ONEAI_ORCHESTRATOR_SECRET=... \
+ONEAI_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_mvs4 \
+  ./target/debug/oneai orchestrator serve --listen 127.0.0.1:9196 --replica-id rep-a
+
+# 副本 B（宿主终端 2；同 DSN，异 listen；--replica-id 缺省=启动生成 uuid）
+ONEAI_ORCHESTRATOR_SECRET=... \
+ONEAI_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_mvs4 \
+  ./target/debug/oneai orchestrator serve --listen 127.0.0.1:9197 --replica-id rep-b --lease-ttl 30
+```
+
+语义速记（详见设计文档 §6 MVS4-A + 附录 F）：
+
+- **路由表**进共享 Pg（`orchestrator_sessions`，锁 key base+6）；文件模式
+  （不设 DSN）行为与 MVS2/3 逐位一致。banner 打印 Backend/Replica/lease。
+- **所有权是 claim-on-act**：WS 接入/清扫/归档/对账在动作前 claim 租约，
+  动作期间 `LeaseGuard` 心跳（ttl/3），结束即释放或任其过期——不粘滞，
+  闲置会话任意副本可即时接管。
+- **WS 打错副本** → `409` + `X-Oneai-Owner-Replica: <owner>` +
+  `Retry-After: 1`（前置 LB 可据此学 sticky；租约过期后重试即被接管）。
+- **副本死亡**（kill -9）→ 租约过期 → 其他副本 WS 接入或重启对账时接管，
+  **容器零操作**（引擎进程不动，会话无感）。
+- **同时重启**安全：对账先 claim 再探活，每条会话恰一次探活、恰一个
+  owner，不误判 Crashed。
+- 硬约束：`ONEAI_PG_DSN` + `lease_ttl_secs=0` 启动拒绝（多副本无所有权
+  仲裁=脚枪）；逃生门 `ONEAI_ORCH_PG_NO_LEASE=1` 仅限迁移/测试。
+- MVS4-A 边界：多副本 = **同 docker 宿主**多进程（容器端口发布在
+  127.0.0.1）；跨宿主网络留给 K8sRunner 轮。
+- 编排器日志走 stderr tracing（`RUST_LOG` 可控，默认 info）：reconcile/
+  租约丢失/清扫/归档均有结构化行。
+
+## 21. MVS4-A 全量验收（一键）
+
+```bash
+./deploy/docker/mvs4a_run.sh   # 确保 pgvector 容器 + 库 oneai_mvs4 + 宿主二进制 + 跑 mvs4a_verify.mjs
+```
+
+验收矩阵（六 phase 21 项，2026-09-14 实测 21/21）：A 单副本 Pg 基线
+（banner/DDL/落行 owner+lease/真实 turn+活动落库/DELETE 零残留）→ B 双副本
+协作（异 replica/非 owner WS→409+owner 头/过期接管/list 收敛）→ C 故障转移
+（kill -9 A → B 接管：owner 翻转、StartedAt 逐字节不变、turn 答出 A 时代
+暗号）→ D 并发对账（活跃租约不夺/ghost 过期租约双副本同时重启每条恰一
+owner 全 Running）→ E 跨副本深度归档（kill C → D sweep 接管整链休眠+归档；
+WS 经 D 重连 Resuming + session/load 答出归档前暗号）→ F 红线（只读归档
+目录不 destroy/lease_ttl=0 启动拒绝/文件模式回归）。
+
+## 22. Pg 集成测试（编排器 store，开发侧）
+
+```bash
+ONEAI_TEST_PG_DSN=postgres://postgres:oneai@127.0.0.1:5432/oneai_test \
+  cargo test -p oneai-orchestrator --features postgres \
+  --test pg_store_tests -- --ignored
+# 9 测：schema 幂等 / insert-dup(PK 跨副本仲裁) / CAS 契约+10 并发恰一赢 /
+#       archived claim-release 排他 / 租约 claim-renew-过期接管全生命周期 /
+#       10 路并发 claim 恰一赢家 / GREATEST 活动单调 / force_update 跨连接可见
+# 另有 multi_replica_tests 8 测（无需 Pg/docker：MemLeaseStore 镜像 Pg 契约，
+# 双 OrchestratorState 共享真相 + 真 axum/WS 握手收 409 + 并发对账探活计数）
+```
