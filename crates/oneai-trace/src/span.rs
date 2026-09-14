@@ -110,6 +110,17 @@ pub struct Span {
     /// Child spans (nested sub-operations).
     #[serde(default)]
     pub children: Vec<Span>,
+
+    /// Explicit W3C/OTEL trace-id override (MVS4-B distributed lineage).
+    /// Set by `TraceContext::enter_span` when the context was seeded from a
+    /// remote `traceparent`: the OTLP exporter's trace-id resolution prefers
+    /// this over walking the parent chain, so exported spans carry the
+    /// INJECTED trace id even when intermediate parents (e.g. the session
+    /// root span, which never ends inside a long-lived engine server) are
+    /// absent from the export batch. `None` = derive from the span-tree root
+    /// (the pre-MVS4-B behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id_override: Option<String>,
 }
 
 fn default_span_status() -> SpanStatus {
@@ -131,6 +142,7 @@ impl Span {
             attributes: HashMap::new(),
             events: Vec::new(),
             children: Vec::new(),
+            trace_id_override: None,
         }
     }
 

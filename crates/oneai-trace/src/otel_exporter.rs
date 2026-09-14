@@ -295,11 +295,19 @@ fn otel_span_id(id: &str) -> String {
     crate::w3c::w3c_span_id(id)
 }
 
-/// 32-hex (16-byte) OTEL trace id. Resolved by walking the parent chain to
-/// the root span within the batch and using the root's span id as the trace
-/// id (so all spans in one tree share a trace id). Falls back to the span's
-/// own id (or its parent's) if the root isn't present in this batch.
+/// 32-hex (16-byte) OTEL trace id. An explicit `trace_id_override` (MVS4-B:
+/// context seeded from a remote `traceparent`) wins outright — parent-chain
+/// walking dead-ends when an intermediate parent never ends/exports (the
+/// session root span of a long-lived engine server), which would otherwise
+/// fragment one logical trace into per-span-uuid trace ids. Without the
+/// override the resolution walks the parent chain to the root span within
+/// the batch and uses the root's span id as the trace id (so all spans in
+/// one tree share a trace id), falling back to the span's own id (or its
+/// parent's) if the root isn't present in this batch.
 fn otel_trace_id(span: &Span, by_id: &HashMap<String, &Span>) -> String {
+    if let Some(tid) = &span.trace_id_override {
+        return crate::w3c::w3c_trace_id(&crate::w3c::uuid_to_hex(tid));
+    }
     let mut current = span;
     let mut guard = 0;
     while let Some(parent_id) = current.parent_span_id.as_deref() {
@@ -866,8 +874,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_otlp_collector_with_context() {
+        // In-memory exporter (the flush below must not hit the network —
+        // the real HttpOtlpExporter would POST to localhost:4317/proxies).
+        let exporter = Arc::new(InMemoryOtlpExporter::new());
         let config = OtlpConfig::grpc("http://localhost:4317", "oneai-test");
-        let collector = Arc::new(OtlpCollector::new(config));
+        let collector = Arc::new(OtlpCollector::with_exporter(
+            config,
+            exporter.clone() as Arc<dyn OtlpExporter>,
+        ));
 
         let ctx = TraceContext::new(collector.clone());
         let session_span = ctx.enter_span(SpanKind::SESSION, "session", None);
@@ -898,6 +912,7 @@ mod tests {
         assert_eq!(collector.completed_count(), 2, "both exited spans buffered");
         collector.flush().await.unwrap();
         assert_eq!(collector.completed_count(), 0, "flush drained to exporter");
+        assert_eq!(exporter.total_spans(), 2, "both spans reached the exporter");
 
         // Verify OTEL JSON conversion
         let otel_json = OtlpCollector::span_to_otel_json(&tree.root_span);
@@ -1155,6 +1170,26 @@ mod tests {
         // Event maps to OTLP event with timeUnixNano + name.
         assert_eq!(spans[1]["events"][0]["name"], "agent.observation");
         assert!(spans[1]["events"][0]["timeUnixNano"].is_string());
+    }
+
+    #[test]
+    fn trace_id_override_wins_over_parent_walk() {
+        // MVS4-B: a span seeded from a remote traceparent carries the
+        // override — the payload's traceId is exactly the injected trace id
+        // even though its parent (the never-exported session root) is absent
+        // from the batch. Without the override the id would derive from the
+        // missing parent's span id instead.
+        let mut child = Span::new(SpanKind::AGENT, "agent_loop", Some("session-uuid-parent"));
+        child.trace_id_override = Some("0af7651916cd43dd8448eb211c80319c".to_string());
+        child.end(SpanStatus::Ok);
+        let batch = ExportBatch {
+            service_name: "oneai-test".to_string(),
+            resource_attributes: HashMap::new(),
+            spans: vec![child],
+        };
+        let payload = build_otlp_json_payload(&batch);
+        let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
+        assert_eq!(spans[0]["traceId"], "0af7651916cd43dd8448eb211c80319c");
     }
 
     #[tokio::test]

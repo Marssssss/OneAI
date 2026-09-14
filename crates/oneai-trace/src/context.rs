@@ -38,6 +38,13 @@ struct SharedTraceContext {
 
     /// Session ID (set at session creation).
     session_id: Mutex<Option<String>>,
+
+    /// Trace id from a seeded remote `traceparent` (MVS4-B). Stamped onto
+    /// every span this context creates so the OTLP exporter can attribute
+    /// exported spans to the upstream trace even when intermediate parents
+    /// (the never-ending session root of a long-lived engine server) never
+    /// reach an export batch.
+    seeded_trace_id: Mutex<Option<String>>,
 }
 
 // ─── TraceContext ────────────────────────────────────────────────────
@@ -85,6 +92,7 @@ impl TraceContext {
                 collector,
                 enabled: AtomicBool::new(true),
                 session_id: Mutex::new(None),
+                seeded_trace_id: Mutex::new(None),
             }),
         }
     }
@@ -98,6 +106,7 @@ impl TraceContext {
                 collector: Arc::new(crate::collector::NoopCollector),
                 enabled: AtomicBool::new(false),
                 session_id: Mutex::new(None),
+                seeded_trace_id: Mutex::new(None),
             }),
         }
     }
@@ -144,7 +153,10 @@ impl TraceContext {
             .map(|s| s.to_string())
             .or_else(|| self.inner.span_stack.lock().unwrap().last().cloned());
 
-        let span = Span::new(kind, name, resolved_parent.as_deref());
+        let mut span = Span::new(kind, name, resolved_parent.as_deref());
+        // MVS4-B: carry the seeded remote trace id so the exporter can
+        // attribute this span to the upstream trace (see Span::trace_id_override).
+        span.trace_id_override = self.inner.seeded_trace_id.lock().unwrap().clone();
         let span_id = span.span_id.clone();
 
         // Store the span
@@ -336,6 +348,11 @@ impl TraceContext {
         span.span_id = tp.trace_id.clone();
         span.set_attribute("remote.traceparent", serde_json::json!(tp.to_header()));
         let id = span.span_id.clone();
+        // Stamp the trace id on every FUTURE span (see enter_span) — the
+        // exporter prefers it over parent-chain walking, which dead-ends at
+        // parents absent from the batch (the never-exported session root of
+        // a long-lived engine server).
+        *self.inner.seeded_trace_id.lock().unwrap() = Some(tp.trace_id.clone());
         self.inner.spans.lock().unwrap().insert(id.clone(), span);
         self.inner.span_stack.lock().unwrap().push(id.clone());
         tracing::debug!(
