@@ -61,11 +61,32 @@ pub(crate) async fn apply_pg_backends(
         }
 
         // Usage ledger (explicit tracker wins over the builder's auto-wired
-        // SqliteUsageTracker fallback).
+        // SqliteUsageTracker fallback). MVS4-B: inside a cloud container the
+        // orchestrator injects ONEAI_TENANT_ID / ONEAI_ORCH_SESSION_ID — wrap
+        // the tracker so every recorded row is stamped with them (the
+        // orchestrator's tenant-budget SUM reads metadata_json->>'tenant_id').
         match oneai_persistence::PgUsageTracker::connect(&dsn).await {
             Ok(tracker) => {
-                eprintln!("   usage: Postgres (shared)");
-                builder = builder.usage_tracker(Arc::new(tracker));
+                let tenant = std::env::var("ONEAI_TENANT_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let orch_sid = std::env::var("ONEAI_ORCH_SESSION_ID")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                match tenant {
+                    Some(tenant) => {
+                        eprintln!("   usage: Postgres (shared, tenant-tagged '{tenant}')");
+                        builder = builder.usage_tracker(Arc::new(TenantTaggingUsageTracker {
+                            inner: Arc::new(tracker),
+                            tenant_id: tenant,
+                            orch_session_id: orch_sid.unwrap_or_default(),
+                        }));
+                    }
+                    None => {
+                        eprintln!("   usage: Postgres (shared)");
+                        builder = builder.usage_tracker(Arc::new(tracker));
+                    }
+                }
             }
             Err(e) => eprintln!(
                 "Warning: {PG_DSN_ENV} is set but PgUsageTracker connect failed: {e} \
@@ -136,6 +157,85 @@ pub(crate) async fn apply_pg_backends(
              feature — using SQLite memory/usage/host-allowlist/session-events/feedback"
         );
         (builder, None, None)
+    }
+}
+
+/// Usage-tracker decorator stamping the orchestrator-injected tenant /
+/// orchestrator-session ids into every record's metadata (MVS4-B). This
+/// lives in the CLI layer on purpose: the engine crates stay untouched — the
+/// decorator is a plain `UsageTracker` impl wrapping the real one, and the
+/// orchestrator's tenant-budget SUM keys on `metadata_json->>'tenant_id'`.
+/// Non-orchestrated engines (no `ONEAI_TENANT_ID` env) never see it.
+#[cfg(feature = "postgres")]
+struct TenantTaggingUsageTracker {
+    inner: Arc<oneai_persistence::PgUsageTracker>,
+    tenant_id: String,
+    orch_session_id: String,
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait::async_trait]
+impl oneai_core::usage::UsageTracker for TenantTaggingUsageTracker {
+    async fn record_usage(
+        &self,
+        mut record: oneai_core::usage::UsageRecord,
+    ) -> oneai_core::error::Result<()> {
+        record
+            .metadata
+            .insert("tenant_id".to_string(), self.tenant_id.clone());
+        if !self.orch_session_id.is_empty() {
+            record
+                .metadata
+                .insert("orch_session_id".to_string(), self.orch_session_id.clone());
+        }
+        self.inner.record_usage(record).await
+    }
+
+    async fn session_usage(
+        &self,
+        session_id: &str,
+    ) -> oneai_core::error::Result<oneai_core::usage::UsageSummary> {
+        self.inner.session_usage(session_id).await
+    }
+
+    async fn global_usage(&self) -> oneai_core::error::Result<oneai_core::usage::UsageSummary> {
+        self.inner.global_usage().await
+    }
+
+    async fn usage_by_model(
+        &self,
+        session_id: &str,
+    ) -> oneai_core::error::Result<std::collections::HashMap<String, oneai_core::usage::UsageSummary>>
+    {
+        self.inner.usage_by_model(session_id).await
+    }
+
+    async fn usage_by_model_global(
+        &self,
+    ) -> oneai_core::error::Result<std::collections::HashMap<String, oneai_core::usage::UsageSummary>>
+    {
+        self.inner.usage_by_model_global().await
+    }
+
+    async fn session_records(
+        &self,
+        session_id: &str,
+    ) -> oneai_core::error::Result<Vec<oneai_core::usage::UsageRecord>> {
+        self.inner.session_records(session_id).await
+    }
+
+    async fn global_records(
+        &self,
+    ) -> oneai_core::error::Result<Vec<oneai_core::usage::UsageRecord>> {
+        self.inner.global_records().await
+    }
+
+    async fn clear_session(&self, session_id: &str) -> oneai_core::error::Result<()> {
+        self.inner.clear_session(session_id).await
+    }
+
+    async fn clear_all(&self) -> oneai_core::error::Result<()> {
+        self.inner.clear_all().await
     }
 }
 

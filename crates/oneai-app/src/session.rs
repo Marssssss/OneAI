@@ -398,9 +398,33 @@ impl AppSession {
 
         // Start a SESSION span if tracing is enabled
         if let Some(ctx) = &trace_context {
+            // MVS4-B cloud lineage: when the orchestrator spawned this engine
+            // container it injected TRACEPARENT — seed it as the remote parent
+            // BEFORE entering the session span so every span this process
+            // exports attaches under the orchestrator's trace id. Malformed /
+            // absent env is a no-op (端侧 engines never set it).
+            if let Some(tp) = std::env::var("TRACEPARENT").ok().filter(|s| !s.is_empty()) {
+                ctx.seed_parent_from_traceparent(&tp);
+            }
             let _span_id = ctx.enter_span(SpanKind::SESSION, "session", None);
             ctx.set_attribute("session.id", serde_json::json!(session_id));
             ctx.set_attribute("session.platform", serde_json::json!(app.platform.name()));
+            // MVS4-B tenant dimension (orchestrator-injected env contract):
+            // tenant.id + the ORCHESTRATOR's session id (distinct from this
+            // engine's conversation UUID — the join key back to the routing
+            // table / usage ledger).
+            if let Some(tenant) = std::env::var("ONEAI_TENANT_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                ctx.set_attribute("tenant.id", serde_json::json!(tenant));
+            }
+            if let Some(orch_sid) = std::env::var("ONEAI_ORCH_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                ctx.set_attribute("orchestrator.session.id", serde_json::json!(orch_sid));
+            }
             ctx.set_session_id(&session_id);
         }
 

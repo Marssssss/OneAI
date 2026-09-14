@@ -77,10 +77,15 @@ ENV NK_TARGET_NEONSDOT=0
 # 也能恢复；白名单跨容器共享）；Pg 服务器须为 pgvector 镜像（memory 硬依赖
 # CREATE EXTENSION vector，缺失则该 store 响亮告警并单独回退 SQLite）。
 # 不设 DSN 则维持文件/SQLite 后端，行为与 MVS1/2 完全一致。
+# --features otel（MVS4-B 可观测）：编入 oneai-trace 的 OTLP/HTTP 导出器；
+# 编排器配置 otel_endpoint 后每个容器被注入 OTEL_EXPORTER_OTLP_ENDPOINT +
+# TRACEPARENT + ONEAI_TENANT_ID/ONEAI_ORCH_SESSION_ID，引擎 span 以租户/
+# 会话维度挂进编排器的 trace。仅新增 reqwest 到 oneai-trace（CLI 已链
+# reqwest，体积零增量级）。
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release -p oneai-cli --no-default-features \
-        --features oneai-cli/postgres && \
+        --features oneai-cli/postgres,oneai-cli/otel && \
     install -m 0755 target/release/oneai /oneai
 
 # ─── 运行时 ──────────────────────────────────────────────────────────────────

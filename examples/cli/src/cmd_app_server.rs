@@ -1353,6 +1353,50 @@ pub(crate) async fn build_engine_server(
     // Postgres. See crate::working_state.
     builder = crate::working_state::apply_working_state(builder, "./.oneai").await;
 
+    // OTEL export (MVS4-B, feature `otel`): the cloud orchestrator injects
+    // the standard `OTEL_EXPORTER_OTLP_ENDPOINT` (+ `TRACEPARENT`, read by
+    // AppSession) into every container it spawns. Wire an OtlpCollector when
+    // present — before this round the engine NEVER exported spans
+    // (`trace_otel` existed on the builder but no server path called it, and
+    // the context→collector bridge was missing entirely). Tenant/orch-session
+    // go on the OTEL resource so every exported batch is attributable even
+    // before span attrs land.
+    #[cfg(feature = "otel")]
+    if let Some(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        let mut cfg = oneai_trace::OtlpConfig::http(&endpoint, "oneai-engine");
+        if let Some(tenant) = std::env::var("ONEAI_TENANT_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            cfg = cfg.with_attribute("tenant.id", &tenant);
+        }
+        if let Some(orch_sid) = std::env::var("ONEAI_ORCH_SESSION_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            cfg = cfg.with_attribute("orchestrator.session.id", &orch_sid);
+        }
+        let collector = std::sync::Arc::new(oneai_trace::OtlpCollector::new(cfg));
+        builder = builder
+            .trace_collector(collector.clone() as std::sync::Arc<dyn oneai_trace::TraceCollector>);
+        // Periodic flusher: the batch-64 eager flush alone would hold small
+        // sessions' spans hostage; a 5s tick bounds export latency (the
+        // session root span never ends inside a long-lived server anyway).
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                iv.tick().await;
+                if let Err(e) = oneai_trace::TraceCollector::flush(&*collector).await {
+                    eprintln!("Warning: OTLP span flush failed: {e}");
+                }
+            }
+        });
+        eprintln!("   otel: exporting spans to {endpoint}");
+    }
+
     // Persisted thinking-effort store (web UI "思考程度" toggle) — shares
     // the SAME ~/.oneai/oneai.db (or ONEAI_DB_PATH) as the session store, so
     // the `thinking/set` RPC hot-swap survives restart. Wired BEFORE build

@@ -27,8 +27,10 @@ struct SharedTraceContext {
     /// All spans collected so far, keyed by span_id.
     spans: Mutex<HashMap<String, Span>>,
 
-    /// The collector to route events to.
-    #[allow(dead_code)]
+    /// The collector to route span lifecycle to (MVS4-B: enter/exit now
+    /// actually feed it — before, spans lived only in the context's map and
+    /// an `OtlpCollector` wired via `AppBuilder::trace_otel` never received
+    /// anything, so the OTLP export path was dead weight).
     collector: Arc<dyn TraceCollector>,
 
     /// Whether tracing is enabled (runtime toggle).
@@ -150,10 +152,14 @@ impl TraceContext {
             .spans
             .lock()
             .unwrap()
-            .insert(span_id.clone(), span);
+            .insert(span_id.clone(), span.clone());
 
         // Push onto the stack
         self.inner.span_stack.lock().unwrap().push(span_id.clone());
+
+        // MVS4-B collector bridge: the collector sees the span lifecycle
+        // (OtlpCollector buffers started spans; export happens on end/flush).
+        self.emit_to_collector(&span, false);
 
         tracing::debug!(
             "Trace: enter span {} kind={} name={}",
@@ -163,6 +169,25 @@ impl TraceContext {
         );
 
         span_id
+    }
+
+    /// Forward a span lifecycle event to the collector (MVS4-B bridge).
+    /// Detached spawn on the ambient tokio runtime; sync call sites without
+    /// a runtime skip silently — the span still lives in the context tree
+    /// (`build_tree` readers are unaffected either way).
+    fn emit_to_collector(&self, span: &Span, ended: bool) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let collector = self.inner.collector.clone();
+        let span = span.clone();
+        tokio::spawn(async move {
+            if ended {
+                collector.on_span_end(&span).await;
+            } else {
+                collector.on_span_start(&span).await;
+            }
+        });
     }
 
     /// Exit a span — pop from the stack, set end_time, compute duration.
@@ -181,12 +206,20 @@ impl TraceContext {
         }
 
         // End the span
-        {
+        let ended = {
             let mut spans = self.inner.spans.lock().unwrap();
-            if let Some(span) = spans.get_mut(span_id) {
+            spans.get_mut(span_id).map(|span| {
                 span.end(status);
-                tracing::debug!("Trace: exit span {} status={}", span_id, status.as_ref());
-            }
+                span.clone()
+            })
+        };
+        if let Some(span) = ended {
+            // MVS4-B collector bridge: the finished span (with its events +
+            // attributes) goes to the collector — OtlpCollector moves it from
+            // pending to completed here, and the exporter POSTs it on the
+            // eager/periodic flush.
+            self.emit_to_collector(&span, true);
+            tracing::debug!("Trace: exit span {} status={}", span_id, status.as_ref());
         }
     }
 
@@ -275,6 +308,41 @@ impl TraceContext {
         if let Some(span) = spans.get_mut(span_id) {
             span.set_attribute(key, value);
         }
+    }
+
+    /// Seed a remote parent span from a W3C `traceparent` (MVS4-B): the
+    /// cloud orchestrator injects `TRACEPARENT` at container spawn; calling
+    /// this BEFORE the first `enter_span(.., None)` makes every local span a
+    /// child of the remote context, so the OTLP exporter's trace-id
+    /// resolution (walk to the tree root) derives exactly the injected
+    /// trace-id — engine spans join the orchestrator's trace.
+    ///
+    /// The synthetic span's id IS the 32-hex trace-id (`uuid_to_hex` of a
+    /// 32-hex string is identity, so both exporter and `current_traceparent`
+    /// round-trip it). It never ends and is never exported — a parent anchor
+    /// only; `build_tree` will show it as the root (`remote.parent`).
+    /// Downstream propagation (sub-agents, A2A) continues under the same
+    /// trace via `current_traceparent`.
+    ///
+    /// Returns the seeded span id, or `None` on a malformed header / when
+    /// tracing is disabled (callers proceed unparented — a bad traceparent
+    /// must never break a session).
+    pub fn seed_parent_from_traceparent(&self, header: &str) -> Option<String> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let tp = crate::w3c::parse_traceparent(header)?;
+        let mut span = Span::new(SpanKind::INTERNAL, "remote.parent", None);
+        span.span_id = tp.trace_id.clone();
+        span.set_attribute("remote.traceparent", serde_json::json!(tp.to_header()));
+        let id = span.span_id.clone();
+        self.inner.spans.lock().unwrap().insert(id.clone(), span);
+        self.inner.span_stack.lock().unwrap().push(id.clone());
+        tracing::debug!(
+            "Trace: seeded remote parent from traceparent {}",
+            tp.to_header()
+        );
+        Some(id)
     }
 
     // ─── Tree Building ──────────────────────────────────────────────

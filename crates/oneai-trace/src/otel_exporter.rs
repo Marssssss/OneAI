@@ -888,8 +888,16 @@ mod tests {
         let tree = ctx.build_tree();
         assert_eq!(tree.root_span.kind, SpanKind::SESSION);
 
-        // Verify the collector received spans
-        assert_eq!(collector.completed_count(), 0); // on_span_end may not have been called for nested spans
+        // MVS4-B collector bridge: exit_span now feeds on_span_end (detached
+        // spawn) — yield so the spawned tasks run, then both exited spans
+        // must sit in the collector's completed buffer awaiting flush.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(collector.completed_count(), 2, "both exited spans buffered");
+        collector.flush().await.unwrap();
+        assert_eq!(collector.completed_count(), 0, "flush drained to exporter");
 
         // Verify OTEL JSON conversion
         let otel_json = OtlpCollector::span_to_otel_json(&tree.root_span);
