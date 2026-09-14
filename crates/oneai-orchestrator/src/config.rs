@@ -41,6 +41,10 @@ pub const DEFAULT_CONTAINER_PORT: u16 = 8787;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
 /// Default time a WS upgrade waits for a resuming session (seconds).
 pub const DEFAULT_RESUME_TIMEOUT_SECS: u64 = 60;
+/// Default per-session lease TTL for multi-replica mode (MVS4-A); renewal
+/// runs at ttl/3. Only meaningful on shared (Pg) stores — file mode is
+/// single-replica and skips leasing entirely.
+pub const DEFAULT_LEASE_TTL_SECS: u64 = 30;
 /// Bearer secret env var for the frontend → orchestrator channel (D7).
 pub const ORCHESTRATOR_SECRET_ENV: &str = "ONEAI_ORCHESTRATOR_SECRET";
 
@@ -97,6 +101,17 @@ pub struct OrchestratorConfig {
     /// for real cold storage). Required when `deep_archive_timeout_secs > 0`.
     #[serde(default)]
     pub archive_dir: Option<PathBuf>,
+    /// Per-session lease TTL for multi-replica mode (MVS4-A). Default 30;
+    /// renewal at ttl/3. Must be > 0 when the shared (Pg) store is active —
+    /// leasing is what makes sweeps/reconcile ownership-scoped there.
+    #[serde(default = "default_lease_ttl")]
+    pub lease_ttl_secs: u64,
+    /// Replica identity for lease ownership. Empty (default) → a uuid v4 is
+    /// generated at boot (leases die with the process anyway, so a stable
+    /// id across restarts buys nothing — a fresh id avoids colliding with
+    /// the previous incarnation's not-yet-expired leases).
+    #[serde(default)]
+    pub replica_id: String,
 }
 
 fn default_listen() -> String {
@@ -119,6 +134,9 @@ fn default_resume_timeout() -> u64 {
 }
 fn default_docker_bin() -> String {
     "docker".to_string()
+}
+fn default_lease_ttl() -> u64 {
+    DEFAULT_LEASE_TTL_SECS
 }
 
 fn default_registry_dir() -> PathBuf {
@@ -143,6 +161,8 @@ impl Default for OrchestratorConfig {
             docker_bin: default_docker_bin(),
             deep_archive_timeout_secs: 0,
             archive_dir: None,
+            lease_ttl_secs: default_lease_ttl(),
+            replica_id: String::new(),
         }
     }
 }

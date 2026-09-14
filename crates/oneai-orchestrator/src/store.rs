@@ -195,6 +195,117 @@ pub trait SessionStore: Send + Sync {
     async fn list_owned_ids(&self, replica_id: &str) -> Result<Vec<String>>;
 }
 
+// ─── Lease identity + RAII guard (MVS4-A) ─────────────────────────────────────
+
+/// Who this replica is, for lease purposes. Carried by the sweep and the WS
+/// proxy so every ownership-scoped action claims/renews under one identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseIdentity {
+    /// Unique per orchestrator process (uuid v4 unless pinned by config).
+    pub replica_id: String,
+    /// Lease time-to-live; renewal runs at `ttl/3`.
+    pub ttl: Duration,
+}
+
+/// RAII lease ownership for one session (mirrors `proxy::ConnGuard`).
+///
+/// Precondition: the caller already won
+/// [`SessionStore::try_claim_lease`]. On construction a renewal task starts
+/// (every `ttl/3`) that also drains the throttled durable-activity flush —
+/// a foreign replica's idle sweep therefore never sees stale activity for a
+/// session this replica is actively serving. On drop the renewal stops, the
+/// activity is force-flushed and the lease is released best-effort (a lost
+/// release is covered by expiry).
+pub struct LeaseGuard {
+    table: crate::registry::RoutingTable,
+    session_id: String,
+    replica_id: String,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl LeaseGuard {
+    /// Start heartbeating an already-claimed lease.
+    pub fn start(
+        table: crate::registry::RoutingTable,
+        session_id: String,
+        replica_id: String,
+        ttl: Duration,
+    ) -> Self {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let t = table.clone();
+        let id = session_id.clone();
+        let rid = replica_id.clone();
+        let c = cancel.clone();
+        let tick = (ttl / 3).max(Duration::from_millis(50));
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(tick);
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            iv.tick().await; // first tick fires immediately — skip it
+            loop {
+                tokio::select! {
+                    _ = c.cancelled() => break,
+                    _ = iv.tick() => {}
+                }
+                // Durable activity flush first (throttled ≥1s internally),
+                // then the renewal — a renewal gap must never leave the
+                // sweep-facing activity clock behind.
+                if let Err(e) = t.flush_activity(&id, false).await {
+                    tracing::warn!(session = %id, error = %e, "lease heartbeat: activity flush failed");
+                }
+                match t.store().renew_lease(&id, &rid, ttl).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        // Lost to a takeover (renewal gap exceeded the TTL —
+                        // GC pause / Pg outage). Stop heartbeating; the
+                        // in-flight proxy keeps pumping (accepted MVS4-A
+                        // race, design §6 MVS4/R3 — the new owner's sweep
+                        // re-checks durable activity before hibernating).
+                        tracing::warn!(
+                            session = %id, replica = %rid,
+                            "lease lost mid-flight (taken over by another replica)"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "lease renewal failed; retrying next tick");
+                    }
+                }
+            }
+        });
+        Self {
+            table,
+            session_id,
+            replica_id,
+            cancel,
+        }
+    }
+
+    /// The session this guard owns.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        let table = self.table.clone();
+        let id = self.session_id.clone();
+        let rid = self.replica_id.clone();
+        // Detached best-effort: force-flush activity (so a foreign sweep
+        // sees the true idle clock immediately) and release the lease (so
+        // another replica can own the session without waiting for expiry).
+        tokio::spawn(async move {
+            if let Err(e) = table.flush_activity(&id, true).await {
+                tracing::warn!(session = %id, error = %e, "lease release: activity flush failed");
+            }
+            if let Err(e) = table.store().release_lease(&id, &rid).await {
+                tracing::warn!(session = %id, error = %e, "lease release failed (expiry covers it)");
+            }
+        });
+    }
+}
+
 // ─── File backend (MVS2 default, single replica) ─────────────────────────────
 
 /// Whole-file JSON session store: `<dir>/sessions.json`, atomic

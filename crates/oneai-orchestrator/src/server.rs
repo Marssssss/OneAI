@@ -16,6 +16,7 @@ use crate::routes::router;
 use crate::runner::{
     state_volume_name, workspace_volume_name, ContainerHandle, ContainerRunner, SessionSpec,
 };
+use crate::store::{FileSessionStore, LeaseIdentity, SessionStore};
 
 /// Shared orchestrator state (axum state + lifecycle operations).
 pub struct OrchestratorState {
@@ -30,6 +31,9 @@ pub struct OrchestratorState {
     /// Deep-archive volume store (MVS3-C); `None` when deep hibernation is
     /// disabled (`deep_archive_timeout_secs == 0`).
     pub archive_store: Option<Arc<dyn VolumeArchiveStore>>,
+    /// This replica's lease identity (MVS4-A): uuid unless pinned via
+    /// config. Only meaningful when the store `supports_leasing()`.
+    pub replica_id: String,
 }
 
 impl OrchestratorState {
@@ -67,6 +71,21 @@ impl OrchestratorState {
         runner: Arc<dyn ContainerRunner>,
         archive_store: Option<Arc<dyn VolumeArchiveStore>>,
     ) -> Result<Arc<Self>> {
+        tokio::fs::create_dir_all(&config.registry_dir).await?;
+        let store = Arc::new(FileSessionStore::open(&config.registry_dir).await?);
+        Self::with_session_store(config, runner, archive_store, store).await
+    }
+
+    /// Like [`with_archive_store`](Self::with_archive_store) with an
+    /// explicitly provided session store — the MVS4-A injection point for
+    /// the shared Postgres backend (multi-replica) and for tests running
+    /// several states against one store.
+    pub async fn with_session_store(
+        config: OrchestratorConfig,
+        runner: Arc<dyn ContainerRunner>,
+        archive_store: Option<Arc<dyn VolumeArchiveStore>>,
+        store: Arc<dyn SessionStore>,
+    ) -> Result<Arc<Self>> {
         config.validate()?;
         let bearer =
             oneai_http_auth::BearerSecret::from_env(ORCHESTRATOR_SECRET_ENV).ok_or_else(|| {
@@ -75,15 +94,38 @@ impl OrchestratorState {
                  (frontend→orchestrator bearer auth; refuse to start without it)"
                 ))
             })?;
-        tokio::fs::create_dir_all(&config.registry_dir).await?;
-        let table = RoutingTable::load_and_reconcile(&config.registry_dir, runner.as_ref()).await?;
+        let replica_id = if config.replica_id.trim().is_empty() {
+            uuid::Uuid::new_v4().simple().to_string()
+        } else {
+            config.replica_id.trim().to_string()
+        };
+        let table = RoutingTable::reconcile_with_store(store, runner.as_ref()).await?;
+        tracing::info!(
+            %replica_id,
+            leasing = table.store().supports_leasing(),
+            lease_ttl_secs = config.lease_ttl_secs,
+            "orchestrator replica identity"
+        );
         Ok(Arc::new(Self {
             config,
             table,
             runner,
             bearer,
             archive_store,
+            replica_id,
         }))
+    }
+
+    /// This replica's lease identity, or `None` when the backing store has
+    /// no leasing (file mode — the single replica owns everything).
+    pub fn lease_identity(&self) -> Option<LeaseIdentity> {
+        self.table
+            .store()
+            .supports_leasing()
+            .then(|| LeaseIdentity {
+                replica_id: self.replica_id.clone(),
+                ttl: Duration::from_secs(self.config.lease_ttl_secs.max(1)),
+            })
     }
 
     /// Compose the spawn spec for a session id (image/volumes/ports/env from
@@ -131,9 +173,22 @@ impl OrchestratorState {
             .table
             .insert_new(SessionEntry::new_creating(spec.clone()))
             .await?;
-        // Persist the Creating entry so a mid-spawn orchestrator crash
-        // reconciles it away on restart.
+        // Durability barrier (file backend: whole-file write; shared stores:
+        // the insert itself is already durable).
         self.table.persist().await?;
+        // Multi-replica: the creator is the initial owner (no heartbeat —
+        // the lease simply lapses once idle, making the session claimable
+        // by whichever replica serves it next; sweeps re-claim on demand).
+        if let Some(lease) = self.lease_identity() {
+            if let Err(e) = self
+                .table
+                .store()
+                .try_claim_lease(&id, &lease.replica_id, lease.ttl)
+                .await
+            {
+                tracing::warn!(session = %id, error = %e, "initial lease claim failed (CAS still arbitrates sweeps)");
+            }
+        }
 
         match self.spawn_and_mark(entry.clone()).await {
             Ok(arc) => Ok(arc.snapshot()),
@@ -533,6 +588,7 @@ pub async fn run(
         timeout: Duration::from_secs(state.config.deep_archive_timeout_secs),
         docker_bin: state.config.docker_bin.clone(),
     });
+    let lease = state.lease_identity();
     let _sweep = (state.config.idle_timeout_secs > 0).then(|| {
         spawn_idle_sweep(
             state.table.clone(),
@@ -540,6 +596,7 @@ pub async fn run(
             deep_archive,
             Duration::from_secs(state.config.idle_timeout_secs),
             crate::idle::DEFAULT_SWEEP_TICK,
+            lease.clone(),
             cancel.clone(),
         )
     });
@@ -551,7 +608,7 @@ pub async fn run(
         state.table.len().await
     );
 
-    axum::serve(listener, router(state))
+    axum::serve(listener, router(state.clone()))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
@@ -560,5 +617,17 @@ pub async fn run(
         })
         .await
         .map_err(|e| OrchestratorError::Runner(e.to_string()))?;
+    // Graceful shutdown: hand our sessions back immediately instead of
+    // making the surviving replicas wait out the lease TTL.
+    if let Some(lease) = lease {
+        if let Err(e) = state
+            .table
+            .store()
+            .release_all_leases(&lease.replica_id)
+            .await
+        {
+            tracing::warn!(error = %e, "lease release on shutdown failed (expiry covers it)");
+        }
+    }
     Ok(())
 }

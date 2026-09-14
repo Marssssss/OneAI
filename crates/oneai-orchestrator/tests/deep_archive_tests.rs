@@ -138,7 +138,7 @@ async fn hibernate(table: &RoutingTable, runner: &FakeRunner, id: &str) {
         .await
         .unwrap();
     // idle_ms > 0 with timeout 0 → candidate; the sweep CASes + stops.
-    sweep_once(table, runner, None, Duration::from_secs(0)).await;
+    sweep_once(table, runner, None, Duration::from_secs(0), None).await;
     assert_eq!(
         table.get(id).await.unwrap().state,
         SessionState::Hibernating
@@ -166,6 +166,7 @@ async fn sweep_exports_claims_and_destroys() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
 
@@ -205,6 +206,7 @@ async fn archive_failure_keeps_volumes_and_retries() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
 
@@ -231,6 +233,7 @@ async fn archive_failure_keeps_volumes_and_retries() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
     assert!(table.get("s1").await.unwrap().archived.is_some());
@@ -251,6 +254,7 @@ async fn future_timeout_is_not_a_candidate() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(86400))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
     assert!(table.get("s1").await.unwrap().archived.is_none());
@@ -301,6 +305,7 @@ async fn resume_restores_spawn_and_releases_marker() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
     assert!(st.table.get("s1").await.unwrap().archived.is_some());
@@ -345,6 +350,7 @@ async fn restore_failure_keeps_archive_and_marks_crashed() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
 
@@ -450,6 +456,7 @@ async fn concurrent_sweeps_archive_once() {
             r.as_ref(),
             Some(&deep(&s, Duration::from_secs(0))),
             Duration::from_secs(3600),
+            None,
         )
         .await;
     };
@@ -485,6 +492,7 @@ async fn destroy_session_removes_archive_files() {
         runner.as_ref(),
         Some(&deep(&store, Duration::from_secs(0))),
         Duration::from_secs(3600),
+        None,
     )
     .await;
     assert!(store.has_archive("s1").await);

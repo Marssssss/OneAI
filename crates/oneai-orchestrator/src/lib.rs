@@ -63,4 +63,7 @@ pub use pg_session_store::PgSessionStore;
 pub use registry::RoutingTable;
 pub use runner::{ContainerHandle, ContainerRunner, SessionSpec};
 pub use server::{run, OrchestratorState};
-pub use store::{ClaimOutcome, FileSessionStore, LeaseInfo, SessionStore, StoredSession};
+pub use store::{
+    ClaimOutcome, FileSessionStore, LeaseGuard, LeaseIdentity, LeaseInfo, SessionStore,
+    StoredSession,
+};

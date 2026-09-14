@@ -20,6 +20,7 @@ use crate::archive::DeepArchive;
 use crate::fsm::SessionState;
 use crate::registry::RoutingTable;
 use crate::runner::ContainerRunner;
+use crate::store::{ClaimOutcome, LeaseGuard, LeaseIdentity};
 
 /// Default sweep tick interval.
 pub const DEFAULT_SWEEP_TICK: Duration = Duration::from_secs(30);
@@ -28,12 +29,17 @@ pub const DEFAULT_SWEEP_TICK: Duration = Duration::from_secs(30);
 /// and runner are dropped). The candidate list is advisory — the CAS inside
 /// is authoritative, so a session that gains a connection or transitions
 /// between listing and CAS is never stopped.
+///
+/// `lease` (MVS4-A) scopes the sweep to this replica: on a leasing backend
+/// every candidate must be lease-claimed before any container operation, so
+/// exactly one replica acts and foreign-owned sessions are skipped.
 pub fn spawn_idle_sweep(
     table: RoutingTable,
     runner: Arc<dyn ContainerRunner>,
     deep_archive: Option<DeepArchive>,
     idle_timeout: Duration,
     tick: Duration,
+    lease: Option<LeaseIdentity>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -44,10 +50,26 @@ pub fn spawn_idle_sweep(
                 _ = cancel.cancelled() => break,
                 _ = interval.tick() => {}
             }
-            sweep_once(&table, runner.as_ref(), deep_archive.as_ref(), idle_timeout).await;
+            sweep_once(
+                &table,
+                runner.as_ref(),
+                deep_archive.as_ref(),
+                idle_timeout,
+                lease.as_ref(),
+            )
+            .await;
         }
         tracing::debug!("idle sweep task stopped");
     })
+}
+
+/// Whether lease gating is active (identity present AND the store leases —
+/// file mode skips gating entirely).
+fn active_lease<'a>(
+    table: &RoutingTable,
+    lease: Option<&'a LeaseIdentity>,
+) -> Option<&'a LeaseIdentity> {
+    lease.filter(|_| table.store().supports_leasing())
 }
 
 /// One sweep pass (exposed for tests): hibernate idle Running sessions,
@@ -57,11 +79,32 @@ pub async fn sweep_once(
     runner: &dyn ContainerRunner,
     deep_archive: Option<&DeepArchive>,
     idle_timeout: Duration,
+    lease: Option<&LeaseIdentity>,
 ) {
+    let lease = active_lease(table, lease);
     let candidates = table
         .list_idle_candidates(idle_timeout.as_millis() as u64)
         .await;
     for id in candidates {
+        // MVS4-A: claim ownership before touching the container. A miss
+        // (HeldByOther) means a live replica owns the session — its own
+        // sweep handles it; NotFound means it just died — the next pass
+        // re-reads the store. The claim's lease then expires on its own
+        // (no heartbeat here — ownership is per-action, not sticky).
+        if let Some(l) = lease {
+            match table
+                .store()
+                .try_claim_lease(&id, &l.replica_id, l.ttl)
+                .await
+            {
+                Ok(ClaimOutcome::Owned { .. }) => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "idle sweep: lease claim failed");
+                    continue;
+                }
+            }
+        }
         // CAS Running → Hibernating is the authoritative check; a miss means
         // the session moved (gained a conn / was deleted / crashed) — skip.
         let Ok(Some(_)) = table
@@ -88,7 +131,7 @@ pub async fn sweep_once(
     }
 
     if let Some(deep) = deep_archive {
-        deep_archive_pass(table, runner, deep).await;
+        deep_archive_pass(table, runner, deep, lease).await;
     }
 }
 
@@ -105,7 +148,12 @@ pub async fn sweep_once(
 ///    failure here is loud but recoverable: the marker is already set and
 ///    the archive confirmed, so resume restores from the archive while
 ///    `spawn` tolerates the leftover container/volumes.
-async fn deep_archive_pass(table: &RoutingTable, runner: &dyn ContainerRunner, deep: &DeepArchive) {
+async fn deep_archive_pass(
+    table: &RoutingTable,
+    runner: &dyn ContainerRunner,
+    deep: &DeepArchive,
+    lease: Option<&LeaseIdentity>,
+) {
     let candidates = table
         .list_deep_archive_candidates(deep.timeout.as_millis() as u64)
         .await;
@@ -124,6 +172,32 @@ async fn deep_archive_pass(table: &RoutingTable, runner: &dyn ContainerRunner, d
             entry.spec.state_volume.clone(),
             entry.spec.workspace_volume.clone(),
         ];
+
+        // MVS4-A: own the session for the whole archive operation. The
+        // export can run for minutes (docker save | gzip) — a bare claim
+        // would expire mid-export and let another replica race a concurrent
+        // tar into the same deterministic layout. The guard heartbeats the
+        // lease until the pass finishes (drop → release).
+        let _ownership = match lease {
+            Some(l) => match table
+                .store()
+                .try_claim_lease(&id, &l.replica_id, l.ttl)
+                .await
+            {
+                Ok(ClaimOutcome::Owned { .. }) => Some(LeaseGuard::start(
+                    table.clone(),
+                    id.clone(),
+                    l.replica_id.clone(),
+                    l.ttl,
+                )),
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "deep archive: lease claim failed");
+                    continue;
+                }
+            },
+            None => None,
+        };
 
         // 1. Export FIRST — until this succeeds, nothing may be removed.
         let manifest = match deep.store.archive(&id, &volumes, &deep.docker_bin).await {
@@ -269,7 +343,7 @@ mod tests {
             stops: Mutex::new(Vec::new()),
             stop_count: AtomicUsize::new(0),
         });
-        sweep_once(&t, rec.as_ref(), None, Duration::from_secs(60)).await;
+        sweep_once(&t, rec.as_ref(), None, Duration::from_secs(60), None).await;
 
         assert_eq!(rec.stop_count.load(Ordering::Relaxed), 1);
         assert_eq!(*rec.stops.lock().await, vec!["oneai-orch-idle1"]);
@@ -296,6 +370,7 @@ mod tests {
             None,
             Duration::from_secs(3600),
             Duration::from_millis(10),
+            None,
             cancel.clone(),
         );
         tokio::time::sleep(Duration::from_millis(50)).await;

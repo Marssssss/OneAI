@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,6 +21,11 @@ use crate::error::OrchestratorError;
 use crate::fsm::{SessionSnapshot, SessionState};
 use crate::proxy::proxy_pump;
 use crate::server::OrchestratorState;
+use crate::store::{ClaimOutcome, LeaseGuard};
+
+/// Header carrying the owning replica id on a 409 lease conflict (MVS4-A) —
+/// a fronting LB can learn sticky routing from it.
+pub const OWNER_REPLICA_HEADER: HeaderName = HeaderName::from_static("x-oneai-owner-replica");
 
 /// Assemble the control-plane router.
 pub fn router(state: Arc<OrchestratorState>) -> Router {
@@ -67,7 +72,10 @@ fn err_response(e: OrchestratorError) -> Response {
         OrchestratorError::NotRunnable { .. } | OrchestratorError::ResumeTimeout(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
-        OrchestratorError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        OrchestratorError::Config(_) | OrchestratorError::Pg(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+        OrchestratorError::LeaseLost(_) => (StatusCode::CONFLICT, e.to_string()),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
@@ -168,6 +176,51 @@ async fn ws_session(
             .unwrap_or_else(|| (StatusCode::UNAUTHORIZED, "unauthorized").into_response());
     }
 
+    // MVS4-A ownership: exactly one replica proxies a session, so activity
+    // accounting and the idle sweep stay unambiguous. Claim BEFORE any
+    // container operation (liveness CAS / resume) — a replica that can't
+    // own the session must not operate its container either. The guard
+    // heartbeats (ttl/3) for as long as this handler and then the proxy
+    // pump live; early returns drop it (best-effort release). File mode:
+    // no leasing — guard stays None, behaviour identical to MVS2.
+    let lease_guard = match st.lease_identity() {
+        Some(lease) => {
+            match st
+                .table
+                .store()
+                .try_claim_lease(&id, &lease.replica_id, lease.ttl)
+                .await
+            {
+                Ok(ClaimOutcome::Owned { .. }) => Some(LeaseGuard::start(
+                    st.table.clone(),
+                    id.clone(),
+                    lease.replica_id.clone(),
+                    lease.ttl,
+                )),
+                Ok(ClaimOutcome::HeldByOther { owner_replica, .. }) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        [
+                            (OWNER_REPLICA_HEADER, owner_replica.as_str()),
+                            (header::RETRY_AFTER, "1"),
+                        ],
+                        Json(serde_json::json!({
+                            "error": "session is owned by another orchestrator replica",
+                            "session_id": id,
+                            "owner_replica": owner_replica,
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(ClaimOutcome::NotFound) => {
+                    return err_response(OrchestratorError::NotFound(id));
+                }
+                Err(e) => return err_response(e),
+            }
+        }
+        None => None,
+    };
+
     // Liveness check doubles as request-time crash detection: a Running
     // entry whose upstream port refuses connections (docker kill — MVS2 has
     // no background poller) is CAS'd to Crashed here, so the resume path
@@ -229,7 +282,12 @@ async fn ws_session(
         )));
     };
 
-    ws.on_upgrade(move |socket| proxy_pump(socket, upstream, entry))
+    ws.on_upgrade(move |socket| async move {
+        // Ownership lives exactly as long as the pump (drop → force-flush
+        // activity + release the lease for the next replica).
+        let _lease = lease_guard;
+        proxy_pump(socket, upstream, entry).await;
+    })
 }
 
 #[cfg(test)]
