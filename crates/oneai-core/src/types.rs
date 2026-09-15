@@ -81,6 +81,20 @@ pub enum Role {
 
 // ─── Message ──────────────────────────────────────────────────────────────────
 
+/// Metadata key marking the ephemeral merged dynamic-tail message (context
+/// sources + pinned blocks) that the agent loop appends at the very END of each
+/// inference request.
+///
+/// The tail is re-generated per iteration and never enters the durable log, so
+/// its bytes change between requests. Providers that place prompt-cache
+/// breakpoints/markers (Anthropic `cache_control`, DashScope explicit cache)
+/// must SKIP messages carrying this key when choosing the rolling breakpoint —
+/// a cache block that ends inside volatile bytes can never prefix-match the
+/// next request. Defined in core (not in the agent crate) because both the
+/// writer (`oneai-agent` context assembler) and the readers (`oneai-provider`
+/// serializers) need it.
+pub const VOLATILE_TAIL_METADATA_KEY: &str = "oneai_volatile_tail";
+
 /// A single message in a conversation, containing one or more content blocks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {

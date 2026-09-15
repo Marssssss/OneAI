@@ -116,8 +116,16 @@ impl AnthropicProvider {
         // Anthropic separates system messages from the conversation
         let mut system_text = String::new();
         let mut messages = Vec::new();
+        // Wire index of the last DURABLE message (everything except the
+        // ephemeral merged tail tagged `oneai_volatile_tail`) — the anchor for
+        // the rolling cache breakpoint below. Tracked here because the tag
+        // does not survive to the wire JSON.
+        let mut last_durable_idx: Option<usize> = None;
 
         for msg in &req.conversation.messages {
+            let is_volatile_tail = msg
+                .metadata
+                .contains_key(oneai_core::VOLATILE_TAIL_METADATA_KEY);
             match msg.role {
                 Role::System => {
                     // Anthropic puts system messages in a separate field
@@ -172,6 +180,9 @@ impl AnthropicProvider {
                         },
                         "content": content_blocks,
                     }));
+                    if !is_volatile_tail {
+                        last_durable_idx = Some(messages.len() - 1);
+                    }
                 }
                 Role::Tool => {
                     // Tool results in Anthropic are wrapped in user messages
@@ -185,6 +196,10 @@ impl AnthropicProvider {
                                     "content": content,
                                 }]
                             }));
+                            // Tool results are durable history and valid
+                            // breakpoint anchors (Anthropic caches tool_result
+                            // blocks like any other).
+                            last_durable_idx = Some(messages.len() - 1);
                         }
                     }
                 }
@@ -307,10 +322,26 @@ impl AnthropicProvider {
         // postmortem). The tail moves each iteration, so each request reads
         // the previously cached prefix and writes only the new delta — the
         // standard agentic-loop caching pattern. `Off` policy skips it.
+        //
+        // The breakpoint anchors on the last DURABLE message, NOT the literal
+        // last one: the agent loop appends an ephemeral merged tail
+        // (`oneai_volatile_tail`) whose bytes change every iteration, and a
+        // cache block ending inside volatile bytes can never prefix-match the
+        // next request — it would re-pay the 1.25x cache-write premium every
+        // iteration while never being read back. Falls back to the last
+        // message when nothing durable was recorded (hand-built requests).
         if cache_on {
-            if let Some(blocks) = body["messages"]
-                .as_array_mut()
-                .and_then(|msgs| msgs.last_mut())
+            let anchor = last_durable_idx.or_else(|| {
+                body["messages"]
+                    .as_array()
+                    .map(|m| m.len().saturating_sub(1))
+            });
+            if let Some(blocks) = anchor
+                .and_then(|i| {
+                    body["messages"]
+                        .as_array_mut()
+                        .and_then(|msgs| msgs.get_mut(i))
+                })
                 .and_then(|msg| msg.get_mut("content"))
                 .and_then(|c| c.as_array_mut())
             {
@@ -1589,6 +1620,104 @@ mod probe_tests {
                 .unwrap()
                 .contains_key("cache_control"),
             "last tool must NOT be cached when policy=off"
+        );
+    }
+
+    /// The rolling breakpoint must anchor on the last DURABLE message, not the
+    /// ephemeral merged tail — a cache block ending inside per-iteration
+    /// volatile bytes can never prefix-match the next request (pure 1.25x
+    /// cache-write premium, zero reads).
+    #[test]
+    fn test_rolling_breakpoint_skips_volatile_tail() {
+        use oneai_core::{Conversation, Message};
+
+        fn tail_msg() -> Message {
+            let mut tail = Message::user("[Context: date] today");
+            tail.metadata.insert(
+                oneai_core::VOLATILE_TAIL_METADATA_KEY.to_string(),
+                "1".to_string(),
+            );
+            tail
+        }
+
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("You are a helpful assistant."));
+        conv.add_message(Message::user("hi"));
+        conv.add_message(Message::assistant("hello there"));
+        conv.add_message(tail_msg());
+        let req = InferenceRequest {
+            conversation: conv,
+            tools: vec![],
+            max_tokens: Some(128),
+            temperature: None,
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let body = AnthropicProvider::new(ModelConfig::default()).to_anthropic_request(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "[user, assistant, volatile tail]");
+        // Breakpoint on the assistant text (last durable)…
+        let durable_blocks = msgs[1]["content"].as_array().unwrap();
+        assert!(
+            durable_blocks
+                .last()
+                .unwrap()
+                .get("cache_control")
+                .is_some(),
+            "rolling breakpoint must sit on the last durable message"
+        );
+        // …and NOT on the volatile tail.
+        let tail_blocks = msgs[2]["content"].as_array().unwrap();
+        assert!(
+            tail_blocks.last().unwrap().get("cache_control").is_none(),
+            "volatile tail must not carry a breakpoint"
+        );
+    }
+
+    /// Tool results are durable history and valid breakpoint anchors — when the
+    /// loop's last durable message is a tool result, the breakpoint lands on
+    /// its `tool_result` block. No volatile tail present → the anchor is simply
+    /// the last message (preserves the pre-fix behavior for durable-only
+    /// requests).
+    #[test]
+    fn test_rolling_breakpoint_anchors_tool_result_and_falls_back_to_last() {
+        use oneai_core::{ContentBlock, Conversation, Message, Role};
+
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("You are a helpful assistant."));
+        conv.add_message(Message::user("read the file"));
+        conv.add_message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                args: "{}".into(),
+            }],
+            metadata: std::collections::HashMap::new(),
+        });
+        conv.add_message(Message::tool_result("c1".into(), "file body".into()));
+        let req = InferenceRequest {
+            conversation: conv,
+            tools: vec![],
+            max_tokens: Some(128),
+            temperature: None,
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let body = AnthropicProvider::new(ModelConfig::default()).to_anthropic_request(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        // Wire: [user, assistant(tool_use), user(tool_result)] — last is durable.
+        let last_blocks = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(last_blocks[0]["type"], "tool_result");
+        assert!(
+            last_blocks[0].get("cache_control").is_some(),
+            "tool_result block must carry the rolling breakpoint when it is the last durable message"
         );
     }
 }

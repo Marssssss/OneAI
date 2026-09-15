@@ -51,7 +51,27 @@ pub struct ContextAssembler {
     context_sources: Vec<Arc<dyn ContextSource>>,
     /// Cached context content from sources — re-injected on every `assemble()`.
     cached_context: HashMap<String, String>,
+    /// When the previous `assemble()` ran — the cache-warm gate for stale tool
+    /// truncation (see `truncate_stale_tool_results`). `None` before the first
+    /// assembly (= cold: full truncation, matching pre-gate behavior).
+    last_assemble: Option<std::time::Instant>,
+    /// `call_id`s of tool results truncated by a previous (cold) assembly.
+    /// While the provider's prompt cache is presumed warm, ONLY these are
+    /// re-truncated so the request bytes match the previous request exactly
+    /// (preserving the cached prefix); union-only, cleared past a size cap.
+    sticky_truncated_call_ids: std::collections::HashSet<String>,
+    /// How long after the last assembly the provider's prompt cache is presumed
+    /// alive. Default 300s (matches Anthropic/DashScope 5-minute ephemeral
+    /// TTLs); override with `ONEAI_CACHE_WARM_TTL_SECS` or `set_cache_warm_ttl`.
+    cache_warm_ttl: std::time::Duration,
 }
+
+/// Default provider prompt-cache lifetime assumed by the warm gate (seconds).
+const DEFAULT_CACHE_WARM_TTL_SECS: u64 = 300;
+
+/// Cap on the sticky truncation set; past this it is cleared (a cold assembly
+/// rebuilds it). Guards unbounded growth across very long-lived assemblers.
+const STICKY_TRUNCATED_CAP: usize = 8192;
 
 impl ContextAssembler {
     /// Create a new context assembler.
@@ -59,6 +79,9 @@ impl ContextAssembler {
         Self {
             context_sources: Vec::new(),
             cached_context: HashMap::new(),
+            last_assemble: None,
+            sticky_truncated_call_ids: std::collections::HashSet::new(),
+            cache_warm_ttl: Self::ttl_from_env(),
         }
     }
 
@@ -67,7 +90,24 @@ impl ContextAssembler {
         Self {
             context_sources,
             cached_context: HashMap::new(),
+            last_assemble: None,
+            sticky_truncated_call_ids: std::collections::HashSet::new(),
+            cache_warm_ttl: Self::ttl_from_env(),
         }
+    }
+
+    /// Override the cache-warm TTL (tests / harnesses with a known provider
+    /// cache lifetime). `Duration::ZERO` forces every assembly cold.
+    pub fn set_cache_warm_ttl(&mut self, ttl: std::time::Duration) {
+        self.cache_warm_ttl = ttl;
+    }
+
+    fn ttl_from_env() -> std::time::Duration {
+        std::env::var("ONEAI_CACHE_WARM_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or_else(|| std::time::Duration::from_secs(DEFAULT_CACHE_WARM_TTL_SECS))
     }
 
     /// Assemble the context for a loop iteration.
@@ -113,6 +153,10 @@ impl ContextAssembler {
         // prefix cache. Ephemeral only: the durable log keeps full arguments.
         collapse_successful_huge_tool_args(&mut conversation);
 
+        // Timestamp AFTER the warm gate above has read the previous value —
+        // this arms the gate for the next assembly.
+        self.last_assemble = Some(std::time::Instant::now());
+
         Ok(conversation)
     }
 
@@ -124,22 +168,44 @@ impl ContextAssembler {
     /// reference); older ones over `MAX_STALE_TOOL_RESULT_CHARS` are capped to a
     /// snippet + a pointer. Idempotent + no-op on short results / small convs.
     ///
-    /// **Cache stability**: only tool results *before* the current user turn
-    /// (marked `CURRENT_TURN_KEY`) are considered stale. That set is fixed
-    /// within a turn, so the truncation is byte-stable across iterations. A
-    /// sliding "last N of the ever-growing tool count" window would re-truncate
-    /// one more old result each iteration — a tool output flips full→truncated
-    /// mid-turn, changing the frozen history right where the provider's
-    /// prompt-prefix cache holds it.
+    /// **Cache stability** (two mechanisms):
+    /// 1. *Within a turn*: only tool results *before* the current user turn
+    ///    (marked `CURRENT_TURN_KEY`) are considered stale. That set is fixed
+    ///    within a turn, so the truncation is byte-stable across iterations. A
+    ///    sliding "last N of the ever-growing tool count" window would
+    ///    re-truncate one more old result each iteration — a tool output flips
+    ///    full→truncated mid-turn, changing the frozen history right where the
+    ///    provider's prompt-prefix cache holds it.
+    /// 2. *Across turns* (warm gate): when the turn marker moves, the previous
+    ///    turn's tool results become newly stale — truncating them immediately
+    ///    would rewrite the prefix the provider cached on the last request.
+    ///    While the cache is presumed warm (previous assembly < `cache_warm_ttl`
+    ///    ago) only PREVIOUSLY truncated results (tracked by `call_id` in
+    ///    `sticky_truncated_call_ids`) are re-truncated, reproducing the exact
+    ///    bytes of the last request; newly stale ones stay full until the next
+    ///    cold assembly (cache dead → free to rewrite → context savings resume).
     ///
     /// `memory_search` only searches archived facts, not raw tool outputs, so
     /// the pointer tells the model to re-run the tool for the full output (the
     /// durable transcript has it, but it's not in context anymore) — never a
     /// false "use memory_search" promise. Assistant/user/system messages are
     /// never touched (the model's own prior reasoning/output must stay intact).
-    fn truncate_stale_tool_results(&self, conversation: &mut Conversation) {
+    fn truncate_stale_tool_results(&mut self, conversation: &mut Conversation) {
         const MAX_STALE_TOOL_RESULT_CHARS: usize = 2000;
         const KEEP_FULL_RECENT: usize = 4;
+
+        // Cache-warm gate: when the previous assembly is recent enough that the
+        // provider's prompt cache is presumed alive, reproduce its exact bytes —
+        // truncate ONLY the tool results already truncated before (sticky set).
+        // A message that just became stale this turn (the turn marker moved) was
+        // sent FULL in the previous request, so truncating it now would rewrite
+        // history mid-prefix and bust the cache we are trying to keep warm. The
+        // temporary context bloat is the deliberate trade; a cold assembly
+        // (cache dead anyway) re-truncates everything per the full rule below.
+        let warm = self
+            .last_assemble
+            .map(|t| t.elapsed() < self.cache_warm_ttl)
+            .unwrap_or(false);
 
         // Indexes of Tool-role messages that precede the current user turn, in
         // order. The current turn's own tool results (after the mark) are the
@@ -159,24 +225,33 @@ impl ContextAssembler {
         let stale_count = tool_idx.len() - KEEP_FULL_RECENT;
         for &i in tool_idx.iter().take(stale_count) {
             for block in &mut conversation.messages[i].content {
-                if let oneai_core::ContentBlock::ToolResult {
-                    call_id: _,
-                    content,
-                } = block
-                {
+                if let oneai_core::ContentBlock::ToolResult { call_id, content } = block {
                     // Count first (releases the immutable borrow) before the
                     // mutable assign below. `chars().take()` keeps UTF-8
                     // boundaries safe.
                     if content.chars().count() > MAX_STALE_TOOL_RESULT_CHARS {
+                        if warm && !self.sticky_truncated_call_ids.contains(call_id) {
+                            // Newly stale inside the warm window: keep full
+                            // bytes (matches the previous request).
+                            continue;
+                        }
                         let cut: String =
                             content.chars().take(MAX_STALE_TOOL_RESULT_CHARS).collect();
                         *content = format!(
                             "{cut}\n[...truncated — full output is in the session transcript; \
                              re-run the tool to retrieve it in full]"
                         );
+                        // Union-only: ids from other conversations sharing this
+                        // assembler (sub-agents clone the Arc) occupy disjoint
+                        // call_id spaces, so cross-conversation pollution is a
+                        // harmless no-op here.
+                        self.sticky_truncated_call_ids.insert(call_id.clone());
                     }
                 }
             }
+        }
+        if self.sticky_truncated_call_ids.len() > STICKY_TRUNCATED_CAP {
+            self.sticky_truncated_call_ids.clear();
         }
     }
 
@@ -271,23 +346,20 @@ impl ContextAssembler {
         for msg in prefix.into_iter().rev() {
             conversation.messages.insert(insert_at, msg);
         }
-        // Insert the tail (env) sources immediately BEFORE the current user
-        // turn (marked with CURRENT_TURN_KEY) so the frozen env sits inside the
-        // cacheable prefix — before the turn — rather than after it in the
-        // always-miss tail. Inserted in reverse so the ascending-priority order
-        // survives the fixed-index inserts. Falls back to appending when no turn
-        // is marked (hand-assembled test conversations).
-        match current_user_turn_idx(conversation) {
-            Some(idx) => {
-                for msg in tail.into_iter().rev() {
-                    conversation.messages.insert(idx, msg);
-                }
-            }
-            None => {
-                for msg in tail {
-                    conversation.add_message(msg);
-                }
-            }
+        // Append the tail (env) sources at the very END of the request — after
+        // ALL durable messages. They must never sit mid-history: the tail is
+        // ephemeral (regenerated per turn, absent from the durable log), so a
+        // mid-history injection point makes the NEXT turn's prefix diverge
+        // exactly there — everything after it (the whole prior Q&A, the most
+        // expensive region) becomes uncacheable. At the end, the durable prefix
+        // (system + tools + history) stays purely append-only across turns and
+        // the cache miss is capped to the tail itself. `sort_tail_by_volatility`
+        // + `merge_tail_into_single_message` (called by the agent loop after
+        // pinned-block injection) fold these together with the pinned tail into
+        // one bounded volatile message, tagged with VOLATILE_TAIL_METADATA_KEY
+        // so provider serializers can keep cache breakpoints out of it.
+        for msg in tail {
+            conversation.add_message(msg);
         }
     }
 
@@ -395,10 +467,11 @@ pub(crate) fn is_tail_segment(text: &str) -> bool {
 /// Metadata key marking the message that started the current user turn.
 ///
 /// Set when `LoopState::new`/`from_conversation` appends the incoming user
-/// message; cleared from prior messages on a fresh turn. The env context
-/// sources are injected immediately BEFORE the marked message so the frozen env
-/// sits inside the cacheable prefix (before the turn) rather than in the
-/// always-miss tail.
+/// message; cleared from prior messages on a fresh turn. Used by
+/// `truncate_stale_tool_results` to bound the stale window: only tool results
+/// BEFORE the marked message are truncation candidates, which keeps the
+/// candidate set fixed within a turn (see that function's cache-stability
+/// note).
 pub(crate) const CURRENT_TURN_KEY: &str = "oneai_current_turn";
 
 /// Index of the current user turn message (marked with [`CURRENT_TURN_KEY`]).
@@ -620,7 +693,16 @@ pub fn merge_tail_into_single_message(conv: &mut Conversation, max_chars: usize)
         merged.chars().count(),
         if truncated { " [truncated]" } else { "" }
     );
-    conv.add_message(oneai_core::Message::user(merged));
+    let mut msg = oneai_core::Message::user(merged);
+    // Tag the merged message as the volatile tail so provider serializers
+    // (anthropic.rs / openai.rs DashScope explicit cache) place their rolling
+    // prompt-cache breakpoints BEFORE it — a cache block ending inside
+    // per-iteration volatile bytes can never prefix-match the next request.
+    msg.metadata.insert(
+        oneai_core::VOLATILE_TAIL_METADATA_KEY.to_string(),
+        "1".to_string(),
+    );
+    conv.add_message(msg);
 }
 
 /// Build the sectioned context snapshot for one iteration (issue #40
@@ -1303,7 +1385,7 @@ mod tests {
         for _ in 0..6 {
             conv.add_message(tool_msg(5000));
         }
-        let ca = ContextAssembler::new();
+        let mut ca = ContextAssembler::new();
         ca.truncate_stale_tool_results(&mut conv);
         let tools: Vec<&oneai_core::Message> = conv
             .messages
@@ -1339,7 +1421,7 @@ mod tests {
         for _ in 0..6 {
             conv.add_message(tool_msg(500));
         }
-        let ca = ContextAssembler::new();
+        let mut ca = ContextAssembler::new();
         ca.truncate_stale_tool_results(&mut conv);
         for m in &conv.messages {
             assert_eq!(tool_content(m).len(), 500, "short result must be untouched");
@@ -1354,7 +1436,7 @@ mod tests {
         for _ in 0..3 {
             conv.add_message(tool_msg(5000));
         }
-        let ca = ContextAssembler::new();
+        let mut ca = ContextAssembler::new();
         ca.truncate_stale_tool_results(&mut conv);
         for m in &conv.messages {
             assert_eq!(tool_content(m).len(), 5000, "≤4 tool results → all full");
@@ -1669,7 +1751,7 @@ mod tests {
             conv.add_message(tool_msg(5000));
         }
         conv.add_message(oneai_core::Message::user("b".repeat(8000)));
-        let ca = ContextAssembler::new();
+        let mut ca = ContextAssembler::new();
         ca.truncate_stale_tool_results(&mut conv);
         // Assistant + user Text blocks untouched (still 8000 chars each).
         let assistant_text = conv
@@ -1696,5 +1778,223 @@ mod tests {
             })
             .unwrap();
         assert_eq!(user_text.len(), 8000, "user text must not be truncated");
+    }
+
+    // ─── Tail placement + volatile-tail tag (prompt-cache prefix stability) ───
+
+    /// A Tail-position stub source for testing tail placement.
+    struct TailStubSource {
+        key: &'static str,
+        content: &'static str,
+    }
+
+    #[async_trait]
+    impl ContextSource for TailStubSource {
+        fn key(&self) -> &str {
+            self.key
+        }
+        async fn load(&self) -> Result<String> {
+            Ok(self.content.to_string())
+        }
+        fn position(&self) -> ContextPosition {
+            ContextPosition::Tail
+        }
+    }
+
+    /// Tail ContextSources must land AFTER the current user turn — at the very
+    /// end of the request — never before it. An ephemeral tail sitting
+    /// mid-history makes the next turn's prefix diverge at that exact spot, so
+    /// every durable message after it (the whole prior Q&A) becomes
+    /// uncacheable across turns.
+    #[tokio::test]
+    async fn tail_sources_appended_after_current_turn_not_before() {
+        let sources: Vec<Arc<dyn ContextSource>> = vec![Arc::new(TailStubSource {
+            key: "date",
+            content: "TAIL-DATE-CONTENT",
+        })];
+        let mut ca = ContextAssembler::with_context_sources(sources);
+        ca.refresh_sources().await.unwrap();
+
+        let state = LoopState::new("the user question");
+        let conv = ca.assemble(&state).unwrap();
+
+        let turn_idx = current_user_turn_idx(&conv).expect("turn mark must survive assemble");
+        let tail_idx = conv
+            .messages
+            .iter()
+            .position(|m| m.text_content().contains("TAIL-DATE-CONTENT"))
+            .expect("tail source must be injected");
+        assert!(
+            tail_idx > turn_idx,
+            "tail source must come after the current turn \
+             (tail_idx={tail_idx}, turn_idx={turn_idx})"
+        );
+        assert_eq!(
+            tail_idx,
+            conv.messages.len() - 1,
+            "tail source must sit at the very end of the request"
+        );
+    }
+
+    /// The merged dynamic tail carries the `VOLATILE_TAIL_METADATA_KEY` tag so
+    /// provider serializers (anthropic.rs rolling breakpoint, openai.rs
+    /// DashScope explicit cache) can keep prompt-cache markers out of the
+    /// per-iteration volatile region.
+    #[test]
+    fn merged_tail_carries_volatile_metadata_tag() {
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        conv.add_message(oneai_core::Message::user("real question"));
+        conv.add_message(oneai_core::Message::user("[Context: date] today"));
+        merge_tail_into_single_message(&mut conv, 20480);
+        let last = conv.messages.last().unwrap();
+        assert_eq!(
+            last.metadata
+                .get(oneai_core::VOLATILE_TAIL_METADATA_KEY)
+                .map(String::as_str),
+            Some("1"),
+            "merged tail must be tagged volatile"
+        );
+        // Durable messages must NOT be tagged.
+        assert!(
+            !conv.messages[0]
+                .metadata
+                .contains_key(oneai_core::VOLATILE_TAIL_METADATA_KEY),
+            "durable message must not carry the volatile tag"
+        );
+    }
+
+    /// After sort+merge the single tail message starts with the least-volatile
+    /// segment and is still recognizable by `is_tail_segment` (the group-chat
+    /// moderator and the sort/merge helpers rely on that prefix convention).
+    #[test]
+    fn merged_tail_starts_with_lowest_volatility_segment() {
+        let mut conv = oneai_core::Conversation::with_id("c".into());
+        conv.add_message(oneai_core::Message::user("real question"));
+        // Deliberately out of order: git_status (rank 4) before core_memory (0).
+        conv.add_message(oneai_core::Message::user("[Context: git_status] dirty"));
+        conv.add_message(oneai_core::Message::user(
+            "[Context: core_memory] user prefers X",
+        ));
+        sort_tail_by_volatility(&mut conv);
+        merge_tail_into_single_message(&mut conv, 20480);
+        let merged = conv.messages.last().unwrap().text_content();
+        assert!(
+            merged.starts_with("[Context: core_memory]"),
+            "merged tail must open with the least-volatile segment: {merged}"
+        );
+        assert!(
+            is_tail_segment(&merged),
+            "merged tail must remain recognizable as a tail segment"
+        );
+    }
+
+    // ─── Sticky stale-truncation (cache-warm gate) ──────────────────────────
+
+    /// Tool message with a UNIQUE call_id (the sticky set is keyed by call_id;
+    /// the older `tool_msg` helper reuses one id and only fits cold-path tests).
+    fn tool_msg_id(id: &str, n: usize) -> oneai_core::Message {
+        oneai_core::Message::tool_result(id.to_string(), "x".repeat(n))
+    }
+
+    /// Mimic `LoopState::from_conversation_with_content`: clear the old turn
+    /// mark and append a freshly marked user message.
+    fn mark_current_turn(conv: &mut Conversation, text: &str) {
+        for m in &mut conv.messages {
+            m.metadata.remove(CURRENT_TURN_KEY);
+        }
+        let mut u = oneai_core::Message::user(text);
+        u.metadata
+            .insert(CURRENT_TURN_KEY.to_string(), "1".to_string());
+        conv.add_message(u);
+    }
+
+    fn is_truncated(m: &oneai_core::Message) -> bool {
+        tool_content(m).contains("[...truncated")
+    }
+
+    fn tools_of(conv: &Conversation) -> Vec<&oneai_core::Message> {
+        conv.messages
+            .iter()
+            .filter(|m| m.role == oneai_core::Role::Tool)
+            .collect()
+    }
+
+    #[test]
+    fn sticky_truncation_cold_start_matches_current_behavior() {
+        // Fresh assembler (last_assemble = None) → cold → full stale rule,
+        // identical to the pre-gate behavior; truncated ids land in the set.
+        let mut conv = Conversation::with_id("c".into());
+        for i in 0..6 {
+            conv.add_message(tool_msg_id(&format!("t{i}"), 5000));
+        }
+        mark_current_turn(&mut conv, "q1");
+        let mut ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        let tools = tools_of(&conv);
+        assert!(is_truncated(tools[0]) && is_truncated(tools[1]));
+        assert!(!is_truncated(tools[2]), "keep-full-recent must stay full");
+        assert_eq!(ca.sticky_truncated_call_ids.len(), 2);
+    }
+
+    #[test]
+    fn sticky_truncation_preserves_bytes_within_ttl() {
+        // Turn A: cold pass truncates t0/t1 (6 tools − keep 4).
+        let mut conv = Conversation::with_id("c".into());
+        for i in 0..6 {
+            conv.add_message(tool_msg_id(&format!("t{i}"), 5000));
+        }
+        mark_current_turn(&mut conv, "q1");
+        let mut ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        ca.last_assemble = Some(std::time::Instant::now());
+
+        // Turn B inside the TTL: two more tool results, marker moves → t2/t3
+        // become newly stale. They were sent FULL in turn A's last request, so
+        // the warm gate must NOT rewrite them (that would bust the provider's
+        // cached prefix); t0/t1 stay truncated with identical bytes.
+        conv.add_message(oneai_core::Message::assistant("a1"));
+        conv.add_message(tool_msg_id("t6", 5000));
+        conv.add_message(tool_msg_id("t7", 5000));
+        mark_current_turn(&mut conv, "q2");
+        ca.truncate_stale_tool_results(&mut conv);
+
+        let tools = tools_of(&conv);
+        assert_eq!(tools.len(), 8);
+        assert!(
+            is_truncated(tools[0]) && is_truncated(tools[1]),
+            "sticky ids must stay truncated (byte-identical to last request)"
+        );
+        assert!(
+            !is_truncated(tools[2]) && !is_truncated(tools[3]),
+            "newly stale results must keep full bytes inside the warm window"
+        );
+    }
+
+    #[test]
+    fn sticky_truncation_retruncates_after_ttl() {
+        // Same turn-A setup, but the cache is presumed dead (TTL = 0) → cold
+        // pass re-truncates everything stale, including the newly stale t2/t3.
+        let mut conv = Conversation::with_id("c".into());
+        for i in 0..6 {
+            conv.add_message(tool_msg_id(&format!("t{i}"), 5000));
+        }
+        mark_current_turn(&mut conv, "q1");
+        let mut ca = ContextAssembler::new();
+        ca.truncate_stale_tool_results(&mut conv);
+        ca.last_assemble = Some(std::time::Instant::now());
+        ca.set_cache_warm_ttl(std::time::Duration::ZERO);
+
+        conv.add_message(oneai_core::Message::assistant("a1"));
+        conv.add_message(tool_msg_id("t6", 5000));
+        conv.add_message(tool_msg_id("t7", 5000));
+        mark_current_turn(&mut conv, "q2");
+        ca.truncate_stale_tool_results(&mut conv);
+
+        let tools = tools_of(&conv);
+        // 8 tools − keep 4 → t0..t3 all truncated.
+        for t in &tools[0..4] {
+            assert!(is_truncated(t), "cold pass must truncate all stale results");
+        }
+        assert!(!is_truncated(tools[4]), "recent window stays full");
     }
 }

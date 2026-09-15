@@ -119,6 +119,15 @@ pub struct Compat {
     pub native_chat_api: bool,
     /// Request authentication style.
     pub auth: AuthStyle,
+    /// DashScope/百炼 explicit context cache over the OpenAI-compat protocol
+    /// (anthropic-style `cache_control: ephemeral` markers; deterministic hits
+    /// at 10% input price, 5-minute TTL renewed on hit, creation at 125%).
+    /// A HOST property — detected from `base_url` regardless of `cloud_kind`
+    /// — and overridable via `ModelConfig.extra["dashscope_explicit_cache"]`
+    /// (`"true"`/`"false"`, for custom proxies or opting out). Consumed by
+    /// `openai.rs::to_openai_request`, gated per-request by the
+    /// `prompt_cache_policy` metadata (same convention as `anthropic.rs`).
+    pub dashscope_explicit_cache: bool,
 }
 
 impl Compat {
@@ -134,6 +143,7 @@ impl Compat {
                 reasoning_via_field: true,
                 native_chat_api: false,
                 auth: AuthStyle::Bearer,
+                dashscope_explicit_cache: false,
             },
             CompatFamily::AnthropicCompat => Self {
                 family,
@@ -144,6 +154,7 @@ impl Compat {
                 reasoning_via_field: false,
                 native_chat_api: false,
                 auth: AuthStyle::XApiKey,
+                dashscope_explicit_cache: false,
             },
             CompatFamily::GeminiCompat => Self {
                 family,
@@ -154,6 +165,7 @@ impl Compat {
                 reasoning_via_field: false,
                 native_chat_api: false,
                 auth: AuthStyle::GoogleApiKey,
+                dashscope_explicit_cache: false,
             },
             CompatFamily::OllamaCompat => Self {
                 family,
@@ -164,6 +176,7 @@ impl Compat {
                 reasoning_via_field: true,
                 native_chat_api: true,
                 auth: AuthStyle::None,
+                dashscope_explicit_cache: false,
             },
         }
     }
@@ -174,6 +187,20 @@ impl Compat {
     /// `cloud_kind` wins (no url probing); otherwise host substrings decide.
     /// `provider_type::Local` is honored as Ollama regardless of host.
     pub fn detect(
+        base_url: &str,
+        cloud_kind: Option<CloudProviderKind>,
+        provider_type: ProviderType,
+    ) -> Self {
+        let mut compat = Self::detect_family(base_url, cloud_kind, provider_type);
+        // DashScope explicit cache is a HOST property, orthogonal to the
+        // protocol family / explicit cloud_kind — a bailian config that pins
+        // `cloud_kind: OpenAI` still speaks to a cache_control-capable
+        // endpoint. Applied after every family early-return path.
+        compat.dashscope_explicit_cache = is_dashscope_cache_host(base_url);
+        compat
+    }
+
+    fn detect_family(
         base_url: &str,
         cloud_kind: Option<CloudProviderKind>,
         provider_type: ProviderType,
@@ -217,14 +244,30 @@ impl Compat {
     /// Post-resolution view from a (possibly normalized) `ModelConfig`.
     ///
     /// Mirrors the old `create` match: `Local => Ollama`; `Cloud` +
-    /// `cloud_kind` decides (`None => OpenAI`).
+    /// `cloud_kind` decides (`None => OpenAI`). On top of url detection,
+    /// `extra["dashscope_explicit_cache"] = "true" | "false"` wins — the
+    /// escape hatch for custom proxies that do/don't speak the markers.
     pub fn from_config(config: &ModelConfig) -> Self {
-        Self::detect(
+        let mut compat = Self::detect(
             &config.resolved_url(),
             config.cloud_kind,
             config.provider_type,
-        )
+        );
+        if let Some(v) = config.extra.get("dashscope_explicit_cache") {
+            compat.dashscope_explicit_cache =
+                matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "on");
+        }
+        compat
     }
+}
+
+/// Whether `base_url` points at an Alibaba Model Studio / DashScope endpoint
+/// (`dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com`,
+/// `{workspace}.{region}.maas.aliyuncs.com`) — the OpenAI-compatible routes
+/// that accept anthropic-style `cache_control` explicit-cache markers.
+fn is_dashscope_cache_host(base_url: &str) -> bool {
+    let url = base_url.to_lowercase();
+    (url.contains("dashscope") && url.contains("aliyuncs.com")) || url.contains("maas.aliyuncs.com")
 }
 
 impl Default for Compat {
@@ -452,6 +495,70 @@ mod tests {
         assert_eq!(
             Compat::default_for(CompatFamily::OllamaCompat).auth,
             AuthStyle::None
+        );
+    }
+
+    // ── DashScope explicit-cache detection ─────────────────────────────────
+
+    #[test]
+    fn detect_dashscope_host_sets_explicit_cache_flag() {
+        let c = Compat::detect(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            None,
+            ProviderType::Cloud,
+        );
+        assert_eq!(c.family, CompatFamily::OpenAICompat);
+        assert!(c.dashscope_explicit_cache);
+    }
+
+    #[test]
+    fn detect_maas_aliyuncs_sets_explicit_cache_flag() {
+        let c = Compat::detect(
+            "https://ws-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            None,
+            ProviderType::Cloud,
+        );
+        assert!(c.dashscope_explicit_cache);
+    }
+
+    #[test]
+    fn detect_dashscope_flag_survives_explicit_cloud_kind() {
+        // A bailian config that pins cloud_kind: OpenAI still gets the flag —
+        // it is a host property applied after the cloud_kind early return.
+        let c = Compat::detect(
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            Some(CloudProviderKind::OpenAI),
+            ProviderType::Cloud,
+        );
+        assert!(c.dashscope_explicit_cache);
+    }
+
+    #[test]
+    fn detect_non_dashscope_openai_compat_clears_flag() {
+        let c = Compat::detect("https://api.openai.com/v1", None, ProviderType::Cloud);
+        assert!(!c.dashscope_explicit_cache);
+        let d = Compat::detect("https://api.deepseek.com/v1", None, ProviderType::Cloud);
+        assert!(!d.dashscope_explicit_cache);
+    }
+
+    #[test]
+    fn extra_flag_overrides_detection() {
+        let mut config = cfg("https://dashscope.aliyuncs.com/compatible-mode/v1");
+        config
+            .extra
+            .insert("dashscope_explicit_cache".to_string(), "false".to_string());
+        assert!(
+            !Compat::from_config(&config).dashscope_explicit_cache,
+            "extra=false must opt out on a detected DashScope host"
+        );
+
+        let mut proxy = cfg("https://my-proxy.example.com/v1");
+        proxy
+            .extra
+            .insert("dashscope_explicit_cache".to_string(), "true".to_string());
+        assert!(
+            Compat::from_config(&proxy).dashscope_explicit_cache,
+            "extra=true must opt in for a custom proxy"
         );
     }
 

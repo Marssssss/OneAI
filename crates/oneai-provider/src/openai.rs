@@ -50,6 +50,55 @@ fn fnv1a(data: &[u8]) -> u64 {
     hash
 }
 
+/// Attach an anthropic-style `cache_control: {"type":"ephemeral"}` marker to an
+/// already-serialized OpenAI message (DashScope explicit cache). String content
+/// is upgraded to a single-text-part array — the shape Model Studio's own
+/// OpenAI-compat examples use; multipart (vision) content gets the marker on
+/// its LAST text part. Returns false when there is nowhere to put the marker
+/// (null / absent content, or a multipart array without any text part).
+fn attach_cache_control(msg: &mut Value) -> bool {
+    let Some(content) = msg.get_mut("content") else {
+        return false;
+    };
+    match content {
+        Value::String(text) => {
+            let text = std::mem::take(text);
+            *content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+            true
+        }
+        Value::Array(parts) => {
+            let Some(text_part) = parts
+                .iter_mut()
+                .rev()
+                .find(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+            else {
+                return false;
+            };
+            text_part["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Plain-text view of a serialized wire `content` field (string or multipart
+/// array) — keeps the cache-diag hash stable across the string↔array upgrade.
+fn wire_content_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 impl OpenAIProvider {
     /// Create a new OpenAI provider with the given configuration.
     ///
@@ -119,6 +168,11 @@ impl OpenAIProvider {
     /// Convert an InferenceRequest to OpenAI API format.
     fn to_openai_request(&self, req: &InferenceRequest) -> Value {
         let mut messages = Vec::new();
+        // Wire index of the last message eligible to carry the DashScope
+        // explicit-cache rolling checkpoint (durable, text-bearing, not the
+        // volatile tail). Tracked during serialization because the
+        // `oneai_volatile_tail` metadata tag does not survive to the wire JSON.
+        let mut rolling_cache_idx: Option<usize> = None;
         // Coalesce adjacent system messages (context sources / pinned blocks are
         // each their own `Message::system`) into one `system` block per region so
         // the wire request doesn't carry N per-turn system blocks.
@@ -269,7 +323,67 @@ impl OpenAIProvider {
                 }
             }
 
+            // Rolling explicit-cache checkpoint candidate: the LAST durable,
+            // text-bearing, non-tool message. The volatile tail is skipped — a
+            // cache block ending inside per-iteration bytes can never
+            // prefix-match the next request (pure creation cost, zero hits) —
+            // and tool-role messages are skipped because the compat-mode
+            // serializer emits their content as a bare string and markers on
+            // tool results are not live-verified against Model Studio.
+            let is_volatile_tail = msg
+                .metadata
+                .contains_key(oneai_core::VOLATILE_TAIL_METADATA_KEY);
+            if !is_volatile_tail
+                && msg.role != Role::Tool
+                && openai_msg.get("content").is_some_and(|c| !c.is_null())
+            {
+                rolling_cache_idx = Some(messages.len());
+            }
+
             messages.push(openai_msg);
+        }
+
+        // ─── DashScope explicit prompt-cache markers ──────────────────────────
+        // Anthropic-style `cache_control: ephemeral` on the OpenAI-compat wire,
+        // honored by Alibaba Model Studio (dashscope / *.maas.aliyuncs.com):
+        // deterministic hits at 10% of input price, 5-minute TTL renewed on
+        // every hit, creation at 125%. Two markers (budget is 4; blocks need
+        // ≥1024 tokens and hits look back ≤20 content blocks):
+        //   1. the system message — pins the tools+system prefix (Model Studio
+        //      folds tool definitions into the system cache and ignores markers
+        //      on tools themselves, so no tool marker is emitted);
+        //   2. the rolling durable checkpoint tracked above — advances through
+        //      tool loops and turns so the growing history stays re-cacheable.
+        // Gated by the same `prompt_cache_policy` metadata convention as
+        // anthropic.rs (replay harnesses set it to "off" for no-cache
+        // baselines). Non-DashScope OpenAI-compat endpoints (vLLM, LM Studio,
+        // 智谱, …) never see markers — the compat flag is host-detected.
+        if self.compat.dashscope_explicit_cache
+            && req
+                .metadata
+                .get("prompt_cache_policy")
+                .map(|v| v != "off")
+                .unwrap_or(true)
+        {
+            let system_idx = messages
+                .iter()
+                .position(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
+            let mut marked = 0usize;
+            if let Some(i) = system_idx {
+                if attach_cache_control(&mut messages[i]) {
+                    marked += 1;
+                }
+            }
+            if let Some(i) = rolling_cache_idx {
+                if system_idx != Some(i) && attach_cache_control(&mut messages[i]) {
+                    marked += 1;
+                }
+            }
+            tracing::debug!(
+                "cache-diag: dashscope explicit cache markers={marked} (system@{:?}, rolling@{:?})",
+                system_idx,
+                rolling_cache_idx,
+            );
         }
 
         let mut body = serde_json::json!({
@@ -367,8 +481,8 @@ impl OpenAIProvider {
             .and_then(|m| m.as_array())
             .and_then(|a| a.first())
             .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
+            .map(wire_content_text)
+            .unwrap_or_default();
         let tools_json = body.get("tools").map(|t| t.to_string()).unwrap_or_default();
         tracing::info!(
             "cache-diag: sys_chars={} sys_hash={:016x} tools_count={} tools_hash={:016x}",
@@ -1827,6 +1941,228 @@ mod tests {
         let body = provider.to_openai_request(&req);
         let content = &body["messages"][0]["content"];
         assert_eq!(content, &Value::String("plain text turn".to_string()));
+    }
+
+    // ─── DashScope explicit prompt-cache markers ──────────────────────────
+
+    fn dashscope_provider() -> OpenAIProvider {
+        OpenAIProvider::new(ModelConfig {
+            api_key: Some("test-key".to_string()),
+            base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+            model_name: Some("qwen3.8-flash".to_string()),
+            ..ModelConfig::default()
+        })
+        .retry_config(ProviderRetryConfig::no_retry())
+    }
+
+    fn dashscope_request(conv: Conversation, policy: Option<&str>) -> InferenceRequest {
+        let mut metadata = HashMap::new();
+        if let Some(p) = policy {
+            metadata.insert("prompt_cache_policy".to_string(), p.to_string());
+        }
+        InferenceRequest {
+            conversation: conv,
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata,
+        }
+    }
+
+    /// A volatile merged tail message, exactly as the agent loop's
+    /// `merge_tail_into_single_message` emits it.
+    fn volatile_tail() -> Message {
+        let mut tail = Message::user("[Context: date] today\n\n[Context: environment] mac");
+        tail.metadata.insert(
+            oneai_core::VOLATILE_TAIL_METADATA_KEY.to_string(),
+            "1".to_string(),
+        );
+        tail
+    }
+
+    /// Typical tool-loop wire shape: system, question, assistant(tool_call,
+    /// content=null), tool result, volatile tail.
+    fn tool_loop_conv() -> Conversation {
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("You are an agent."));
+        conv.add_message(Message::user("question"));
+        conv.add_message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                args: "{}".to_string(),
+            }],
+            metadata: HashMap::new(),
+        });
+        conv.add_message(Message::tool_result(
+            "c1".to_string(),
+            "file body".to_string(),
+        ));
+        conv.add_message(volatile_tail());
+        conv
+    }
+
+    fn has_cache_control(msg: &Value) -> bool {
+        match msg.get("content") {
+            Some(Value::Array(parts)) => parts.iter().any(|p| p.get("cache_control").is_some()),
+            _ => false,
+        }
+    }
+
+    fn content_is_string(msg: &Value) -> bool {
+        matches!(msg.get("content"), Some(Value::String(_)))
+    }
+
+    #[test]
+    fn dashscope_explicit_cache_marks_system_and_last_durable_message() {
+        let body =
+            dashscope_provider().to_openai_request(&dashscope_request(tool_loop_conv(), None));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 5);
+        // System carries marker 1 (pins tools+system prefix).
+        assert!(has_cache_control(&messages[0]), "system must be marked");
+        // Marker 2 lands on the LAST DURABLE text message (the question at
+        // index 1): the null-content assistant, the tool result and the
+        // volatile tail are all ineligible.
+        assert!(
+            has_cache_control(&messages[1]),
+            "last durable text message must carry the rolling marker"
+        );
+        // Exactly two markers (Model Studio budget is 4).
+        let marked = messages.iter().filter(|m| has_cache_control(m)).count();
+        assert_eq!(marked, 2, "exactly system + rolling markers");
+        // The upgraded shape is a single text part with the ephemeral marker.
+        let part = &messages[0]["content"][0];
+        assert_eq!(part["type"], "text");
+        assert_eq!(part["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn dashscope_marker_skips_volatile_tail_and_tool_messages() {
+        let body =
+            dashscope_provider().to_openai_request(&dashscope_request(tool_loop_conv(), None));
+        let messages = body["messages"].as_array().unwrap();
+        // Volatile tail stays a plain string — a cache block ending inside
+        // per-iteration bytes can never prefix-match the next request.
+        assert!(
+            content_is_string(&messages[4]),
+            "volatile tail must not be marked or upgraded"
+        );
+        // Tool-role messages stay plain strings too (markers on tool results
+        // are not live-verified against Model Studio).
+        assert!(
+            content_is_string(&messages[3]),
+            "tool result must not be marked"
+        );
+        // Null-content assistant (tool_calls only) is untouched.
+        assert!(messages[2]["content"].is_null());
+    }
+
+    #[test]
+    fn dashscope_rolling_marker_follows_latest_assistant_text() {
+        // When the loop has produced assistant text after the tool result,
+        // the rolling checkpoint advances to it.
+        let mut conv = tool_loop_conv();
+        conv.messages.pop(); // drop tail
+        conv.add_message(Message::assistant("final answer text"));
+        conv.add_message(volatile_tail());
+        let body = dashscope_provider().to_openai_request(&dashscope_request(conv, None));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        assert!(
+            has_cache_control(&messages[4]),
+            "rolling marker must sit on the assistant text, got {:?}",
+            messages[4]
+        );
+        assert!(
+            content_is_string(&messages[1]),
+            "question no longer last durable"
+        );
+    }
+
+    #[test]
+    fn dashscope_cache_control_respects_prompt_cache_policy_off() {
+        let body = dashscope_provider()
+            .to_openai_request(&dashscope_request(tool_loop_conv(), Some("off")));
+        let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages.iter().all(|m| !has_cache_control(m)),
+            "policy=off must suppress all markers (replay baseline)"
+        );
+        assert!(
+            content_is_string(&messages[0]),
+            "system stays a plain string"
+        );
+    }
+
+    #[test]
+    fn non_dashscope_openai_compat_never_adds_cache_control() {
+        // Same conversation through an api.openai.com provider: implicit
+        // caching only — markers would be unknown fields for most
+        // OpenAI-compat endpoints.
+        let body = make_provider().to_openai_request(&dashscope_request(tool_loop_conv(), None));
+        let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages.iter().all(|m| !has_cache_control(m)),
+            "non-DashScope routes must never see cache_control"
+        );
+        assert!(content_is_string(&messages[0]));
+    }
+
+    #[test]
+    fn dashscope_multimodal_message_marks_text_part() {
+        // A vision message eligible for the rolling marker: the marker rides
+        // on the text part, never the image part.
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("You are an agent."));
+        conv.add_message(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is in this image?".to_string(),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/png".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            ],
+            metadata: HashMap::new(),
+        });
+        conv.add_message(volatile_tail());
+        let body = dashscope_provider().to_openai_request(&dashscope_request(conv, None));
+        let messages = body["messages"].as_array().unwrap();
+        let parts = messages[1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("cache_control").is_some(), "text part marked");
+        assert!(
+            parts[1].get("cache_control").is_none(),
+            "image part must not carry the marker"
+        );
+    }
+
+    #[test]
+    fn dashscope_explicit_cache_opt_out_via_extra() {
+        // Custom kill-switch: extra["dashscope_explicit_cache"]="false" on a
+        // detected DashScope host.
+        let provider = OpenAIProvider::new(ModelConfig {
+            api_key: Some("test-key".to_string()),
+            base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+            model_name: Some("qwen3.8-flash".to_string()),
+            extra: HashMap::from([("dashscope_explicit_cache".to_string(), "false".to_string())]),
+            ..ModelConfig::default()
+        })
+        .retry_config(ProviderRetryConfig::no_retry());
+        let body = provider.to_openai_request(&dashscope_request(tool_loop_conv(), None));
+        let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages.iter().all(|m| !has_cache_control(m)),
+            "extra=false must opt out"
+        );
     }
 }
 
